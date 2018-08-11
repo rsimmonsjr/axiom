@@ -32,5 +32,9 @@ Based on previous experience with other actor models I wanted to design RAMP aro
    be processed in the order received except in the case where the actor does not process the message. In certain
    circumstances an actor will enter a state in which it needs to suspend processing of some messages and start 
    processing other messages. This means the channel to the actor needs to support look-ahead to get the messages
-   being processed rather than taking messages in pure FIFO order. 
+   being processed rather than taking messages in pure FIFO order. Consider a situation where the customer actor 
+   gets a message to execute a process such as a purchase and the process of the purchase requires messages from 
+   other actors. In this situation if another purchase message arrives the actor will skip the message until the
+   purchase is finished in order to avoid doing two purchases concurrently and then when the purchase is done, the
+   dispatcher will pick up the next purchase.
    

@@ -11,14 +11,23 @@ use std::sync::Mutex;
 /// This is a type used by the system for sending a message through a channel to the actor.
 type Message = dyn Any + Sync + Send;
 
-/// This is a macro that makes it easier to write a dispatch function.
-#[macro_export]
-macro_rules! dispatch {
-    ($state:expr, $message:expr, $($func:expr),*) => {
-        None
-        $(.or_else(|| dispatch($state, $message.clone(), $func)))*
-        .unwrap()
-    }
+/// A kind of function used to dispatch a message to a processor.
+pub trait Dispatcher: FnMut(Arc<Message>) -> DispatchResult {}
+
+/// Implements the dispatcher trait for all variants of functions with the right signature.
+impl<F: FnMut(Arc<Message>) -> DispatchResult> Dispatcher for F {}
+
+/// A result returned by the dispatch function that indicates the disposition of the message.
+pub enum DispatchResult {
+    /// The message was processed and can be removed from the queue.
+    Processed,
+    /// The message was not processed and can be removed from the queue.
+    Ignore,
+    /// The message was skipped and should remain in the queue and the dequeue should loop
+    /// to fetch the next pending message.
+    Skip,
+    /// The message generated an error of some kind and a panic should occur.
+    Panic,
 }
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
@@ -36,8 +45,31 @@ pub fn dispatch<T: 'static, S, R>(
     }
 }
 
-/// An actor.
-pub struct Actor<F: FnMut(Arc<Message>)> {
+/// This is a macro that makes it easier to write a Dispatcher function.
+// FIXME integrate default into this macro to return the dispatch result type.
+#[macro_export]
+macro_rules! dispatch {
+    ($state:expr, $message:expr, $default:expr, $($func:expr),*) => {
+        None
+        $(.or_else(|| dispatch($state, $message.clone(), $func)))*
+        .unwrap()
+    }
+}
+
+/// A dispatcher that ignores all messages.
+pub fn ignore_dispatcher(_msg: Arc<Message>) -> DispatchResult {
+    DispatchResult::Ignore
+}
+
+/// A dispatcher that panics on any message.
+pub fn panic_dispatcher(_msg: Arc<Message>) -> DispatchResult {
+    DispatchResult::Panic
+}
+
+/// This is the core Actor type in the actor system. The user should see the `README.md` for
+/// a detailed description of an actor and the Actor model.
+pub struct Actor<F: Dispatcher> {
+    // FIXME turn the docs into something we can gen with cargo
     /// The transmit side of the channel to use to send messages to the actor.
     tx: Sender<Arc<Message>>,
     /// The receiver part of the channel being sent to the actor.
@@ -50,12 +82,13 @@ pub struct Actor<F: FnMut(Arc<Message>)> {
     received: AtomicUsize,
     /// The count of the number of messages currently pending in the actor's channel.
     pending: AtomicUsize,
+    // TODO Add the ability to track execution time in min/mean/max/std_deviation
 }
 
-impl<F: FnMut(Arc<Message>)> Actor<F> {
+impl<F: Dispatcher> Actor<F> {
     /// Creates a new Actor using the given initial state and the handler for processing
     /// messages sent to that actor.
-    // FIXME A new kind of channel is needed to support skipping messages for only messages?
+    // FIXME A new kind of channel is needed to support skipping messages and should be integrated into the actor.
     pub fn new(dispatcher: F) -> Actor<F> {
         let (tx, rx) = mpsc::channel::<Arc<Message>>();
         Actor {
@@ -68,26 +101,20 @@ impl<F: FnMut(Arc<Message>)> Actor<F> {
         }
     }
 
-    /// Tell the actor a message.
+    /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
+    /// if the user wants to retain the message they should clone the `Arc` before calling this
+    /// function.
     pub fn send(&mut self, message: Arc<Message>) {
         &self.tx.send(message).unwrap();
-        // fixme put these two swaps in a loop for efficiency.
-        loop {
-            let old = self.sent.load(Ordering::Relaxed);
-            if old == self.sent.compare_and_swap(old, old + 1, Ordering::Relaxed) {
-                break;
-            }
-        }
-        loop {
-            let old = self.pending.load(Ordering::Relaxed);
-            if old == self.pending.compare_and_swap(old, old + 1, Ordering::Relaxed) {
-                break;
-            }
-        }
+        self.sent.fetch_add(1, Ordering::Relaxed);
+        self.pending.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Receives the message on the actor and calls the dispatcher for that actor.
+    /// Receives the message on the actor and calls the dispatcher for that actor. This function
+    /// will be typically called by the scheduler to process messages in the actor's channel.
     pub fn receive(&mut self) {
+        // FIXME We have to change this to enable message skipping according to the dispatcher.
+
         // first we get the lock so that no other thread can receive at the same time.
         let rx = self.rx.lock().unwrap();
         // now fetch the message from the channel.
@@ -95,18 +122,8 @@ impl<F: FnMut(Arc<Message>)> Actor<F> {
         // dispatch the message to the handler
         (self.dispatcher)(message);
         // reduce the pending count and increase the received count.
-        loop {
-            let old = self.received.load(Ordering::Relaxed);
-            if old == self.received.compare_and_swap(old, old + 1, Ordering::Relaxed) {
-                break;
-            }
-        }
-        loop {
-            let old = self.pending.load(Ordering::Relaxed);
-            if old == self.pending.compare_and_swap(old, old - 1, Ordering::Relaxed) {
-                break;
-            }
-        }
+        self.received.fetch_add(1, Ordering::Relaxed);
+        self.pending.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Returns the total number of messages that have been sent to this actor.
@@ -123,7 +140,6 @@ impl<F: FnMut(Arc<Message>)> Actor<F> {
     pub fn pending(&self) -> usize {
         self.pending.load(Ordering::Relaxed)
     }
-
 }
 
 /// An enum that defines an actor message. This enum contains system messages as well as
@@ -163,16 +179,18 @@ mod tests {
 
     impl Counter {
         /// Handles a message that is just an i32.
-        fn handle_i32(&mut self, message: &i32) {
+        fn handle_i32(&mut self, message: &i32) -> DispatchResult {
             self.count += *message;
+            DispatchResult::Processed
         }
 
         /// Handles an enum message.
-        fn handle_op(&mut self, message: &Operation) {
+        fn handle_op(&mut self, message: &Operation) -> DispatchResult {
             match *message {
                 Operation::Inc => self.count += 1,
                 Operation::Dec => self.count -= 1,
             }
+            DispatchResult::Processed
         }
     }
 
@@ -183,13 +201,15 @@ mod tests {
             let mut state = Counter { count: 0 };
             let mut msg_count = 0;
 
-            move |msg| {
+            move |msg: Arc<Message>| {
                 // dispatch to the handlers or panic.
-                dispatch(&mut state, msg.clone(), Counter::handle_i32)
+                let v = dispatch(&mut state, msg.clone(), Counter::handle_i32)
                     .or_else(|| dispatch(&mut state, msg.clone(), Counter::handle_op))
+                    .or(Some(DispatchResult::Panic))
                     .unwrap();
                 msg_count += 1;
                 println!("{}: {}", msg_count, state.count);
+                v
             }
         });
 
