@@ -36,34 +36,20 @@ pub fn dispatch<T: 'static, S, R>(
     }
 }
 
-/// Processes messages received by an actor.
-pub struct ActorReceiver<F: FnMut(Arc<Message>)> {
-    /// The receiver part of the channel being sent to the actor.
-    rx: Receiver<Arc<Message>>,
-    /// The dispatcher function to be used to dispatch messages.
-    dispatcher: F,
-}
-
-impl<F: FnMut(Arc<Message>)> ActorReceiver<F> {
-    /// Receives the message on the actor and calls the dispatcher for that actor.
-    pub fn receive(&mut self) {
-        let message = self.rx.recv().unwrap();
-        (self.dispatcher)(message);
-    }
-}
-
 /// An actor.
 pub struct Actor<F: FnMut(Arc<Message>)> {
     /// The transmit side of the channel to use to send messages to the actor.
     tx: Sender<Arc<Message>>,
+    /// The receiver part of the channel being sent to the actor.
+    rx: Mutex<Receiver<Arc<Message>>>,
+    /// The dispatcher function to be used to dispatch messages.
+    dispatcher: F,
     /// The count of the number of messages that have been sent to the actor.
     sent: AtomicUsize,
     /// The count of the number of messages that have been received by the actor.
     received: AtomicUsize,
     /// The count of the number of messages currently pending in the actor's channel.
     pending: AtomicUsize,
-    #[allow(dead_code)] // fixme remove after implementing dispatcher
-    receiver: Mutex<ActorReceiver<F>>,
 }
 
 impl<F: FnMut(Arc<Message>)> Actor<F> {
@@ -72,16 +58,54 @@ impl<F: FnMut(Arc<Message>)> Actor<F> {
     // FIXME A new kind of channel is needed to support skipping messages for only messages?
     pub fn new(dispatcher: F) -> Actor<F> {
         let (tx, rx) = mpsc::channel::<Arc<Message>>();
-        let processor = ActorReceiver {
-            rx,
-            dispatcher,
-        };
         Actor {
             tx,
+            rx: Mutex::new(rx),
+            dispatcher,
             sent: AtomicUsize::new(0),
             received: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
-            receiver: Mutex::new(processor),
+        }
+    }
+
+    /// Tell the actor a message.
+    pub fn send(&mut self, message: Arc<Message>) {
+        &self.tx.send(message).unwrap();
+        // fixme put these two swaps in a loop for efficiency.
+        loop {
+            let old = self.sent.load(Ordering::Relaxed);
+            if old == self.sent.compare_and_swap(old, old + 1, Ordering::Relaxed) {
+                break;
+            }
+        }
+        loop {
+            let old = self.pending.load(Ordering::Relaxed);
+            if old == self.pending.compare_and_swap(old, old + 1, Ordering::Relaxed) {
+                break;
+            }
+        }
+    }
+
+    /// Receives the message on the actor and calls the dispatcher for that actor.
+    pub fn receive(&mut self) {
+        // first we get the lock so that no other thread can receive at the same time.
+        let rx = self.rx.lock().unwrap();
+        // now fetch the message from the channel.
+        let message = rx.recv().unwrap();
+        // dispatch the message to the handler
+        (self.dispatcher)(message);
+        // reduce the pending count and increase the received count.
+        loop {
+            let old = self.received.load(Ordering::Relaxed);
+            if old == self.received.compare_and_swap(old, old + 1, Ordering::Relaxed) {
+                break;
+            }
+        }
+        loop {
+            let old = self.pending.load(Ordering::Relaxed);
+            if old == self.pending.compare_and_swap(old, old - 1, Ordering::Relaxed) {
+                break;
+            }
         }
     }
 
@@ -100,25 +124,6 @@ impl<F: FnMut(Arc<Message>)> Actor<F> {
         self.pending.load(Ordering::Relaxed)
     }
 
-    /// Tell the actor a message.
-    pub fn tell(&self, message: Arc<Message>) {
-        &self.tx.send(message).unwrap();
-        // fixme put these two swaps in a loop for efficiency.
-        loop {
-            println!("loop");
-            let old = self.sent.load(Ordering::Relaxed);
-            if old == self.sent.compare_and_swap(old, old + 1, Ordering::Relaxed) {
-                break;
-            }
-        }
-        loop {
-            println!("loop2");
-            let old = self.pending.load(Ordering::Relaxed);
-            if old == self.pending.compare_and_swap(old, old + 1, Ordering::Relaxed) {
-                break;
-            }
-        }
-    }
 }
 
 /// An enum that defines an actor message. This enum contains system messages as well as
@@ -173,8 +178,8 @@ mod tests {
 
     #[test]
     fn test_actor_dispatch() {
-        // Create a new actor that holds its state by handing it a handler.
-        let actor = Actor::new({
+        // FIXME I am not sure the actor has to be mutable.
+        let mut actor = Actor::new({
             let mut state = Counter { count: 0 };
             let mut msg_count = 0;
 
@@ -189,20 +194,23 @@ mod tests {
         });
 
         // Send the actor we created some messages.
-        actor.tell(Arc::new(Operation::Inc));
-        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
-        actor.tell(Arc::new(Operation::Inc));
-        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
-        actor.tell(Arc::new(Operation::Dec));
-        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
-        actor.tell(Arc::new(10 as i32));
-        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
+        actor.send(Arc::new(Operation::Inc));
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        actor.send(Arc::new(Operation::Inc));
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        actor.send(Arc::new(Operation::Dec));
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        actor.send(Arc::new(10 as i32));
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
 
         // The scheduler would normally do this but we want to test just the dispatch paradigm.
-        let mut processor = actor.receiver.lock().unwrap();
-        processor.receive();
-        processor.receive();
-        processor.receive();
-        processor.receive();
+        actor.receive();
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        actor.receive();
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        actor.receive();
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        actor.receive();
+        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
     }
 }
