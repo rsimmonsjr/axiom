@@ -1,9 +1,10 @@
 use std::any::Any;
 use std::marker::Send;
 use std::marker::Sync;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
 use std::sync::Mutex;
 //use uuid::Uuid;
 
@@ -53,9 +54,16 @@ impl<F: FnMut(Arc<Message>)> ActorReceiver<F> {
 
 /// An actor.
 pub struct Actor<F: FnMut(Arc<Message>)> {
+    /// The transmit side of the channel to use to send messages to the actor.
     tx: Sender<Arc<Message>>,
+    /// The count of the number of messages that have been sent to the actor.
+    sent: AtomicUsize,
+    /// The count of the number of messages that have been received by the actor.
+    received: AtomicUsize,
+    /// The count of the number of messages currently pending in the actor's channel.
+    pending: AtomicUsize,
     #[allow(dead_code)] // fixme remove after implementing dispatcher
-    processor: Mutex<ActorReceiver<F>>,
+    receiver: Mutex<ActorReceiver<F>>,
 }
 
 impl<F: FnMut(Arc<Message>)> Actor<F> {
@@ -64,16 +72,52 @@ impl<F: FnMut(Arc<Message>)> Actor<F> {
     // FIXME A new kind of channel is needed to support skipping messages for only messages?
     pub fn new(dispatcher: F) -> Actor<F> {
         let (tx, rx) = mpsc::channel::<Arc<Message>>();
-        let processor = ActorReceiver { rx, dispatcher };
+        let processor = ActorReceiver {
+            rx,
+            dispatcher,
+        };
         Actor {
             tx,
-            processor: Mutex::new(processor),
+            sent: AtomicUsize::new(0),
+            received: AtomicUsize::new(0),
+            pending: AtomicUsize::new(0),
+            receiver: Mutex::new(processor),
         }
+    }
+
+    /// Returns the total number of messages that have been sent to this actor.
+    pub fn sent(&self) -> usize {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total number of messages that have been received by this actor.
+    pub fn received(&self) -> usize {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total number of messages that have been received by this actor.
+    pub fn pending(&self) -> usize {
+        self.pending.load(Ordering::Relaxed)
     }
 
     /// Tell the actor a message.
     pub fn tell(&self, message: Arc<Message>) {
         &self.tx.send(message).unwrap();
+        // fixme put these two swaps in a loop for efficiency.
+        loop {
+            println!("loop");
+            let old = self.sent.load(Ordering::Relaxed);
+            if old == self.sent.compare_and_swap(old, old + 1, Ordering::Relaxed) {
+                break;
+            }
+        }
+        loop {
+            println!("loop2");
+            let old = self.pending.load(Ordering::Relaxed);
+            if old == self.pending.compare_and_swap(old, old + 1, Ordering::Relaxed) {
+                break;
+            }
+        }
     }
 }
 
@@ -93,6 +137,9 @@ pub enum ClusterActorMessage {
     /// Indicates that a node in the cluster has gone down.
     NodeDown,
 }
+
+
+// --------------------- Test Cases ---------------------
 
 #[cfg(test)]
 mod tests {
@@ -143,12 +190,16 @@ mod tests {
 
         // Send the actor we created some messages.
         actor.tell(Arc::new(Operation::Inc));
+        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
         actor.tell(Arc::new(Operation::Inc));
+        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
         actor.tell(Arc::new(Operation::Dec));
+        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
         actor.tell(Arc::new(10 as i32));
+        println!("pending: {}, sent: {}", actor.pending(), actor.sent());
 
         // The scheduler would normally do this but we want to test just the dispatch paradigm.
-        let mut processor = actor.processor.lock().unwrap();
+        let mut processor = actor.receiver.lock().unwrap();
         processor.receive();
         processor.receive();
         processor.receive();
