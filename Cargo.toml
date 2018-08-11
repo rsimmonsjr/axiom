@@ -1,0 +1,10 @@
+[package]
+name = "rlib_actors"
+version = "0.1.0"
+authors = ["Robert Simmons <robert.simmons@victiv.com>"]
+
+[dependencies]
+uuid = "0.6"
+lazy_static = "1.0.2"
+
+
