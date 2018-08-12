@@ -120,7 +120,7 @@ impl<F: Dispatcher> Actor<F> {
         // now fetch the message from the channel.
         let message = rx.recv().unwrap();
         // dispatch the message to the handler
-        (self.dispatcher)(message);
+        (self.dispatcher)(message.clone());
         // reduce the pending count and increase the received count.
         self.received.fetch_add(1, Ordering::Relaxed);
         self.pending.fetch_sub(1, Ordering::Relaxed);
@@ -192,45 +192,50 @@ mod tests {
             }
             DispatchResult::Processed
         }
+
+        /// Dispatcher function.
+        pub fn dispatch(&mut self, msg: Arc<Message>) -> DispatchResult {
+            dispatch(self, msg.clone(), Counter::handle_i32)
+                .or_else(|| dispatch(self, msg.clone(), Counter::handle_op))
+                .unwrap_or(DispatchResult::Panic)
+        }
     }
 
     #[test]
     fn test_actor_dispatch() {
         // FIXME I am not sure the actor has to be mutable.
-        let mut actor = Actor::new({
-            let mut state = Counter { count: 0 };
-            let mut msg_count = 0;
+        let state = Arc::new(Mutex::new(Counter { count: 0 }));
 
-            move |msg: Arc<Message>| {
+        let state2 = state.clone();
+        let mut actor = Actor::new({
+            |msg: Arc<Message>| {
                 // dispatch to the handlers or panic.
-                let v = dispatch(&mut state, msg.clone(), Counter::handle_i32)
-                    .or_else(|| dispatch(&mut state, msg.clone(), Counter::handle_op))
-                    .or(Some(DispatchResult::Panic))
-                    .unwrap();
-                msg_count += 1;
-                println!("{}: {}", msg_count, state.count);
-                v
+                let mut v = state2.lock().unwrap();
+                dispatch(&mut *v, msg.clone(), Counter::handle_i32)
+                    .or_else(|| dispatch(&mut *v, msg.clone(), Counter::handle_op))
+                    .unwrap_or(DispatchResult::Panic)
             }
         });
 
         // Send the actor we created some messages.
+        assert!(actor.pending() == 0 && actor.sent() == 0 && actor.received() == 0 && state.lock().unwrap().count == 0);
         actor.send(Arc::new(Operation::Inc));
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 1 && actor.sent() == 1 && actor.received() == 0 && state.lock().unwrap().count == 0);
         actor.send(Arc::new(Operation::Inc));
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 2 && actor.sent() == 2 && actor.received() == 0 && state.lock().unwrap().count == 0);
         actor.send(Arc::new(Operation::Dec));
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 3 && actor.sent() == 3 && actor.received() == 0 && state.lock().unwrap().count == 0);
         actor.send(Arc::new(10 as i32));
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 4 && actor.sent() == 4 && actor.received() == 0 && state.lock().unwrap().count == 0);
 
-        // The scheduler would normally do this but we want to test just the dispatch paradigm.
+        // Receive messages on the actor.
         actor.receive();
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 3 && actor.sent() == 4 && actor.received() == 1 && state.lock().unwrap().count == 1);
         actor.receive();
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 2 && actor.sent() == 4 && actor.received() == 2 && state.lock().unwrap().count == 2);
         actor.receive();
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 1 && actor.sent() == 4 && actor.received() == 3 && state.lock().unwrap().count == 1);
         actor.receive();
-        println!("pending: {}, sent: {}, received: {}", actor.pending(), actor.sent(), actor.received());
+        assert!(actor.pending() == 0 && actor.sent() == 4 && actor.received() == 4 && state.lock().unwrap().count == 11);
     }
 }
