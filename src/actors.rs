@@ -11,21 +11,29 @@ use std::sync::Mutex;
 /// This is a type used by the system for sending a message through a channel to the actor.
 type Message = dyn Any + Sync + Send;
 
-/// A kind of function used to dispatch a message to a processor.
-pub trait Dispatcher: FnMut(Arc<Message>) -> DispatchResult {}
+/// A trait for anything that can dispatch actor messages.
+pub trait Dispatcher {
+    /// Process the the message and return its status.
+    fn dispatch(&mut self, message: Arc<Message>) -> DispatchResult;
+}
 
-/// Implements the dispatcher trait for all variants of functions with the right signature.
-impl<F: FnMut(Arc<Message>) -> DispatchResult> Dispatcher for F {}
+/// Implements the Dispatcher trait for all funtions with the proper signature.
+impl<F: FnMut(Arc<Message>) -> DispatchResult> Dispatcher for F {
+    fn dispatch(&mut self, message: Arc<Message>) -> DispatchResult {
+        self(message)
+    }
+}
 
 /// A result returned by the dispatch function that indicates the disposition of the message.
+#[derive(Debug, Eq, PartialEq)]
 pub enum DispatchResult {
     /// The message was processed and can be removed from the queue.
     Processed,
     /// The message was not processed and can be removed from the queue.
-    Ignore,
+    Ignored,
     /// The message was skipped and should remain in the queue and the dequeue should loop
     /// to fetch the next pending message.
-    Skip,
+    Skipped,
     /// The message generated an error of some kind and a panic should occur.
     Panic,
 }
@@ -45,37 +53,16 @@ pub fn dispatch<T: 'static, S, R>(
     }
 }
 
-/// This is a macro that makes it easier to write a Dispatcher function.
-// FIXME integrate default into this macro to return the dispatch result type.
-#[macro_export]
-macro_rules! dispatch {
-    ($state:expr, $message:expr, $default:expr, $($func:expr),*) => {
-        None
-        $(.or_else(|| dispatch($state, $message.clone(), $func)))*
-        .unwrap()
-    }
-}
-
-/// A dispatcher that ignores all messages.
-pub fn ignore_dispatcher(_msg: Arc<Message>) -> DispatchResult {
-    DispatchResult::Ignore
-}
-
-/// A dispatcher that panics on any message.
-pub fn panic_dispatcher(_msg: Arc<Message>) -> DispatchResult {
-    DispatchResult::Panic
-}
-
 /// This is the core Actor type in the actor system. The user should see the `README.md` for
 /// a detailed description of an actor and the Actor model.
-pub struct Actor<F: Dispatcher> {
+pub struct Actor<T: Dispatcher> {
     // FIXME turn the docs into something we can gen with cargo
+    /// The implementation that will be processing the messages to this actor..
+    dispatcher: T,
     /// The transmit side of the channel to use to send messages to the actor.
     tx: Sender<Arc<Message>>,
     /// The receiver part of the channel being sent to the actor.
     rx: Mutex<Receiver<Arc<Message>>>,
-    /// The dispatcher function to be used to dispatch messages.
-    dispatcher: F,
     /// The count of the number of messages that have been sent to the actor.
     sent: AtomicUsize,
     /// The count of the number of messages that have been received by the actor.
@@ -85,11 +72,11 @@ pub struct Actor<F: Dispatcher> {
     // TODO Add the ability to track execution time in min/mean/max/std_deviation
 }
 
-impl<F: Dispatcher> Actor<F> {
+impl<T: Dispatcher> Actor<T> {
     /// Creates a new Actor using the given initial state and the handler for processing
     /// messages sent to that actor.
     // FIXME A new kind of channel is needed to support skipping messages and should be integrated into the actor.
-    pub fn new(dispatcher: F) -> Actor<F> {
+    pub fn new(dispatcher: T) -> Actor<T> {
         let (tx, rx) = mpsc::channel::<Arc<Message>>();
         Actor {
             tx,
@@ -114,13 +101,12 @@ impl<F: Dispatcher> Actor<F> {
     /// will be typically called by the scheduler to process messages in the actor's channel.
     pub fn receive(&mut self) {
         // FIXME We have to change this to enable message skipping according to the dispatcher.
-
         // first we get the lock so that no other thread can receive at the same time.
         let rx = self.rx.lock().unwrap();
         // now fetch the message from the channel.
         let message = rx.recv().unwrap();
         // dispatch the message to the handler
-        (self.dispatcher)(message.clone());
+        self.dispatcher.dispatch(message.clone());
         // reduce the pending count and increase the received count.
         self.received.fetch_add(1, Ordering::Relaxed);
         self.pending.fetch_sub(1, Ordering::Relaxed);
@@ -141,24 +127,6 @@ impl<F: Dispatcher> Actor<F> {
         self.pending.load(Ordering::Relaxed)
     }
 }
-
-/// An enum that defines an actor message. This enum contains system messages as well as
-/// a container for any other message that the user wishes to pass.
-#[derive(Debug)]
-pub enum SystemMessage {
-    /// UA system message used to tell an actor to stop itself.
-    Stop,
-}
-
-/// Messages sent by a cluster manager.
-#[derive(Debug)]
-pub enum ClusterActorMessage {
-    /// Indicates that a node in the cluster has come up.
-    NodeUp,
-    /// Indicates that a node in the cluster has gone down.
-    NodeDown,
-}
-
 
 // --------------------- Test Cases ---------------------
 
@@ -184,6 +152,16 @@ mod tests {
             DispatchResult::Processed
         }
 
+        /// Handles a message that is just an i32.
+        fn handle_f32(&mut self, _message: &f32) -> DispatchResult {
+            DispatchResult::Skipped
+        }
+
+        /// Handles a message that is just an i32.
+        fn handle_bool(&mut self, _message: &bool) -> DispatchResult {
+            DispatchResult::Ignored
+        }
+
         /// Handles an enum message.
         fn handle_op(&mut self, message: &Operation) -> DispatchResult {
             match *message {
@@ -192,50 +170,98 @@ mod tests {
             }
             DispatchResult::Processed
         }
+    }
 
+    impl Dispatcher for Counter {
         /// Dispatcher function.
-        pub fn dispatch(&mut self, msg: Arc<Message>) -> DispatchResult {
+        fn dispatch(&mut self, msg: Arc<Message>) -> DispatchResult {
             dispatch(self, msg.clone(), Counter::handle_i32)
                 .or_else(|| dispatch(self, msg.clone(), Counter::handle_op))
+                .or_else(|| dispatch(self, msg.clone(), Counter::handle_bool))
+                .or_else(|| dispatch(self, msg.clone(), Counter::handle_f32))
                 .unwrap_or(DispatchResult::Panic)
         }
     }
 
     #[test]
-    fn test_actor_dispatch() {
-        // FIXME I am not sure the actor has to be mutable.
-        let state = Arc::new(Mutex::new(Counter { count: 0 }));
+    fn test_dispatch() {
+        let mut state = Counter { count: 0 };
+        assert_eq!(DispatchResult::Processed, state.dispatch(Arc::new(Operation::Inc)));
+        assert_eq!(1, state.count);
+        assert_eq!(DispatchResult::Processed, state.dispatch(Arc::new(Operation::Inc)));
+        assert_eq!(2, state.count);
+        assert_eq!(DispatchResult::Processed, state.dispatch(Arc::new(Operation::Dec)));
+        assert_eq!(1, state.count);
+        assert_eq!(DispatchResult::Processed, state.dispatch(Arc::new(10 as i32)));
+        assert_eq!(10, state.count);
+        assert_eq!(DispatchResult::Ignored, state.dispatch(Arc::new(true)));
+        assert_eq!(10, state.count);
+        assert_eq!(DispatchResult::Skipped, state.dispatch(Arc::new(2.5 as f32)));
+        assert_eq!(10, state.count);
+        assert_eq!(DispatchResult::Panic, state.dispatch(Arc::new(String::from("oh no"))));
+        assert_eq!(10, state.count);
+    }
 
-        let state2 = state.clone();
-        let mut actor = Actor::new({
-            |msg: Arc<Message>| {
-                // dispatch to the handlers or panic.
-                let mut v = state2.lock().unwrap();
-                dispatch(&mut *v, msg.clone(), Counter::handle_i32)
-                    .or_else(|| dispatch(&mut *v, msg.clone(), Counter::handle_op))
-                    .unwrap_or(DispatchResult::Panic)
-            }
-        });
-
+    /// Helper that checks that the send and recive methods work for an actor.
+    fn assert_send_receive<T: Dispatcher>(actor: &mut Actor<T>) {
         // Send the actor we created some messages.
-        assert!(actor.pending() == 0 && actor.sent() == 0 && actor.received() == 0 && state.lock().unwrap().count == 0);
+        assert_eq!(actor.pending(), 0);
+        assert_eq!(actor.sent(), 0);
+        assert_eq!(actor.sent(), 0);
+        assert_eq!(actor.received(), 0);
         actor.send(Arc::new(Operation::Inc));
-        assert!(actor.pending() == 1 && actor.sent() == 1 && actor.received() == 0 && state.lock().unwrap().count == 0);
+        assert_eq!(actor.pending(), 1);
+        assert_eq!(actor.sent(), 1);
+        assert_eq!(actor.received(), 0);
         actor.send(Arc::new(Operation::Inc));
-        assert!(actor.pending() == 2 && actor.sent() == 2 && actor.received() == 0 && state.lock().unwrap().count == 0);
+        assert_eq!(actor.pending(), 2);
+        assert_eq!(actor.sent(), 2);
+        assert_eq!(actor.received(), 0);
         actor.send(Arc::new(Operation::Dec));
-        assert!(actor.pending() == 3 && actor.sent() == 3 && actor.received() == 0 && state.lock().unwrap().count == 0);
+        assert_eq!(actor.pending(), 3);
+        assert_eq!(actor.sent(), 3);
+        assert_eq!(actor.received(), 0);
         actor.send(Arc::new(10 as i32));
-        assert!(actor.pending() == 4 && actor.sent() == 4 && actor.received() == 0 && state.lock().unwrap().count == 0);
+        assert_eq!(actor.pending(), 4);
+        assert_eq!(actor.sent(), 4);
+        assert_eq!(actor.received(), 0);
 
         // Receive messages on the actor.
         actor.receive();
-        assert!(actor.pending() == 3 && actor.sent() == 4 && actor.received() == 1 && state.lock().unwrap().count == 1);
+        assert_eq!(actor.pending(), 3);
+        assert_eq!(actor.sent(), 4);
+        assert_eq!(actor.received(), 1);
         actor.receive();
-        assert!(actor.pending() == 2 && actor.sent() == 4 && actor.received() == 2 && state.lock().unwrap().count == 2);
+        assert_eq!(actor.pending(), 2);
+        assert_eq!(actor.sent(), 4);
+        assert_eq!(actor.received(), 2);
         actor.receive();
-        assert!(actor.pending() == 1 && actor.sent() == 4 && actor.received() == 3 && state.lock().unwrap().count == 1);
+        assert_eq!(actor.pending(), 1);
+        assert_eq!(actor.sent(), 4);
+        assert_eq!(actor.received(), 3);
         actor.receive();
-        assert!(actor.pending() == 0 && actor.sent() == 4 && actor.received() == 4 && state.lock().unwrap().count == 11);
+        assert_eq!(actor.pending(), 0);
+        assert_eq!(actor.sent(), 4);
+        assert_eq!(actor.received(), 4);
+    }
+
+    #[test]
+    fn test_create_struct_actor() {
+        // FIXME I am not sure the actor has to be mutable.
+        let counter = Counter { count: 0 };
+        let mut actor = Actor::new(counter);
+        assert_send_receive(&mut actor);
+    }
+
+    #[test]
+    fn test_create_closure_actor() {
+        let mut state = 0;
+        let d = |_m: Arc<Message>| {
+            state += 1;
+            DispatchResult::Processed
+        };
+
+        let mut actor = Actor::new(d);
+        assert_send_receive(&mut actor);
     }
 }
