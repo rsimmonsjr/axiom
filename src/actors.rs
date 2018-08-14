@@ -6,18 +6,31 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Mutex;
-//use uuid::Uuid;
 
 /// This is a type used by the system for sending a message through a channel to the actor.
-type Message = dyn Any + Sync + Send;
+/// All messages are sent as this type and it is up to the dispatcher to cast the message
+/// properly and deal with it. It is recommended that the user make use of the [`dispatch`]
+/// utility function to help in the casting and calling operation.
+pub type Message = dyn Any + Sync + Send;
 
-/// A trait for anything that can dispatch actor messages.
+/// A trait for anything that can dispatch actor messages. Implementing this trait for a
+/// structure will allow that structure to be used as a dispatcher for an actor.
 pub trait Dispatcher {
-    /// Process the the message and return its status.
+    /// Process the the message and return the result of the dispatching.
     fn dispatch(&mut self, message: Arc<Message>) -> DispatchResult;
 }
 
-/// Implements the Dispatcher trait for all funtions with the proper signature.
+/// Implements the Dispatcher trait for all functions with the proper signature. This allows
+/// a user to create an actor with a simple closure.
+///
+/// ## Examples
+/// ```rust
+/// let mut state = 0;
+/// let dispatcher = |_m: Arc<Message>| {
+///     state += 1;
+///     DispatchResult::Processed
+/// };
+/// ```
 impl<F: FnMut(Arc<Message>) -> DispatchResult> Dispatcher for F {
     fn dispatch(&mut self, message: Arc<Message>) -> DispatchResult {
         self(message)
@@ -27,13 +40,20 @@ impl<F: FnMut(Arc<Message>) -> DispatchResult> Dispatcher for F {
 /// A result returned by the dispatch function that indicates the disposition of the message.
 #[derive(Debug, Eq, PartialEq)]
 pub enum DispatchResult {
-    /// The message was processed and can be removed from the queue.
+    /// The message was processed and can be removed from the channel. Note that this doesn't
+    /// necessarily mean that anything was done with the message, just that it can be removed.
+    /// It is up to the dispatcher to decide what if anything to do with the message.
     Processed,
-    /// The message was not processed and can be removed from the queue.
-    Ignored,
     /// The message was skipped and should remain in the queue and the dequeue should loop
-    /// to fetch the next pending message.
+    /// to fetch the next pending message; once a message is skipped then a skip tail will
+    /// be created in the channel that will act as the actual tail until the [`SkipCleared']
+    /// result is returned from a dispatcher. This enables an actor to skip messages while
+    /// working on a process and then clear the skip buffer and resume normal processing.
     Skipped,
+    /// Clears the skip tail on the channel. A skip tail is present when a message has been
+    /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
+    /// the same as [`Processed`].
+    SkipCleared,
     /// The message generated an error of some kind and a panic should occur.
     Panic,
 }
@@ -42,6 +62,19 @@ pub enum DispatchResult {
 /// that handler with the message. If the dispatch is successful it will return the result of the
 /// call to the caller, otherwise it will return none back to the user. Note that the user of this
 /// function should clone the message or likely there will be borrow issues.
+///
+/// ## Examples
+///
+/// Dispatches the message to one of 3 different funtions thath andle different types or returns
+/// the Panic result if the code cannot dispatch the message.
+///
+/// ```rust
+/// dispatch(self, msg.clone(), Counter::handle_i32)
+///      .or_else(|| dispatch(self, msg.clone(), Counter::handle_op))
+///      .or_else(|| dispatch(self, msg.clone(), Counter::handle_bool))
+///      .or_else(|| dispatch(self, msg.clone(), Counter::handle_f32))
+///      .unwrap_or(DispatchResult::Panic)
+/// ```
 pub fn dispatch<T: 'static, S, R>(
     state: &mut S,
     message: Arc<Message>,
@@ -54,7 +87,9 @@ pub fn dispatch<T: 'static, S, R>(
 }
 
 /// This is the core Actor type in the actor system. The user should see the `README.md` for
-/// a detailed description of an actor and the Actor model.
+/// a detailed description of an actor and the Actor model. Callers communicate with the actor
+/// by means of a channel which holds the messages in the order received. The messages are
+/// then processed by the dispatcher and the appropriate state of the message is returned.
 pub struct Actor<T: Dispatcher> {
     // FIXME turn the docs into something we can gen with cargo
     /// The implementation that will be processing the messages to this actor..
@@ -75,9 +110,13 @@ pub struct Actor<T: Dispatcher> {
 impl<T: Dispatcher> Actor<T> {
     /// Creates a new Actor using the given initial state and the handler for processing
     /// messages sent to that actor.
-    // FIXME A new kind of channel is needed to support skipping messages and should be integrated into the actor.
     pub fn new(dispatcher: T) -> Actor<T> {
         let (tx, rx) = mpsc::channel::<Arc<Message>>();
+        // FIXME This should probably be hidden so a actor table can track the actor instead.
+        // FIXME Implement a spawn() function in the ActorSystem to call this API
+        // FIXME The actor needs to implement an ID assigned by the ActorSystem.
+        // FIXME the spawn() function should move the dispatcher or have some means of making sure the user has no more access.
+        // FIXME A new kind of channel is needed to support skipping messages and should be integrated into the actor.
         Actor {
             tx,
             rx: Mutex::new(rx),
@@ -122,7 +161,7 @@ impl<T: Dispatcher> Actor<T> {
         self.received.load(Ordering::Relaxed)
     }
 
-    /// Returns the total number of messages that have been received by this actor.
+    /// Returns the total number of messages that are currently pending in the actor's channel.
     pub fn pending(&self) -> usize {
         self.pending.load(Ordering::Relaxed)
     }
@@ -157,9 +196,9 @@ mod tests {
             DispatchResult::Skipped
         }
 
-        /// Handles a message that is just an i32.
+        /// Handles a message that is just an boolean.
         fn handle_bool(&mut self, _message: &bool) -> DispatchResult {
-            DispatchResult::Ignored
+            DispatchResult::SkipCleared
         }
 
         /// Handles an enum message.
@@ -194,7 +233,7 @@ mod tests {
         assert_eq!(1, state.count);
         assert_eq!(DispatchResult::Processed, state.dispatch(Arc::new(10 as i32)));
         assert_eq!(10, state.count);
-        assert_eq!(DispatchResult::Ignored, state.dispatch(Arc::new(true)));
+        assert_eq!(DispatchResult::SkipCleared, state.dispatch(Arc::new(true)));
         assert_eq!(10, state.count);
         assert_eq!(DispatchResult::Skipped, state.dispatch(Arc::new(2.5 as f32)));
         assert_eq!(10, state.count);
@@ -256,12 +295,11 @@ mod tests {
     #[test]
     fn test_create_closure_actor() {
         let mut state = 0;
-        let d = |_m: Arc<Message>| {
+        let dispatcher = |_m: Arc<Message>| {
             state += 1;
             DispatchResult::Processed
         };
-
-        let mut actor = Actor::new(d);
+        let mut actor = Actor::new(dispatcher);
         assert_send_receive(&mut actor);
     }
 }
