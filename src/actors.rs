@@ -1,28 +1,21 @@
-use std::any::Any;
 use std::collections::HashMap;
-use std::marker::{Send, Sync};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-
-/// This is a type used by the system for sending a message through a channel to the actor.
-/// All messages are sent as this type and it is up to the dispatcher to cast the message
-/// properly and deal with it. It is recommended that the user make use of the [`dispatch`]
-/// utility function to help in the casting and calling operation.
-pub type Message = dyn Any + Sync + Send;
+use mailbox::Message;
 
 /// A result returned by the dispatch function that indicates the disposition of the message.
 #[derive(Debug, Eq, PartialEq)]
 pub enum HandleResult {
     /// The message was processed and can be removed from the channel. Note that this doesn't
     /// necessarily mean that anything was done with the message, just that it can be removed.
-    /// It is up to the dispatcher to decide what if anything to do with the message.
+    /// It is up to the message handler to decide what if anything to do with the message.
     Processed,
     /// The message was skipped and should remain in the queue and the dequeue should loop
     /// to fetch the next pending message; once a message is skipped then a skip tail will
     /// be created in the channel that will act as the actual tail until the [`SkipCleared']
-    /// result is returned from a dispatcher. This enables an actor to skip messages while
+    /// result is returned from a message handler. This enables an actor to skip messages while
     /// working on a process and then clear the skip buffer and resume normal processing.
     Skipped,
     /// Clears the skip tail on the channel. A skip tail is present when a message has been
@@ -91,6 +84,7 @@ pub struct ActorContext {
 }
 
 impl ActorContext {
+    /// Creates a new actor context with the given actor id.
     fn new(aid: ActorId) -> ActorContext {
         let (tx, rx) = mpsc::channel::<Arc<Message>>();
         ActorContext {
@@ -114,7 +108,7 @@ impl ActorContext {
         self.pending.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Receives the message on the actor and calls the dispatcher for that actor. This function
+    /// Receives the message on the actor and calls the handler for that actor. This function
     /// will be typically called by the scheduler to process messages in the actor's channel.
     fn receive(&mut self) -> Arc<Message> {
         // FIXME move this to private api.
@@ -130,7 +124,7 @@ impl ActorContext {
 /// This is the core Actor type in the actor system. The user should see the `README.md` for
 /// a detailed description of an actor and the Actor model. Callers communicate with the actor
 /// by means of a channel which holds the messages in the order received. The messages are
-/// then processed by the dispatcher and the appropriate state of the message is returned.
+/// then processed by the message handler and the appropriate state of the message is returned.
 pub trait Actor {
     /// Fetches the context for this actor.
     fn context(&self) -> &ActorContext;
