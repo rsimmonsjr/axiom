@@ -3,28 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use mailbox::Message;
-
-/// A result returned by the dispatch function that indicates the disposition of the message.
-#[derive(Debug, Eq, PartialEq)]
-pub enum HandleResult {
-    /// The message was processed and can be removed from the channel. Note that this doesn't
-    /// necessarily mean that anything was done with the message, just that it can be removed.
-    /// It is up to the message handler to decide what if anything to do with the message.
-    Processed,
-    /// The message was skipped and should remain in the queue and the dequeue should loop
-    /// to fetch the next pending message; once a message is skipped then a skip tail will
-    /// be created in the channel that will act as the actual tail until the [`SkipCleared']
-    /// result is returned from a message handler. This enables an actor to skip messages while
-    /// working on a process and then clear the skip buffer and resume normal processing.
-    Skipped,
-    /// Clears the skip tail on the channel. A skip tail is present when a message has been
-    /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
-    /// the same as [`Processed`].
-    SkipCleared,
-    /// The message generated an error of some kind and a panic should occur.
-    Panic,
-}
+use mailbox::{Message, HandleResult};
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
 /// that handler with the message. If the dispatch is successful it will return the result of the
