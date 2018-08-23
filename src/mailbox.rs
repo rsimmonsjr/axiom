@@ -336,7 +336,7 @@ impl Mailbox {
     /// a type T and a message and returns a [`DequeueResult`].
     pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(&mut self, t: &mut T, f: F) -> Result<usize, String> {
         loop {
-            match self.find_next_node(&mut self.enqueue_pos) {
+            match self.find_next_node(&mut self.dequeue_pos) {
                 None => return Err("Mailbox Empty".to_string()), // fixme turn into enums
                 Some(node) => {
                     // If the message is a None, it might have been dequeued by a cursor so we
