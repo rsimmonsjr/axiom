@@ -282,18 +282,18 @@ impl Mailbox {
     /// Finds a node using the given position reference and either returns the node,
     /// incrementing the position as needed or returns a None, indicating no node was
     /// available.
-    fn find_next_node(&mut self, position: &mut AtomicUsize) -> Option<&mut Node> {
+    fn find_next_node<'a>(buffer: &'a mut Vec<Node>, position: &mut AtomicUsize) -> Option<&'a mut Node> {
         loop {
             // First decode the lap and idx from the position passed.
             let pos = position.load(Ordering::Relaxed);
             let idx = pos as HalfUsize;
             let lap = (pos >> HALF_USIZE_BITS) as HalfUsize;
-            let node: &mut Node = &mut self.buffer[idx as usize];
+            let node: &mut Node = &mut buffer[idx as usize];
             let node_lap = node.lap.load(Ordering::Relaxed) as HalfUsize;
             if lap == node_lap {
                 // We know this node is ready on the lap so try to increment the pointer
                 // so that no one else can access this node.
-                let new_pos = if idx + 1 < self.capacity {
+                let new_pos = if idx + 1 < (buffer.len() as u32) {
                     // simple increment of the position will suffice
                     pos + 1
                 } else {
@@ -315,10 +315,9 @@ impl Mailbox {
     /// Enqueues a message into the mailbox and returns either a result with the number
     /// of messages now pending or an error if there was a problem enququing.
     pub fn enqueue(&mut self, message: Arc<Message>) -> Result<usize, String> {
-        let pos: &mut AtomicUsize = &mut self.enqueue_pos;
-        match self.find_next_node(pos) {
+        match Mailbox::find_next_node(&mut self.buffer, &mut self.enqueue_pos) {
             None => Err("Mailbox Full".to_string()),
-            Some(node) => {
+            Some(&mut node) => {
                 node.message = Some(message.clone());
                 node.lap.fetch_add(1, Ordering::Relaxed);
                 let old_pending = self.pending.fetch_add(1, Ordering::Relaxed);
@@ -336,7 +335,7 @@ impl Mailbox {
     /// a type T and a message and returns a [`DequeueResult`].
     pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(&mut self, t: &mut T, f: F) -> Result<usize, String> {
         loop {
-            match self.find_next_node(&mut self.dequeue_pos) {
+            match Mailbox::find_next_node(&mut self.buffer, &mut self.dequeue_pos) {
                 None => return Err("Mailbox Empty".to_string()), // fixme turn into enums
                 Some(node) => {
                     // If the message is a None, it might have been dequeued by a cursor so we
@@ -349,7 +348,7 @@ impl Mailbox {
                         let old_pending = self.pending.fetch_sub(1, Ordering::Relaxed);
                         // Manually yield after the dequeue.
                         thread::yield_now();
-                        return Ok(old_pending - 1)
+                        return Ok(old_pending - 1);
                     }
                 }
             }
