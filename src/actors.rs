@@ -1,9 +1,9 @@
+use mailbox::{DequeueResult, Message};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use mailbox::{Message, DequeueResult};
+use std::sync::{Arc, Mutex};
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
 /// that handler with the message. If the dispatch is successful it will return the result of the
@@ -32,7 +32,6 @@ pub fn dispatch<T: 'static, S, R>(
         None => None,
     }
 }
-
 
 /// Encapsulates an ID to an actor.
 #[derive(Debug, Eq, PartialEq, Hash, Copy, Clone)]
@@ -75,7 +74,6 @@ impl ActorContext {
             pending: AtomicUsize::new(0),
         }
     }
-
 
     /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
     /// if the user wants to retain the message they should clone the `Arc` before calling this
@@ -168,20 +166,25 @@ impl ActorSystem {
         }
     }
 
-    pub fn spawn<T: Actor + 'static, F: Fn(ActorContext) -> T>(&mut self, f: F) -> Arc<Mutex<Actor>> {
+    pub fn spawn<T: Actor + 'static, F: Fn(ActorContext) -> T>(
+        &mut self,
+        f: F,
+    ) -> Arc<Mutex<Actor>> {
         // FIXME This should probably be hidden so a actor table can track the actor instead.
         // FIXME Implement a spawn() function in the ActorSystem to call this API
         // FIXME The actor needs to implement an ID assigned by the ActorSystem.
         // FIXME the spawn() function should move the dispatcher or have some means of making sure the user has no more access.
         // FIXME A new kind of channel is needed to support skipping messages and should be integrated into the actor.
-        let aid = ActorId { node: 0, id: self.aid_sequence.fetch_add(1, Ordering::Relaxed) };
+        let aid = ActorId {
+            node: 0,
+            id: self.aid_sequence.fetch_add(1, Ordering::Relaxed),
+        };
         let context = ActorContext::new(aid.clone());
         let actor = Arc::new(Mutex::new(f(context)));
         self.actors_by_aid.insert(aid, actor.clone());
         actor
     }
 }
-
 
 // --------------------- Test Cases ---------------------
 
@@ -249,29 +252,51 @@ mod tests {
     #[test]
     fn test_dispatch() {
         let aid = ActorId { node: 0, id: 0 };
-        let mut state = Counter { context: ActorContext::new(aid), count: 0 };
-        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(Operation::Inc)));
+        let mut state = Counter {
+            context: ActorContext::new(aid),
+            count: 0,
+        };
+        assert_eq!(
+            DequeueResult::Processed,
+            state.handle_message(Arc::new(Operation::Inc))
+        );
         assert_eq!(1, state.count);
-        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(Operation::Inc)));
+        assert_eq!(
+            DequeueResult::Processed,
+            state.handle_message(Arc::new(Operation::Inc))
+        );
         assert_eq!(2, state.count);
-        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(Operation::Dec)));
+        assert_eq!(
+            DequeueResult::Processed,
+            state.handle_message(Arc::new(Operation::Dec))
+        );
         assert_eq!(1, state.count);
-        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(10 as i32)));
+        assert_eq!(
+            DequeueResult::Processed,
+            state.handle_message(Arc::new(10 as i32))
+        );
         assert_eq!(11, state.count);
-        assert_eq!(DequeueResult::SkipCleared, state.handle_message(Arc::new(true)));
+        assert_eq!(
+            DequeueResult::SkipCleared,
+            state.handle_message(Arc::new(true))
+        );
         assert_eq!(11, state.count);
-        assert_eq!(DequeueResult::Skipped, state.handle_message(Arc::new(2.5 as f32)));
+        assert_eq!(
+            DequeueResult::Skipped,
+            state.handle_message(Arc::new(2.5 as f32))
+        );
         assert_eq!(11, state.count);
-        assert_eq!(DequeueResult::Panic, state.handle_message(Arc::new(String::from("oh no"))));
+        assert_eq!(
+            DequeueResult::Panic,
+            state.handle_message(Arc::new(String::from("oh no")))
+        );
         assert_eq!(11, state.count);
     }
 
     #[test]
     fn test_create_struct_actor() {
         let mut system = ActorSystem::new();
-        let arc = system.spawn(|context| {
-            Counter { context, count: 0 }
-        });
+        let arc = system.spawn(|context| Counter { context, count: 0 });
         let mut actor = arc.lock().unwrap();
         // Send the actor we created some messages.
         assert_eq!(actor.pending(), 0);

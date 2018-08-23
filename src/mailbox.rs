@@ -240,7 +240,10 @@ impl Mailbox {
     pub fn new(capacity: HalfUsize) -> Mailbox {
         let mut buffer = Vec::<Node>::with_capacity(capacity as usize);
         for _ in 0..capacity {
-            buffer.push(Node { message: None, lap: AtomicUsize::new(0) })
+            buffer.push(Node {
+                message: None,
+                lap: AtomicUsize::new(0),
+            })
         }
         Mailbox {
             buffer,
@@ -284,7 +287,10 @@ impl Mailbox {
     /// Finds a node using the given position reference and either returns the node,
     /// incrementing the position as needed or returns a None, indicating no node was
     /// available.
-    fn find_next_node<'a>(buffer: &'a mut Vec<Node>, position: &mut AtomicUsize) -> Option<&'a mut Node> {
+    fn find_next_node<'a>(
+        buffer: &'a mut Vec<Node>,
+        position: &mut AtomicUsize,
+    ) -> Option<&'a mut Node> {
         let capacity = buffer.len();
         loop {
             // First decode the lap and idx from the position passed.
@@ -335,7 +341,11 @@ impl Mailbox {
     /// message and then return the status off the message after being handled. The first
     /// parameter is this mailbox, the next parameter is a type T and a function that takes
     /// a type T and a message and returns a [`DequeueResult`].
-    pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(&mut self, t: &mut T, mut f: F) -> Result<usize, String> {
+    pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(
+        &mut self,
+        t: &mut T,
+        mut f: F,
+    ) -> Result<usize, String> {
         loop {
             match Mailbox::find_next_node(&mut self.buffer, &mut self.dequeue_pos) {
                 None => return Err("Mailbox Empty".to_string()), // fixme turn into enums
