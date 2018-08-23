@@ -202,8 +202,6 @@ pub struct Node {
 /// counters are kept as atomics and thus are O(1) to access. In this case we get more perfomance
 /// by tracking the counters rather than iterating the structure.
 pub struct Mailbox {
-    /// The maximum number of messages that the mailbox can hold.
-    capacity: HalfUsize,
     /// The buffer holding the nodes that make up the mailbox. Actors should usually need
     /// only small buffers unless they expect that there will be a lot of backlogged messages
     /// from slow actors or they will be doing extensive skipping. Usually if you are creating
@@ -218,7 +216,7 @@ pub struct Mailbox {
     /// Position at which to dequeue the next message. If the mailbox has not skipped any
     /// messages then this will be the same as the [`last_dequeue_pos`]. Otherwise if the
     /// mailbox is skipping this will lag behind.
-    dequeue_cursor: AtomicUsize,
+    cursor_pos: AtomicUsize,
     /// The number of messages that have been skipped in the mailbox at the current time.
     /// Note that this will mostly be 0 unless a mailbox has skipped some messages while
     /// waiting for some other message.
@@ -245,11 +243,10 @@ impl Mailbox {
             buffer.push(Node { message: None, lap: AtomicUsize::new(0) })
         }
         Mailbox {
-            capacity,
             buffer,
             enqueue_pos: AtomicUsize::new(0),
             dequeue_pos: AtomicUsize::new(1 << HALF_USIZE_BITS as usize),
-            dequeue_cursor: AtomicUsize::new(0),
+            cursor_pos: AtomicUsize::new(0),
             skipped: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
             enqueued: AtomicUsize::new(0),
@@ -272,6 +269,11 @@ impl Mailbox {
         self.dequeued.load(Ordering::Relaxed)
     }
 
+    /// The total number of messages that are currently skipped in the mailbox.
+    pub fn skipped(&self) -> usize {
+        self.skipped.load(Ordering::Relaxed)
+    }
+
     /// Starts the channel skipping messages at the current back of the channel the
     /// rationale here is that in this case, no message could possibly match the message
     /// we are looking for if the message was sent before this time. This process is
@@ -283,27 +285,27 @@ impl Mailbox {
     /// incrementing the position as needed or returns a None, indicating no node was
     /// available.
     fn find_next_node<'a>(buffer: &'a mut Vec<Node>, position: &mut AtomicUsize) -> Option<&'a mut Node> {
+        let capacity = buffer.len();
         loop {
             // First decode the lap and idx from the position passed.
             let pos = position.load(Ordering::Relaxed);
-            let idx = pos as HalfUsize;
-            let lap = (pos >> HALF_USIZE_BITS) as HalfUsize;
-            let node: &mut Node = &mut buffer[idx as usize];
-            let node_lap = node.lap.load(Ordering::Relaxed) as HalfUsize;
+            let idx = pos & 0xFFFFFFFF; // slice the lap off
+            let lap = pos >> HALF_USIZE_BITS;
+            let node_lap = buffer[idx].lap.load(Ordering::Relaxed);
             if lap == node_lap {
                 // We know this node is ready on the lap so try to increment the pointer
                 // so that no one else can access this node.
-                let new_pos = if idx + 1 < (buffer.len() as u32) {
+                let new_pos = if capacity > idx + 1 {
                     // simple increment of the position will suffice
                     pos + 1
                 } else {
                     // Reached the end of the buffer so loop and add 2 to the lap.
-                    ((lap + 2) << HALF_USIZE_BITS) as usize
+                    (lap + 2) << HALF_USIZE_BITS
                 };
                 // If this atomic swap works then we have access to the node and can do
                 //our operation without fear that other threads will do the same.
                 if pos == position.compare_and_swap(pos, new_pos, Ordering::Relaxed) {
-                    return Some(node);
+                    return Some(&mut buffer[idx]);
                 }
             } else {
                 return None;
@@ -317,7 +319,7 @@ impl Mailbox {
     pub fn enqueue(&mut self, message: Arc<Message>) -> Result<usize, String> {
         match Mailbox::find_next_node(&mut self.buffer, &mut self.enqueue_pos) {
             None => Err("Mailbox Full".to_string()),
-            Some(&mut node) => {
+            Some(node) => {
                 node.message = Some(message.clone());
                 node.lap.fetch_add(1, Ordering::Relaxed);
                 let old_pending = self.pending.fetch_add(1, Ordering::Relaxed);
@@ -333,7 +335,7 @@ impl Mailbox {
     /// message and then return the status off the message after being handled. The first
     /// parameter is this mailbox, the next parameter is a type T and a function that takes
     /// a type T and a message and returns a [`DequeueResult`].
-    pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(&mut self, t: &mut T, f: F) -> Result<usize, String> {
+    pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(&mut self, t: &mut T, mut f: F) -> Result<usize, String> {
         loop {
             match Mailbox::find_next_node(&mut self.buffer, &mut self.dequeue_pos) {
                 None => return Err("Mailbox Empty".to_string()), // fixme turn into enums
@@ -341,9 +343,9 @@ impl Mailbox {
                     // If the message is a None, it might have been dequeued by a cursor so we
                     // just loop and try to get the next node, otherwise we fetch the message
                     // for processing.
-                    if let Some(message) = node.message {
+                    if let Some(ref mut message) = node.message {
                         // FIXME implement message skipping based upon the processing function.
-                        let _result = f(t, message);
+                        let _result = f(t, message.clone());
                         self.dequeued.fetch_add(1, Ordering::Relaxed);
                         let old_pending = self.pending.fetch_sub(1, Ordering::Relaxed);
                         // Manually yield after the dequeue.
