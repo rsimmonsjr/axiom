@@ -163,9 +163,9 @@ const HALF_USIZE_BITS: i8 = 32;
 /// utility function to help in the casting and calling operation.
 pub type Message = dyn Any + Sync + Send;
 
-/// A result returned by the dispatch function that indicates the disposition of the message.
+/// A result returned by the dequeue function that indicates the disposition of the message.
 #[derive(Debug, Eq, PartialEq)]
-pub enum HandleResult {
+pub enum DequeueResult {
     /// The message was processed and can be removed from the channel. Note that this doesn't
     /// necessarily mean that anything was done with the message, just that it can be removed.
     /// It is up to the message handler to decide what if anything to do with the message.
@@ -241,7 +241,7 @@ impl Mailbox {
     /// will receive and the amount of skipping being done.
     pub fn new(capacity: HalfUsize) -> Mailbox {
         let mut buffer = Vec::<Node>::with_capacity(capacity as usize);
-        for n in 0..capacity {
+        for _ in 0..capacity {
             buffer.push(Node { message: None, lap: AtomicUsize::new(0) })
         }
         Mailbox {
@@ -303,7 +303,7 @@ impl Mailbox {
                 // If this atomic swap works then we have access to the node and can do
                 //our operation without fear that other threads will do the same.
                 if pos == position.compare_and_swap(pos, new_pos, Ordering::Relaxed) {
-                    return Ok(node);
+                    return Some(node);
                 }
             } else {
                 return None;
@@ -315,8 +315,9 @@ impl Mailbox {
     /// Enqueues a message into the mailbox and returns either a result with the number
     /// of messages now pending or an error if there was a problem enququing.
     pub fn enqueue(&mut self, message: Arc<Message>) -> Result<usize, String> {
-        match self.find_next_node(&self.enqueue_pos) {
-            None => Err("Mailbox Full".to_string())
+        let pos: &mut AtomicUsize = &mut self.enqueue_pos;
+        match self.find_next_node(pos) {
+            None => Err("Mailbox Full".to_string()),
             Some(node) => {
                 node.message = Some(message.clone());
                 node.lap.fetch_add(1, Ordering::Relaxed);
@@ -329,18 +330,26 @@ impl Mailbox {
         }
     }
 
-    pub fn dequeue(&mut self, processor: impl FnMut(Message) -> bool) -> Result<usize, String> {
+    /// Dequeue the result, passing it to the provided function that will handle the
+    /// message and then return the status off the message after being handled. The first
+    /// parameter is this mailbox, the next parameter is a type T and a function that takes
+    /// a type T and a message and returns a [`DequeueResult`].
+    pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(&mut self, t: &mut T, f: F) -> Result<usize, String> {
         loop {
-            match self.find_next_node(&self.enqueue_pos) {
-                None => Err("Mailbox Empty".to_string()) // fixme turn into enums
+            match self.find_next_node(&mut self.enqueue_pos) {
+                None => return Err("Mailbox Empty".to_string()), // fixme turn into enums
                 Some(node) => {
                     // If the message is a None, it might have been dequeued by a cursor so we
                     // just loop and try to get the next node, otherwise we fetch the message
                     // for processing.
                     if let Some(message) = node.message {
-                        // FIXME call the processing function.
+                        // FIXME implement message skipping based upon the processing function.
+                        let _result = f(t, message);
+                        self.dequeued.fetch_add(1, Ordering::Relaxed);
                         let old_pending = self.pending.fetch_sub(1, Ordering::Relaxed);
-                        Ok(old_pending - 1)
+                        // Manually yield after the dequeue.
+                        thread::yield_now();
+                        return Ok(old_pending - 1)
                     }
                 }
             }

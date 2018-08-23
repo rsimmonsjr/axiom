@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use mailbox::{Message, HandleResult};
+use mailbox::{Message, DequeueResult};
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
 /// that handler with the message. If the dispatch is successful it will return the result of the
@@ -112,7 +112,7 @@ pub trait Actor {
     fn context_mut(&mut self) -> &mut ActorContext;
 
     /// Process the the message and return the result of the dispatching.
-    fn handle_message(&mut self, message: Arc<Message>) -> HandleResult;
+    fn handle_message(&mut self, message: Arc<Message>) -> DequeueResult;
 
     /// fetches the actor id for this actor.
     fn aid(&self) -> &ActorId {
@@ -144,7 +144,7 @@ pub trait Actor {
 
     /// Receives the message on the actor and calls the dispatcher for that actor. This function
     /// will be typically called by the scheduler to process messages in the actor's channel.
-    fn receive(&mut self) -> HandleResult {
+    fn receive(&mut self) -> DequeueResult {
         // FIXME this should be part of the private API.
         let message: Arc<Message> = self.context_mut().receive();
         self.handle_message(message)
@@ -203,28 +203,28 @@ mod tests {
 
     impl Counter {
         /// Handles a message that is just an i32.
-        fn handle_i32(&mut self, message: &i32) -> HandleResult {
+        fn handle_i32(&mut self, message: &i32) -> DequeueResult {
             self.count += *message;
-            HandleResult::Processed
+            DequeueResult::Processed
         }
 
         /// Handles a message that is just an i32.
-        fn handle_f32(&mut self, _message: &f32) -> HandleResult {
-            HandleResult::Skipped
+        fn handle_f32(&mut self, _message: &f32) -> DequeueResult {
+            DequeueResult::Skipped
         }
 
         /// Handles a message that is just an boolean.
-        fn handle_bool(&mut self, _message: &bool) -> HandleResult {
-            HandleResult::SkipCleared
+        fn handle_bool(&mut self, _message: &bool) -> DequeueResult {
+            DequeueResult::SkipCleared
         }
 
         /// Handles an enum message.
-        fn handle_op(&mut self, message: &Operation) -> HandleResult {
+        fn handle_op(&mut self, message: &Operation) -> DequeueResult {
             match *message {
                 Operation::Inc => self.count += 1,
                 Operation::Dec => self.count -= 1,
             }
-            HandleResult::Processed
+            DequeueResult::Processed
         }
     }
 
@@ -237,12 +237,12 @@ mod tests {
             &mut self.context
         }
 
-        fn handle_message(&mut self, msg: Arc<Message>) -> HandleResult {
+        fn handle_message(&mut self, msg: Arc<Message>) -> DequeueResult {
             dispatch(self, msg.clone(), Counter::handle_i32)
                 .or_else(|| dispatch(self, msg.clone(), Counter::handle_op))
                 .or_else(|| dispatch(self, msg.clone(), Counter::handle_bool))
                 .or_else(|| dispatch(self, msg.clone(), Counter::handle_f32))
-                .unwrap_or(HandleResult::Panic)
+                .unwrap_or(DequeueResult::Panic)
         }
     }
 
@@ -250,19 +250,19 @@ mod tests {
     fn test_dispatch() {
         let aid = ActorId { node: 0, id: 0 };
         let mut state = Counter { context: ActorContext::new(aid), count: 0 };
-        assert_eq!(HandleResult::Processed, state.handle_message(Arc::new(Operation::Inc)));
+        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(Operation::Inc)));
         assert_eq!(1, state.count);
-        assert_eq!(HandleResult::Processed, state.handle_message(Arc::new(Operation::Inc)));
+        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(Operation::Inc)));
         assert_eq!(2, state.count);
-        assert_eq!(HandleResult::Processed, state.handle_message(Arc::new(Operation::Dec)));
+        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(Operation::Dec)));
         assert_eq!(1, state.count);
-        assert_eq!(HandleResult::Processed, state.handle_message(Arc::new(10 as i32)));
+        assert_eq!(DequeueResult::Processed, state.handle_message(Arc::new(10 as i32)));
         assert_eq!(11, state.count);
-        assert_eq!(HandleResult::SkipCleared, state.handle_message(Arc::new(true)));
+        assert_eq!(DequeueResult::SkipCleared, state.handle_message(Arc::new(true)));
         assert_eq!(11, state.count);
-        assert_eq!(HandleResult::Skipped, state.handle_message(Arc::new(2.5 as f32)));
+        assert_eq!(DequeueResult::Skipped, state.handle_message(Arc::new(2.5 as f32)));
         assert_eq!(11, state.count);
-        assert_eq!(HandleResult::Panic, state.handle_message(Arc::new(String::from("oh no"))));
+        assert_eq!(DequeueResult::Panic, state.handle_message(Arc::new(String::from("oh no"))));
         assert_eq!(11, state.count);
     }
 
