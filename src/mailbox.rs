@@ -367,3 +367,62 @@ impl Mailbox {
         }
     }
 }
+
+// --------------------- Test Cases ---------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An enum used for testing message passing.
+    enum TestMsg {
+        MsgOne,
+        MsgTwo,
+    }
+
+    fn assert_counters(
+        mailbox: &Mailbox,
+        pending: usize,
+        enqueued: usize,
+        dequeued: usize,
+        skipped: usize,
+    ) {
+        assert_eq!(pending, mailbox.pending());
+        assert_eq!(enqueued, mailbox.enqueued());
+        assert_eq!(dequeued, mailbox.dequeued());
+        assert_eq!(skipped, mailbox.skipped());
+    }
+
+    #[test]
+    fn test_basic_operations() {
+        let mut mailbox = Mailbox::new(3);
+        assert_eq!(3, mailbox.buffer.len());
+        assert_counters(&mailbox, 0, 0, 0, 0);
+
+        let m1 = Arc::new(10 as u32);
+        let result = mailbox.enqueue(m1.clone());
+        assert_eq!(Ok(1), result);
+        assert_counters(&mailbox, 1, 1, 0, 0);
+        assert_eq!(0, mailbox.skipped());
+
+        let m2 = Arc::new("hello".to_string());
+        let result = mailbox.enqueue(m2.clone());
+        assert_eq!(Ok(2), result);
+        assert_counters(&mailbox, 2, 2, 0, 0);
+
+        let m3 = Arc::new(TestMsg::MsgOne);
+        let result = mailbox.enqueue(m3.clone());
+        assert_eq!(Ok(3), result);
+        assert_counters(&mailbox, 3, 3, 0, 0);
+
+        let mut state = 10;
+//        mailbox.dequeue(&mut state, |_state, msg| {
+//            match msg.downcast_ref::<u32>() {
+//                Some(x) => assert_eq!(*m1, *x),
+//                None => panic!("Downcast Failed"),
+//            }
+//            assert_counters(&mailbox, 3, 3, 1, 0);
+//            DequeueResult::Processed
+//        });
+    }
+}
