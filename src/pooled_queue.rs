@@ -2,7 +2,7 @@
 //! provides concurrent read from the queue and write to the queue using mutexes.
 
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// A node in a LinkedNodeList
@@ -10,7 +10,7 @@ struct Node<T: Sync + Send> {
     /// Value that the node is holding or None if the node is empty.
     value: Option<T>,
     /// The pointer to the next node in the list.
-    next: *mut Node<T>,
+    next: AtomicPtr<Node<T>>,
 }
 
 /// A Linked List of Node<T> objects where enqueue and dequeue take the node with the
@@ -41,7 +41,7 @@ impl<T: Sync + Send> PooledQueue<T> {
         let nil = null_mut();
         nodes_vec.push(Node {
             value: None,
-            next: nil,
+            next: AtomicPtr::new(nil)
         });
         let queue_head: *mut _ = nodes_vec.last_mut().unwrap();
         let queue_tail = queue_head;
@@ -50,14 +50,14 @@ impl<T: Sync + Send> PooledQueue<T> {
         // operation order with H -> N0 -> N1 -> N2 -> Nn <- T
         nodes_vec.push(Node {
             value: None,
-            next: nil,
+            next: AtomicPtr::new(nil)
         });
         let mut pool_head: *mut _ = nodes_vec.last_mut().unwrap();
         let pool_tail = pool_head;
         for _ in 1..capacity {
             nodes_vec.push(Node {
                 value: None,
-                next: pool_head,
+                next: AtomicPtr::new(pool_head),
             });
             pool_head = nodes_vec.last_mut().unwrap();
         }
@@ -84,13 +84,15 @@ impl<T: Sync + Send> PooledQueue<T> {
             // The pool_head.next will now be the new pool head unless the next pointer is
             // a null in which case we error as we cannot remove the last node from the pool
             // because both the queue and the pool always have at least one node.
-            let next_pool_head = (*pool_head).next;
+            let next_pool_head = (*pool_head).next.load(Ordering::Relaxed);
             if next_pool_head == nil {
                 return Err("Queue Full".to_string());
             }
-            (*pool_head).next = nil;
-            (*queue_tail).next = pool_head;
+            (*pool_head).next.store(nil, Ordering::Relaxed);
+            let old = (*queue_tail).next.load(Ordering::Acquire);
+            // fixme if old isn't null we didn't acquire it? Loop ?
             (*queue_tail).value = Some(value);
+            (*queue_tail).next.store(pool_head, Ordering::Release);
             *lock = (next_pool_head, pool_head);
             self.enqueued.fetch_add(1, Ordering::Relaxed);
             let old_lenth = self.length.fetch_add(1, Ordering::Relaxed);
@@ -105,13 +107,13 @@ impl<T: Sync + Send> PooledQueue<T> {
         // Pull the node off the pool and use it for the new data.
         unsafe {
             let nil = null_mut();
-            if nil == (*queue_head).next {
+            let next_queue_head = (*queue_head).next.load(Ordering::Acquire);
+            if nil == next_queue_head {
                 return Err("Queue Empty".to_string());
             }
             let result = (*queue_head).value.take().unwrap();
-            let next_queue_head = (*queue_head).next;
-            (*queue_head).next = nil;
-            (*pool_tail).next = queue_head;
+            (*queue_head).next.store(nil, Ordering::Relaxed);
+            (*pool_tail).next.store(queue_head, Ordering::Relaxed);
             *lock = (queue_head, next_queue_head);
             self.dequeued.fetch_add(1, Ordering::Relaxed);
             self.length.fetch_sub(1, Ordering::Relaxed);
