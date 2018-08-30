@@ -2,6 +2,7 @@ extern crate uuid;
 
 pub mod actors;
 pub mod mailbox;
+pub mod pooled_queue;
 
 #[cfg(test)]
 mod tests {

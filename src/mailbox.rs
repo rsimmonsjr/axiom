@@ -137,8 +137,8 @@
 
 use std::any::Any;
 use std::marker::{Send, Sync};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 type HalfUsize = u32;
@@ -414,15 +414,5 @@ mod tests {
         let result = mailbox.enqueue(m3.clone());
         assert_eq!(Ok(3), result);
         assert_counters(&mailbox, 3, 3, 0, 0);
-
-        let mut state = 10;
-//        mailbox.dequeue(&mut state, |_state, msg| {
-//            match msg.downcast_ref::<u32>() {
-//                Some(x) => assert_eq!(*m1, *x),
-//                None => panic!("Downcast Failed"),
-//            }
-//            assert_counters(&mailbox, 3, 3, 1, 0);
-//            DequeueResult::Processed
-//        });
     }
 }
