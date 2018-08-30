@@ -15,7 +15,7 @@ struct Node<T: Sync + Send> {
 
 /// A Linked List of Node<T> objects where enqueue and dequeue take the node with the
 /// T already in it rather than the T itself.
-pub struct PooledLinkedList<T: Sync + Send> {
+pub struct PooledQueue<T: Sync + Send> {
     /// Capacity of the list.
     capacity: usize,
     /// Node storage of the nodes.
@@ -32,8 +32,8 @@ pub struct PooledLinkedList<T: Sync + Send> {
     dequeued: AtomicUsize,
 }
 
-impl<T: Sync + Send> PooledLinkedList<T> {
-    pub fn new(capacity: usize) -> PooledLinkedList<T> {
+impl<T: Sync + Send> PooledQueue<T> {
+    pub fn new(capacity: usize) -> PooledQueue<T> {
         // we add one to the allocated capacity to account for queue dummy node.
         let mut nodes_vec = Vec::<Node<T>>::with_capacity((capacity + 1) as usize);
         // The queue just gets one initial node with no data and the queue_tail is just
@@ -63,7 +63,7 @@ impl<T: Sync + Send> PooledLinkedList<T> {
         }
         let enqueue = Mutex::new((pool_head, queue_tail));
         let dequeue = Mutex::new((pool_tail, queue_head));
-        PooledLinkedList {
+        PooledQueue {
             capacity,
             nodes: nodes_vec.into_boxed_slice(),
             enqueue,
