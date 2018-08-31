@@ -149,7 +149,7 @@ impl<T: Sync + Send> PooledQueue<T> {
 
     /// Returns the total number of objects that have been dequeued from the list.
     pub fn dequeued(&self) -> usize {
-        self.enqueued.load(Ordering::Relaxed)
+        self.dequeued.load(Ordering::Relaxed)
     }
 }
 
@@ -211,6 +211,9 @@ mod tests {
     fn test_queue_dequeue() {
         let mut queue = PooledQueue::new(5);
         assert_eq!(7, queue.nodes.len());
+        assert_eq!(5, queue.capacity());
+
+        // Write out the nodes list to facilitate testing
         println!("queue nodes list is:");
         for i in 0..queue.nodes.len() {
             println!("[{}] -> {:?}", i, &mut queue.nodes[i] as *mut _);
@@ -218,6 +221,9 @@ mod tests {
         println!();
 
         // Check the initial structure.
+        assert_eq!(0, queue.length());
+        assert_eq!(0, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
         assert_pointer_nodes!(queue, 0, 0, 6, 1); // (q, qh, qt, ph, pt)
         assert_node_next_nil!(queue, 0);
         assert_node_next!(queue, 6, 5);
@@ -232,6 +238,8 @@ mod tests {
         let a = "A".to_string();
         assert_eq!(1, queue.enqueue(a).unwrap());
         assert_eq!(1, queue.length());
+        assert_eq!(1, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
         assert_pointer_nodes!(queue, 0, 6, 5, 1);
         assert_node_next!(queue, 0, 6);
         assert_node_next_nil!(queue, 6);
@@ -245,6 +253,8 @@ mod tests {
         let b = "B".to_string();
         assert_eq!(2, queue.enqueue(b).unwrap());
         assert_eq!(2, queue.length());
+        assert_eq!(2, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
         assert_pointer_nodes!(queue, 0, 5, 4, 1);
         assert_node_next!(queue, 0, 6);
         assert_node_next!(queue, 6, 5);
@@ -257,6 +267,8 @@ mod tests {
         let c = "C".to_string();
         assert_eq!(3, queue.enqueue(c).unwrap());
         assert_eq!(3, queue.length());
+        assert_eq!(3, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
         assert_pointer_nodes!(queue, 0, 4, 3, 1);
         assert_node_next!(queue, 0, 6);
         assert_node_next!(queue, 6, 5);
@@ -269,6 +281,8 @@ mod tests {
         let d = "D".to_string();
         assert_eq!(4, queue.enqueue(d).unwrap());
         assert_eq!(4, queue.length());
+        assert_eq!(4, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
         assert_pointer_nodes!(queue, 0, 3, 2, 1);
         assert_node_next!(queue, 0, 6);
         assert_node_next!(queue, 6, 5);
@@ -281,6 +295,8 @@ mod tests {
         let e = "E".to_string();
         assert_eq!(5, queue.enqueue(e).unwrap());
         assert_eq!(5, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
         assert_pointer_nodes!(queue, 0, 2, 1, 1);
         assert_node_next!(queue, 0, 6);
         assert_node_next!(queue, 6, 5);
@@ -292,6 +308,9 @@ mod tests {
 
         let f = "F".to_string();
         assert_eq!(Err(PooledQueueError::QueueFull), queue.enqueue(f));
+        assert_eq!(5, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(0, queue.dequeued());
 
         //        assert_eq!("A".to_string(), queue.dequeue().unwrap());
         //        assert_eq!(1, queue.length());
