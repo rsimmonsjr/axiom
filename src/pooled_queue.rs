@@ -41,6 +41,10 @@ pub struct PooledQueue<T: Sync + Send> {
 
 impl<T: Sync + Send> PooledQueue<T> {
     pub fn new(capacity: usize) -> PooledQueue<T> {
+        if capacity < 1 {
+            panic!("capacity cannot be smaller than 1");
+        }
+
         // we add two to the allocated capacity to account for the mandatory nodes on each list.
         let mut nodes_vec = Vec::<Node<T>>::with_capacity((capacity + 2) as usize);
         // The queue just gets one initial node with no data and the queue_tail is just
