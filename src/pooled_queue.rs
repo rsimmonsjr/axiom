@@ -206,6 +206,17 @@ mod tests {
         };
     }
 
+    // Items that will be put in the list
+    #[derive(Debug, Eq, PartialEq)]
+    enum Items {
+        A,
+        B,
+        C,
+        D,
+        E,
+        F,
+    }
+
     /// Tests the basics of the queue.
     #[test]
     fn test_queue_dequeue() {
@@ -235,8 +246,7 @@ mod tests {
 
         // Check that enqueueing removes pool head and appends to queue tail and changes
         // nothing else in the node structure.
-        let a = "A".to_string();
-        assert_eq!(1, queue.enqueue(a).unwrap());
+        assert_eq!(Ok(1), queue.enqueue(Items::A));
         assert_eq!(1, queue.length());
         assert_eq!(1, queue.enqueued());
         assert_eq!(0, queue.dequeued());
@@ -250,8 +260,7 @@ mod tests {
         assert_node_next_nil!(queue, 1);
 
         // Second enqueue should also move the pool_head node.
-        let b = "B".to_string();
-        assert_eq!(2, queue.enqueue(b).unwrap());
+        assert_eq!(Ok(2), queue.enqueue(Items::B));
         assert_eq!(2, queue.length());
         assert_eq!(2, queue.enqueued());
         assert_eq!(0, queue.dequeued());
@@ -264,8 +273,7 @@ mod tests {
         assert_node_next!(queue, 2, 1);
         assert_node_next_nil!(queue, 1);
 
-        let c = "C".to_string();
-        assert_eq!(3, queue.enqueue(c).unwrap());
+        assert_eq!(Ok(3), queue.enqueue(Items::C));
         assert_eq!(3, queue.length());
         assert_eq!(3, queue.enqueued());
         assert_eq!(0, queue.dequeued());
@@ -278,8 +286,7 @@ mod tests {
         assert_node_next!(queue, 2, 1);
         assert_node_next_nil!(queue, 1);
 
-        let d = "D".to_string();
-        assert_eq!(4, queue.enqueue(d).unwrap());
+        assert_eq!(Ok(4), queue.enqueue(Items::D));
         assert_eq!(4, queue.length());
         assert_eq!(4, queue.enqueued());
         assert_eq!(0, queue.dequeued());
@@ -292,8 +299,7 @@ mod tests {
         assert_node_next!(queue, 2, 1);
         assert_node_next_nil!(queue, 1);
 
-        let e = "E".to_string();
-        assert_eq!(5, queue.enqueue(e).unwrap());
+        assert_eq!(Ok(5), queue.enqueue(Items::E));
         assert_eq!(5, queue.length());
         assert_eq!(5, queue.enqueued());
         assert_eq!(0, queue.dequeued());
@@ -306,16 +312,105 @@ mod tests {
         assert_node_next_nil!(queue, 2);
         assert_node_next_nil!(queue, 1);
 
-        let f = "F".to_string();
-        assert_eq!(Err(PooledQueueError::QueueFull), queue.enqueue(f));
+        assert_eq!(Err(PooledQueueError::QueueFull), queue.enqueue(Items::F));
         assert_eq!(5, queue.length());
         assert_eq!(5, queue.enqueued());
         assert_eq!(0, queue.dequeued());
 
-        //        assert_eq!("A".to_string(), queue.dequeue().unwrap());
-        //        assert_eq!(1, queue.length());
-        //
-        //        assert_eq!("B".to_string(), queue.dequeue().unwrap());
-        //        assert_eq!(0, queue.length());
+        assert_eq!(Ok(Items::A), queue.dequeue());
+        assert_eq!(4, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(1, queue.dequeued());
+        assert_pointer_nodes!(queue, 6, 2, 1, 0);
+        assert_node_next!(queue, 6, 5);
+        assert_node_next!(queue, 5, 4);
+        assert_node_next!(queue, 4, 3);
+        assert_node_next!(queue, 3, 2);
+        assert_node_next_nil!(queue, 2);
+        assert_node_next!(queue, 1, 0);
+        assert_node_next_nil!(queue, 0);
+
+        assert_eq!(Ok(Items::B), queue.dequeue());
+        assert_eq!(3, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(2, queue.dequeued());
+        assert_pointer_nodes!(queue, 5, 2, 1, 6);
+        assert_node_next!(queue, 5, 4);
+        assert_node_next!(queue, 4, 3);
+        assert_node_next!(queue, 3, 2);
+        assert_node_next_nil!(queue, 2);
+        assert_node_next!(queue, 1, 0);
+        assert_node_next!(queue, 0, 6);
+        assert_node_next_nil!(queue, 6);
+
+        assert_eq!(Ok(Items::C), queue.dequeue());
+        assert_eq!(2, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(3, queue.dequeued());
+        assert_pointer_nodes!(queue, 4, 2, 1, 5);
+        assert_node_next!(queue, 4, 3);
+        assert_node_next!(queue, 3, 2);
+        assert_node_next_nil!(queue, 2);
+        assert_node_next!(queue, 1, 0);
+        assert_node_next!(queue, 0, 6);
+        assert_node_next!(queue, 6, 5);
+        assert_node_next_nil!(queue, 5);
+
+        assert_eq!(Ok(Items::D), queue.dequeue());
+        assert_eq!(1, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(4, queue.dequeued());
+        assert_pointer_nodes!(queue, 3, 2, 1, 4);
+        assert_node_next!(queue, 3, 2);
+        assert_node_next_nil!(queue, 2);
+        assert_node_next!(queue, 1, 0);
+        assert_node_next!(queue, 0, 6);
+        assert_node_next!(queue, 6, 5);
+        assert_node_next!(queue, 5, 4);
+        assert_node_next_nil!(queue, 4);
+
+        assert_eq!(Ok(Items::E), queue.dequeue());
+        assert_eq!(0, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(5, queue.dequeued());
+        assert_pointer_nodes!(queue, 2, 2, 1, 3);
+        assert_node_next_nil!(queue, 2);
+        assert_node_next!(queue, 1, 0);
+        assert_node_next!(queue, 0, 6);
+        assert_node_next!(queue, 6, 5);
+        assert_node_next!(queue, 5, 4);
+        assert_node_next!(queue, 4, 3);
+        assert_node_next_nil!(queue, 3);
+
+        assert_eq!(Err(PooledQueueError::QueueEmpty), queue.dequeue());
+        assert_eq!(0, queue.length());
+        assert_eq!(5, queue.enqueued());
+        assert_eq!(5, queue.dequeued());
+
+        assert_eq!(Ok(1), queue.enqueue(Items::F));
+        assert_eq!(1, queue.length());
+        assert_eq!(6, queue.enqueued());
+        assert_eq!(5, queue.dequeued());
+        assert_pointer_nodes!(queue, 2, 1, 0, 3);
+        assert_node_next!(queue, 2, 1);
+        assert_node_next_nil!(queue, 1);
+        assert_node_next!(queue, 0, 6);
+        assert_node_next!(queue, 6, 5);
+        assert_node_next!(queue, 5, 4);
+        assert_node_next!(queue, 4, 3);
+        assert_node_next_nil!(queue, 3);
+
+        assert_eq!(Ok(Items::F), queue.dequeue());
+        assert_eq!(0, queue.length());
+        assert_eq!(6, queue.enqueued());
+        assert_eq!(6, queue.dequeued());
+        assert_pointer_nodes!(queue, 1, 1, 0, 2);
+        assert_node_next_nil!(queue, 1);
+        assert_node_next!(queue, 0, 6);
+        assert_node_next!(queue, 6, 5);
+        assert_node_next!(queue, 5, 4);
+        assert_node_next!(queue, 4, 3);
+        assert_node_next!(queue, 3, 2);
+        assert_node_next_nil!(queue, 2);
     }
 }
