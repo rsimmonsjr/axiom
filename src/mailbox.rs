@@ -213,10 +213,6 @@ pub struct Mailbox {
     /// It is worth noting that the cursor which represents where the queue is actually
     /// dequeueing may be lagging behind if some messages are being skipped.
     dequeue_pos: AtomicUsize,
-    /// Position at which to dequeue the next message. If the mailbox has not skipped any
-    /// messages then this will be the same as the [`last_dequeue_pos`]. Otherwise if the
-    /// mailbox is skipping this will lag behind.
-    cursor_pos: AtomicUsize,
     /// The number of messages that have been skipped in the mailbox at the current time.
     /// Note that this will mostly be 0 unless a mailbox has skipped some messages while
     /// waiting for some other message.
@@ -249,7 +245,6 @@ impl Mailbox {
             buffer,
             enqueue_pos: AtomicUsize::new(0),
             dequeue_pos: AtomicUsize::new(1 << HALF_USIZE_BITS as usize),
-            cursor_pos: AtomicUsize::new(0),
             skipped: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
             enqueued: AtomicUsize::new(0),
@@ -377,7 +372,6 @@ mod tests {
     /// An enum used for testing message passing.
     enum TestMsg {
         MsgOne,
-        MsgTwo,
     }
 
     fn assert_counters(
