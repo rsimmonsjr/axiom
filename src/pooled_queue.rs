@@ -1,5 +1,6 @@
-//! Implements a bounded sized queue that uses a pair of pooled linked lists and
-//! provides concurrent read from the queue and write to the queue using mutexes.
+//! Implements a queue that uses a pair of pooled linked lists to eliminate enqueue allocation
+//! and provides concurrent read and write. Since this queue re-uses previous nodes it only
+//! has to do some pointer changes to enqueue or dequeue any item which makes it fast.
 
 use std::cell::UnsafeCell;
 use std::ptr::null_mut;
@@ -21,11 +22,16 @@ struct Node<T: Sync + Send> {
     next: AtomicPtr<Node<T>>,
 }
 
-/// Common data shared by both the enqueue and dequeue side of the data structure.
-pub struct Common<T: Sync + Send> {
-    /// Capacity of the list.
+/// Core data shared by both the enqueue and dequeue side of the data structure.
+struct Core<T: Sync + Send> {
+    /// Capacity of the list, which is the total number of items that can be stored. Note
+    /// that there are 2 more nodes than the capacity because neither the queue nor pool
+    /// should ever be empty.
     capacity: usize,
-    /// Node storage of the nodes.
+    /// Node storage of the nodes. These nodes are never read directly except during
+    /// allocation and tests. Therefore they can be stored in an [UnsafeCell]. It is critical
+    /// that the nodes don't change memory location so they are in a `Box<[Node<T>]>` slice
+    /// and the surrounding [Vec] allows for expanding the storage without moving existing.
     nodes: UnsafeCell<Vec<Box<[Node<T>]>>>,
     /// Number of values currently in the list.
     length: AtomicUsize,
@@ -35,15 +41,15 @@ pub struct Common<T: Sync + Send> {
     dequeued: AtomicUsize,
 }
 
-pub trait PooledQueueCommon<T: Sync + Send> {
-    fn common(&self) -> &Arc<Common<T>>;
+trait QueueCore<T: Sync + Send> {
+    fn common(&self) -> &Arc<Core<T>>;
 
     /// Returns the capacity of the list.
     fn capacity(&self) -> usize {
         self.common().capacity
     }
 
-    /// Returns the length indicating how many total items are in the queue.
+    /// Returns the length indicating how many total items are in the queue currently.
     fn length(&self) -> usize {
         self.common().length.load(Ordering::Relaxed)
     }
@@ -62,7 +68,7 @@ pub trait PooledQueueCommon<T: Sync + Send> {
 /// The enqueue side of the data structure.
 pub struct Enqueue<T: Sync + Send> {
     /// Reference to data common to enqueue and dequeue side of the data structure.
-    common: Arc<Common<T>>,
+    core: Arc<Core<T>>,
     /// Reference to the internal lock used.
     lock: Mutex<bool>,
     /// Head of the nodes in the pool list
@@ -72,8 +78,8 @@ pub struct Enqueue<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> Enqueue<T> {
-    /// Enqueues the value in the queue.
-    pub fn enqueue(&mut self, value: T) -> Result<usize, PooledQueueError> {
+    /// Pushes a value into the queue at the back of the queue.
+    pub fn push(&mut self, value: T) -> Result<usize, PooledQueueError> {
         // The pool head will become the new queue tail and the value will be put in the
         // current queue tai.
         let _lock = self.lock.lock().unwrap();
@@ -91,23 +97,25 @@ impl<T: Sync + Send> Enqueue<T> {
             queue_tail.next.store(self.pool_head, Ordering::Release);
             self.queue_tail = self.pool_head;
             self.pool_head = next_pool_head;
-            self.common.enqueued.fetch_add(1, Ordering::Relaxed);
-            let old_lenth = self.common.length.fetch_add(1, Ordering::Relaxed);
+            self.core.enqueued.fetch_add(1, Ordering::Relaxed);
+            let old_lenth = self.core.length.fetch_add(1, Ordering::Relaxed);
             Ok(old_lenth + 1)
         }
     }
+
+    // FIXME enable peek, cursor and popping from the middle.
 }
 
-impl<T: Sync + Send> PooledQueueCommon<T> for Enqueue<T> {
-    fn common(&self) -> &Arc<Common<T>> {
-        &self.common
+impl<T: Sync + Send> QueueCore<T> for Enqueue<T> {
+    fn common(&self) -> &Arc<Core<T>> {
+        &self.core
     }
 }
 
 /// The dequeue side of the data structure.
 pub struct Dequeue<T: Sync + Send> {
     // Reference to data common to enqueue and dequeue side of the data structure.
-    common: Arc<Common<T>>,
+    common: Arc<Core<T>>,
     /// Reference to the internal lock used.
     lock: Mutex<bool>,
     /// Tail of the nodes in the pool list
@@ -117,8 +125,8 @@ pub struct Dequeue<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> Dequeue<T> {
-    /// Dequeue the next pending value in the queue and return it to the user.
-    pub fn dequeue(&mut self) -> Result<T, PooledQueueError> {
+    /// Pops the head of the queue, removing it from the queue.
+    pub fn pop(&mut self) -> Result<T, PooledQueueError> {
         // The value will be pulled off the queue head and the node for the queue head
         // will now be the new pool tail.
         let _lock = self.lock.lock().unwrap();
@@ -142,8 +150,8 @@ impl<T: Sync + Send> Dequeue<T> {
     }
 }
 
-impl<T: Sync + Send> PooledQueueCommon<T> for Dequeue<T> {
-    fn common(&self) -> &Arc<Common<T>> {
+impl<T: Sync + Send> QueueCore<T> for Dequeue<T> {
+    fn common(&self) -> &Arc<Core<T>> {
         &self.common
     }
 }
@@ -182,7 +190,7 @@ pub fn create<T: Sync + Send>(capacity: usize) -> (Enqueue<T>, Dequeue<T>) {
         pool_head = nodes_vec.last_mut().unwrap();
     }
 
-    let common = Arc::new(Common {
+    let common = Arc::new(Core {
         capacity,
         nodes: UnsafeCell::new(vec![nodes_vec.into_boxed_slice()]),
         length: AtomicUsize::new(0),
@@ -191,7 +199,7 @@ pub fn create<T: Sync + Send>(capacity: usize) -> (Enqueue<T>, Dequeue<T>) {
     });
 
     let enqueue = Enqueue {
-        common: common.clone(),
+        core: common.clone(),
         lock: Mutex::new(true),
         pool_head,
         queue_tail,
@@ -276,7 +284,7 @@ mod tests {
         F,
     }
 
-    fn pointers_vec<T: Sync + Send>(common: &Common<T>) -> Vec<*mut Node<T>> {
+    fn pointers_vec<T: Sync + Send>(common: &Core<T>) -> Vec<*mut Node<T>> {
         unsafe {
             let mut results = Vec::<*mut _>::new();
             let nodes_vec = &*common.nodes.get();
@@ -297,10 +305,10 @@ mod tests {
         let (mut enqueue, mut dequeue) = pooled_queue;
 
         // fetch the pointers for easy checking of the nodes.
-        let pointers = pointers_vec(&*enqueue.common);
+        let pointers = pointers_vec(&*enqueue.core);
 
         assert_eq!(7, pointers.len());
-        assert_eq!(5, enqueue.common.capacity);
+        assert_eq!(5, enqueue.core.capacity);
         assert_eq!(5, enqueue.capacity());
         assert_eq!(5, dequeue.capacity());
 
@@ -326,7 +334,7 @@ mod tests {
 
         // Check that enqueueing removes pool head and appends to queue tail and changes
         // nothing else in the node structure.
-        assert_eq!(Ok(1), enqueue.enqueue(Items::A));
+        assert_eq!(Ok(1), enqueue.push(Items::A));
         assert_eq!(1, enqueue.length());
         assert_eq!(1, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
@@ -340,7 +348,7 @@ mod tests {
         assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 6, 5, 1);
 
         // Second enqueue should also move the pool_head node.
-        assert_eq!(Ok(2), enqueue.enqueue(Items::B));
+        assert_eq!(Ok(2), enqueue.push(Items::B));
         assert_eq!(2, enqueue.length());
         assert_eq!(2, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
@@ -353,7 +361,7 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 5, 4, 1);
 
-        assert_eq!(Ok(3), enqueue.enqueue(Items::C));
+        assert_eq!(Ok(3), enqueue.push(Items::C));
         assert_eq!(3, enqueue.length());
         assert_eq!(3, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
@@ -366,7 +374,7 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 4, 3, 1);
 
-        assert_eq!(Ok(4), enqueue.enqueue(Items::D));
+        assert_eq!(Ok(4), enqueue.push(Items::D));
         assert_eq!(4, enqueue.length());
         assert_eq!(4, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
@@ -379,7 +387,7 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 3, 2, 1);
 
-        assert_eq!(Ok(5), enqueue.enqueue(Items::E));
+        assert_eq!(Ok(5), enqueue.push(Items::E));
         assert_eq!(5, enqueue.length());
         assert_eq!(5, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
@@ -392,12 +400,12 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 2, 1, 1);
 
-        assert_eq!(Err(PooledQueueError::QueueFull), enqueue.enqueue(Items::F));
+        assert_eq!(Err(PooledQueueError::QueueFull), enqueue.push(Items::F));
         assert_eq!(5, enqueue.length());
         assert_eq!(5, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
 
-        assert_eq!(Ok(Items::A), dequeue.dequeue());
+        assert_eq!(Ok(Items::A), dequeue.pop());
         assert_eq!(4, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(1, dequeue.dequeued());
@@ -410,7 +418,7 @@ mod tests {
         assert_node_next_nil!(pointers, 0);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 6, 2, 1, 0);
 
-        assert_eq!(Ok(Items::B), dequeue.dequeue());
+        assert_eq!(Ok(Items::B), dequeue.pop());
         assert_eq!(3, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(2, dequeue.dequeued());
@@ -423,7 +431,7 @@ mod tests {
         assert_node_next_nil!(pointers, 6);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 5, 2, 1, 6);
 
-        assert_eq!(Ok(Items::C), dequeue.dequeue());
+        assert_eq!(Ok(Items::C), dequeue.pop());
         assert_eq!(2, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(3, dequeue.dequeued());
@@ -436,7 +444,7 @@ mod tests {
         assert_node_next_nil!(pointers, 5);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 4, 2, 1, 5);
 
-        assert_eq!(Ok(Items::D), dequeue.dequeue());
+        assert_eq!(Ok(Items::D), dequeue.pop());
         assert_eq!(1, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(4, dequeue.dequeued());
@@ -449,7 +457,7 @@ mod tests {
         assert_node_next_nil!(pointers, 4);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 3, 2, 1, 4);
 
-        assert_eq!(Ok(Items::E), dequeue.dequeue());
+        assert_eq!(Ok(Items::E), dequeue.pop());
         assert_eq!(0, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(5, dequeue.dequeued());
@@ -462,12 +470,12 @@ mod tests {
         assert_node_next_nil!(pointers, 3);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 2, 2, 1, 3);
 
-        assert_eq!(Err(PooledQueueError::QueueEmpty), dequeue.dequeue());
+        assert_eq!(Err(PooledQueueError::QueueEmpty), dequeue.pop());
         assert_eq!(0, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(5, dequeue.dequeued());
 
-        assert_eq!(Ok(1), enqueue.enqueue(Items::F));
+        assert_eq!(Ok(1), enqueue.push(Items::F));
         assert_eq!(1, dequeue.length());
         assert_eq!(6, dequeue.enqueued());
         assert_eq!(5, dequeue.dequeued());
@@ -480,7 +488,7 @@ mod tests {
         assert_node_next_nil!(pointers, 3);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 2, 1, 0, 3);
 
-        assert_eq!(Ok(Items::F), dequeue.dequeue());
+        assert_eq!(Ok(Items::F), dequeue.pop());
         assert_eq!(0, dequeue.length());
         assert_eq!(6, dequeue.enqueued());
         assert_eq!(6, dequeue.dequeued());
