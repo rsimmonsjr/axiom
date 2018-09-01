@@ -1,5 +1,6 @@
 extern crate uuid;
 
+pub mod actor_system;
 pub mod actors;
 pub mod mailbox;
 pub mod pooled_queue;

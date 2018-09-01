@@ -135,8 +135,7 @@
 //! Based on a modified version of (Go channels on steroids)
 //! [https://docs.google.com/document/d/1yIAYmbvL3JxOKOjuCyon7JhW4cSv1wy5hC0ApeGMV9s/pub
 
-use std::any::Any;
-use std::marker::{Send, Sync};
+use actors::Message;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -156,12 +155,6 @@ const HALF_USIZE_BITS: i8 = 32;
 
 //#[cfg(target_pointer_width = "32")]
 //const HALF_USIZE_BITS: i8 = 16;
-
-/// This is a type used by the system for sending a message through a channel to the actor.
-/// All messages are sent as this type and it is up to the message handler to cast the message
-/// properly and deal with it. It is recommended that the user make use of the [`dispatch`]
-/// utility function to help in the casting and calling operation.
-pub type Message = dyn Any + Sync + Send;
 
 /// A result returned by the dequeue function that indicates the disposition of the message.
 #[derive(Debug, Eq, PartialEq)]

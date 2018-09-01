@@ -1,9 +1,15 @@
-use mailbox::{DequeueResult, Message};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
+use mailbox::DequeueResult;
+use pooled_queue;
+use pooled_queue::*;
+use std::any::Any;
+use std::marker::{Send, Sync};
 use std::sync::{Arc, Mutex};
+
+/// This is a type used by the system for sending a message through a channel to the actor.
+/// All messages are sent as this type and it is up to the message handler to cast the message
+/// properly and deal with it. It is recommended that the user make use of the [`dispatch`]
+/// utility function to help in the casting and calling operation.
+pub type Message = dyn Any + Sync + Send;
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
 /// that handler with the message. If the dispatch is successful it will return the result of the
@@ -39,9 +45,16 @@ pub struct ActorId {
     // TODO DO We want to make these UUIDs?
     /// The node for the actor which is relative to the node referring to the actor. Nodes
     /// are not assigned unique IDs by the system.
-    node: i16,
+    // FIXME should we use UUID for this ??
+    node: u16,
     /// The unique id for this actor on this node.
     id: usize,
+}
+
+impl ActorId {
+    pub fn new(node: u16, id: usize) -> ActorId {
+        ActorId { node, id }
+    }
 }
 
 /// Context for an actor storing the information core to the actor and its management.
@@ -49,29 +62,20 @@ pub struct ActorContext {
     /// The id of this actor.
     aid: ActorId,
     /// The transmit side of the channel to use to send messages to the actor.
-    tx: Sender<Arc<Message>>,
+    tx: Enqueue<Arc<Message>>,
     /// The receiver part of the channel being sent to the actor.
-    rx: Mutex<Receiver<Arc<Message>>>,
-    /// The count of the number of messages that have been sent to the actor.
-    sent: AtomicUsize,
-    /// The count of the number of messages that have been received by the actor.
-    received: AtomicUsize,
-    /// The count of the number of messages currently pending in the actor's channel.
-    pending: AtomicUsize,
-    // TODO Add the ability to track execution time in min/mean/max/std_deviation
+    rx: Mutex<Dequeue<Arc<Message>>>, // TODO Add the ability to track execution time in min/mean/max/std_deviation
 }
 
 impl ActorContext {
     /// Creates a new actor context with the given actor id.
-    fn new(aid: ActorId) -> ActorContext {
-        let (tx, rx) = mpsc::channel::<Arc<Message>>();
+    pub fn new(aid: ActorId) -> ActorContext {
+        // FIXME Allow user to pass a mailbox size and potentially a grow function.
+        let (tx, rx) = pooled_queue::create::<Arc<Message>>(16);
         ActorContext {
             aid,
             tx,
             rx: Mutex::new(rx),
-            sent: AtomicUsize::new(0),
-            received: AtomicUsize::new(0),
-            pending: AtomicUsize::new(0),
         }
     }
 
@@ -80,9 +84,7 @@ impl ActorContext {
     /// function.
     fn send(&mut self, message: Arc<Message>) {
         // FIXME this should be part of the private API.
-        self.tx.send(message).unwrap();
-        self.sent.fetch_add(1, Ordering::Relaxed);
-        self.pending.fetch_add(1, Ordering::Relaxed);
+        self.tx.push(message).unwrap();
     }
 
     /// Receives the message on the actor and calls the handler for that actor. This function
@@ -90,10 +92,7 @@ impl ActorContext {
     fn receive(&mut self) -> Arc<Message> {
         // FIXME move this to private api.
         // FIXME We have to change this to enable message skipping according to the dispatcher.
-        let rx = self.rx.lock().unwrap();
-        let message = rx.recv().unwrap();
-        self.received.fetch_add(1, Ordering::Relaxed);
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        let message = self.rx.lock().unwrap().pop().unwrap();
         message
     }
 }
@@ -119,17 +118,17 @@ pub trait Actor {
 
     /// Returns the total number of messages that have been sent to this actor.
     fn sent(&self) -> usize {
-        self.context().sent.load(Ordering::Relaxed)
+        self.context().tx.enqueued()
     }
 
     /// Returns the total number of messages that have been received by this actor.
     fn received(&self) -> usize {
-        self.context().received.load(Ordering::Relaxed)
+        self.context().tx.dequeued()
     }
 
     /// Returns the total number of messages that are currently pending in the actor's channel.
     fn pending(&self) -> usize {
-        self.context().pending.load(Ordering::Relaxed)
+        self.context().tx.length()
     }
 
     /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
@@ -149,48 +148,12 @@ pub trait Actor {
     }
 }
 
-pub struct ActorSystem {
-    /// Holds a table of actors in the system keyed by their actor id (aid).
-    actors_by_aid: HashMap<ActorId, Arc<Mutex<Actor>>>,
-    /// Holds an [`AtomicUsize`] that is incremented when creating each new actor to assign
-    /// a unique id within this actor system to the actor.
-    aid_sequence: AtomicUsize,
-}
-
-impl ActorSystem {
-    pub fn new() -> ActorSystem {
-        ActorSystem {
-            // TODO do I need to give size hints for the table?
-            actors_by_aid: HashMap::new(),
-            aid_sequence: AtomicUsize::new(1),
-        }
-    }
-
-    pub fn spawn<T: Actor + 'static, F: Fn(ActorContext) -> T>(
-        &mut self,
-        f: F,
-    ) -> Arc<Mutex<Actor>> {
-        // FIXME This should probably be hidden so a actor table can track the actor instead.
-        // FIXME Implement a spawn() function in the ActorSystem to call this API
-        // FIXME The actor needs to implement an ID assigned by the ActorSystem.
-        // FIXME the spawn() function should move the dispatcher or have some means of making sure the user has no more access.
-        // FIXME A new kind of channel is needed to support skipping messages and should be integrated into the actor.
-        let aid = ActorId {
-            node: 0,
-            id: self.aid_sequence.fetch_add(1, Ordering::Relaxed),
-        };
-        let context = ActorContext::new(aid.clone());
-        let actor = Arc::new(Mutex::new(f(context)));
-        self.actors_by_aid.insert(aid, actor.clone());
-        actor
-    }
-}
-
 // --------------------- Test Cases ---------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actor_system::*;
 
     #[derive(Debug)]
     enum Operation {

@@ -4,14 +4,16 @@
 
 use std::cell::UnsafeCell;
 use std::ptr::null_mut;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 /// Error values that can be returned as a result of methods on the PooledQueue.
 #[derive(Debug, Eq, PartialEq)]
-pub enum PooledQueueError {
-    QueueFull,
-    QueueEmpty,
+pub enum Errors {
+    /// The structure is full, cannot enqueue anything else.
+    Full,
+    /// The structure is empty, nothing to dequeue.
+    Empty,
 }
 
 /// A node in a LinkedNodeList
@@ -41,27 +43,25 @@ struct Core<T: Sync + Send> {
     dequeued: AtomicUsize,
 }
 
-trait QueueCore<T: Sync + Send> {
-    fn common(&self) -> &Arc<Core<T>>;
-
+impl<T: Sync + Send> Core<T> {
     /// Returns the capacity of the list.
     fn capacity(&self) -> usize {
-        self.common().capacity
+        self.capacity
     }
 
     /// Returns the length indicating how many total items are in the queue currently.
     fn length(&self) -> usize {
-        self.common().length.load(Ordering::Relaxed)
+        self.length.load(Ordering::Relaxed)
     }
 
     /// Returns the total number of objects that have been enqueued to the list.
     fn enqueued(&self) -> usize {
-        self.common().enqueued.load(Ordering::Relaxed)
+        self.enqueued.load(Ordering::Relaxed)
     }
 
     /// Returns the total number of objects that have been dequeued from the list.
     fn dequeued(&self) -> usize {
-        self.common().dequeued.load(Ordering::Relaxed)
+        self.dequeued.load(Ordering::Relaxed)
     }
 }
 
@@ -69,8 +69,6 @@ trait QueueCore<T: Sync + Send> {
 pub struct Enqueue<T: Sync + Send> {
     /// Reference to data common to enqueue and dequeue side of the data structure.
     core: Arc<Core<T>>,
-    /// Reference to the internal lock used.
-    lock: Mutex<bool>,
     /// Head of the nodes in the pool list
     pool_head: *mut Node<T>,
     /// Tail of the nodes in the queue list
@@ -79,17 +77,16 @@ pub struct Enqueue<T: Sync + Send> {
 
 impl<T: Sync + Send> Enqueue<T> {
     /// Pushes a value into the queue at the back of the queue.
-    pub fn push(&mut self, value: T) -> Result<usize, PooledQueueError> {
+    pub fn push(&mut self, value: T) -> Result<usize, Errors> {
         // The pool head will become the new queue tail and the value will be put in the
         // current queue tai.
-        let _lock = self.lock.lock().unwrap();
         unsafe {
             let nil = null_mut();
             let pool_head = &mut (*self.pool_head);
             let queue_tail = &mut (*self.queue_tail);
             let next_pool_head = pool_head.next.load(Ordering::Relaxed);
             if next_pool_head == nil {
-                return Err(PooledQueueError::QueueFull);
+                return Err(Errors::Full);
             }
             pool_head.next.store(nil, Ordering::Relaxed);
             queue_tail.next.load(Ordering::Acquire);
@@ -103,21 +100,39 @@ impl<T: Sync + Send> Enqueue<T> {
         }
     }
 
+    // -- Delegates to the core. DEV NOTE: We use these delegates to avoid exposing Core publicly.
+
+    /// Returns the capacity of the list.
+    pub fn capacity(&self) -> usize {
+        self.core.capacity()
+    }
+
+    /// Returns the length indicating how many total items are in the queue currently.
+    pub fn length(&self) -> usize {
+        self.core.length()
+    }
+
+    /// Returns the total number of objects that have been enqueued to the list.
+    pub fn enqueued(&self) -> usize {
+        self.core.enqueued()
+    }
+
+    /// Returns the total number of objects that have been dequeued from the list.
+    pub fn dequeued(&self) -> usize {
+        self.core.dequeued()
+    }
+
     // FIXME enable peek, cursor and popping from the middle.
 }
 
-impl<T: Sync + Send> QueueCore<T> for Enqueue<T> {
-    fn common(&self) -> &Arc<Core<T>> {
-        &self.core
-    }
-}
+unsafe impl<T: Send + Sync> Send for Enqueue<T> {}
+
+unsafe impl<T: Send + Sync> Sync for Enqueue<T> {}
 
 /// The dequeue side of the data structure.
 pub struct Dequeue<T: Sync + Send> {
-    // Reference to data common to enqueue and dequeue side of the data structure.
-    common: Arc<Core<T>>,
-    /// Reference to the internal lock used.
-    lock: Mutex<bool>,
+    /// Reference to data common to enqueue and dequeue side of the data structure.
+    core: Arc<Core<T>>,
     /// Tail of the nodes in the pool list
     pool_tail: *mut Node<T>,
     /// Head of the nodes in the queue list
@@ -126,35 +141,54 @@ pub struct Dequeue<T: Sync + Send> {
 
 impl<T: Sync + Send> Dequeue<T> {
     /// Pops the head of the queue, removing it from the queue.
-    pub fn pop(&mut self) -> Result<T, PooledQueueError> {
+    pub fn pop(&mut self) -> Result<T, Errors> {
         // The value will be pulled off the queue head and the node for the queue head
         // will now be the new pool tail.
-        let _lock = self.lock.lock().unwrap();
         unsafe {
             let nil = null_mut();
             let queue_head = &mut (*self.queue_head);
             let pool_tail = &mut (*self.pool_tail);
             let next_queue_head = queue_head.next.load(Ordering::Acquire);
             if nil == next_queue_head {
-                return Err(PooledQueueError::QueueEmpty);
+                return Err(Errors::Empty);
             }
             let result = queue_head.value.take().unwrap();
             queue_head.next.store(nil, Ordering::Relaxed);
             pool_tail.next.store(self.queue_head, Ordering::Relaxed);
             self.pool_tail = self.queue_head;
             self.queue_head = next_queue_head;
-            self.common.dequeued.fetch_add(1, Ordering::Relaxed);
-            self.common.length.fetch_sub(1, Ordering::Relaxed);
+            self.core.dequeued.fetch_add(1, Ordering::Relaxed);
+            self.core.length.fetch_sub(1, Ordering::Relaxed);
             Ok(result)
         }
     }
-}
 
-impl<T: Sync + Send> QueueCore<T> for Dequeue<T> {
-    fn common(&self) -> &Arc<Core<T>> {
-        &self.common
+    // -- Delegates to the core. DEV NOTE: We use these delegates to avoid exposing Core publicly.
+
+    /// Returns the capacity of the list.
+    pub fn capacity(&self) -> usize {
+        self.core.capacity()
+    }
+
+    /// Returns the length indicating how many total items are in the queue currently.
+    pub fn length(&self) -> usize {
+        self.core.length()
+    }
+
+    /// Returns the total number of objects that have been enqueued to the list.
+    pub fn enqueued(&self) -> usize {
+        self.core.enqueued()
+    }
+
+    /// Returns the total number of objects that have been dequeued from the list.
+    pub fn dequeued(&self) -> usize {
+        self.core.dequeued()
     }
 }
+
+unsafe impl<T: Send + Sync> Send for Dequeue<T> {}
+
+unsafe impl<T: Send + Sync> Sync for Dequeue<T> {}
 
 /// Creates a pooled queue enqueue and dequeue mechanisms.
 pub fn create<T: Sync + Send>(capacity: usize) -> (Enqueue<T>, Dequeue<T>) {
@@ -200,14 +234,12 @@ pub fn create<T: Sync + Send>(capacity: usize) -> (Enqueue<T>, Dequeue<T>) {
 
     let enqueue = Enqueue {
         core: common.clone(),
-        lock: Mutex::new(true),
         pool_head,
         queue_tail,
     };
 
     let dequeue = Dequeue {
-        common,
-        lock: Mutex::new(true),
+        core: common,
         pool_tail,
         queue_head,
     };
@@ -400,7 +432,7 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 2, 1, 1);
 
-        assert_eq!(Err(PooledQueueError::QueueFull), enqueue.push(Items::F));
+        assert_eq!(Err(Errors::Full), enqueue.push(Items::F));
         assert_eq!(5, enqueue.length());
         assert_eq!(5, enqueue.enqueued());
         assert_eq!(0, enqueue.dequeued());
@@ -470,7 +502,7 @@ mod tests {
         assert_node_next_nil!(pointers, 3);
         assert_pointer_nodes!(pointers, enqueue, dequeue, 2, 2, 1, 3);
 
-        assert_eq!(Err(PooledQueueError::QueueEmpty), dequeue.pop());
+        assert_eq!(Err(Errors::Empty), dequeue.pop());
         assert_eq!(0, dequeue.length());
         assert_eq!(5, dequeue.enqueued());
         assert_eq!(5, dequeue.dequeued());
