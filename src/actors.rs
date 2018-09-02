@@ -151,7 +151,7 @@ pub trait Actor {
     fn receive(&mut self) {
         // FIXME this should be part of the private API.
         let message: Arc<Message> = self.context_mut().receive().unwrap();
-        let handle_result = self.handle_message(message);
+        let _handle_result = self.handle_message(message);
     }
 }
 
@@ -159,8 +159,8 @@ pub trait Actor {
 
 #[cfg(test)]
 mod tests {
-    use actor_system::*;
     use super::*;
+    use actor_system::*;
 
     #[derive(Debug)]
     enum Operation {
@@ -273,19 +273,19 @@ mod tests {
         assert_eq!(actor.sent(), 0);
         assert_eq!(actor.sent(), 0);
         assert_eq!(actor.received(), 0);
-        actor.send(Arc::new(Operation::Inc));
+        actor.send(Arc::new(Operation::Inc)).unwrap();
         assert_eq!(actor.pending(), 1);
         assert_eq!(actor.sent(), 1);
         assert_eq!(actor.received(), 0);
-        actor.send(Arc::new(Operation::Inc));
+        actor.send(Arc::new(Operation::Inc)).unwrap();
         assert_eq!(actor.pending(), 2);
         assert_eq!(actor.sent(), 2);
         assert_eq!(actor.received(), 0);
-        actor.send(Arc::new(Operation::Dec));
+        actor.send(Arc::new(Operation::Dec)).unwrap();
         assert_eq!(actor.pending(), 3);
         assert_eq!(actor.sent(), 3);
         assert_eq!(actor.received(), 0);
-        actor.send(Arc::new(10 as i32));
+        actor.send(Arc::new(10 as i32)).unwrap();
         assert_eq!(actor.pending(), 4);
         assert_eq!(actor.sent(), 4);
         assert_eq!(actor.received(), 0);

@@ -119,8 +119,6 @@ pub struct Node {
     lap: AtomicUsize,
 }
 
-struct Core {}
-
 /// Holds the mailbox for an Actor that manages the messages being sent to the actor. This
 /// is implemented as a ring buffer with a bounded size that allows the reader to skip messages
 /// rather than currently process the messages in the queue. This enables an actor to perform

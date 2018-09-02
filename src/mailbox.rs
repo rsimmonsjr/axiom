@@ -5,8 +5,8 @@
 
 use std::cell::UnsafeCell;
 use std::ptr::null_mut;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Error values that can be returned as a result of methods on the PooledQueue.
@@ -26,7 +26,7 @@ struct MailboxNode<T: Sync + Send> {
     next: AtomicPtr<MailboxNode<T>>,
 }
 
-trait MailboxCoreOps<T: Sync + Send> {
+pub trait MailboxCoreOps<T: Sync + Send> {
     // Fetch the core of the mailbox.
     fn core(&self) -> &MailboxCore<T>;
 
@@ -52,7 +52,7 @@ trait MailboxCoreOps<T: Sync + Send> {
 }
 
 /// Core data shared by both the enqueue and dequeue side of the data structure.
-struct MailboxCore<T: Sync + Send> {
+pub struct MailboxCore<T: Sync + Send> {
     /// Capacity of the list, which is the total number of items that can be stored. Note
     /// that there are 2 more nodes than the capacity because neither the queue nor pool
     /// should ever be empty.
