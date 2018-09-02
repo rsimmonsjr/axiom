@@ -26,8 +26,9 @@ struct MailboxNode<T: Sync + Send> {
     next: AtomicPtr<MailboxNode<T>>,
 }
 
+/// Operations that work on the core of the mailbox.
 pub trait MailboxCoreOps<T: Sync + Send> {
-    // Fetch the core of the mailbox.
+    /// Fetch the core of the mailbox.
     fn core(&self) -> &MailboxCore<T>;
 
     /// Returns the capacity of the list.
@@ -92,28 +93,27 @@ pub struct MailboxSender<T: Sync + Send> {
 impl<T: Sync + Send> MailboxSender<T> {
     /// Pushes a value into the queue at the back of the queue.
     pub fn send(&mut self, value: T) -> Result<usize, MailboxErrors> {
-        // Lock to make sure threads are managed here.
-        let _guard = self.send_lock.lock().unwrap();
         // The pool head will become the new queue tail and the value will be put in the
         // current queue tai.
+        let nil = null_mut();
         unsafe {
-            let nil = null_mut();
+            let _guard = self.send_lock.lock().unwrap();
             let pool_head = &mut (*self.pool_head);
-            let queue_tail = &mut (*self.queue_tail);
             let next_pool_head = pool_head.next.load(Ordering::Relaxed);
             if next_pool_head == nil {
                 return Err(MailboxErrors::Full);
             }
+            let queue_tail = &mut (*self.queue_tail);
             pool_head.next.store(nil, Ordering::Relaxed);
             queue_tail.next.load(Ordering::Acquire);
             queue_tail.value = Some(value);
             queue_tail.next.store(self.pool_head, Ordering::Release);
             self.queue_tail = self.pool_head;
             self.pool_head = next_pool_head;
-            self.core.enqueued.fetch_add(1, Ordering::Relaxed);
-            let old_lenth = self.core.length.fetch_add(1, Ordering::Relaxed);
-            Ok(old_lenth + 1)
         }
+        self.core.enqueued.fetch_add(1, Ordering::Relaxed);
+        let old_lenth = self.core.length.fetch_add(1, Ordering::Relaxed);
+        Ok(old_lenth + 1)
     }
 
     // FIXME enable peek, cursor and popping from the middle.
@@ -145,26 +145,27 @@ pub struct MailboxReceiver<T: Sync + Send> {
 impl<T: Sync + Send> MailboxReceiver<T> {
     /// Pops the head of the queue, removing it from the queue.
     pub fn receive(&mut self) -> Result<T, MailboxErrors> {
-        let _lock = self.receive_lock.lock().unwrap();
         // The value will be pulled off the queue head and the node for the queue head
         // will now be the new pool tail.
-        unsafe {
-            let nil = null_mut();
+        let nil = null_mut();
+        let value = unsafe {
+            let _lock = self.receive_lock.lock().unwrap();
             let queue_head = &mut (*self.queue_head);
-            let pool_tail = &mut (*self.pool_tail);
             let next_queue_head = queue_head.next.load(Ordering::Acquire);
             if nil == next_queue_head {
                 return Err(MailboxErrors::Empty);
             }
+            let pool_tail = &mut (*self.pool_tail);
             let result = queue_head.value.take().unwrap();
             queue_head.next.store(nil, Ordering::Relaxed);
             pool_tail.next.store(self.queue_head, Ordering::Relaxed);
             self.pool_tail = self.queue_head;
             self.queue_head = next_queue_head;
-            self.core.dequeued.fetch_add(1, Ordering::Relaxed);
-            self.core.length.fetch_sub(1, Ordering::Relaxed);
-            Ok(result)
-        }
+            result
+        };
+        self.core.dequeued.fetch_add(1, Ordering::Relaxed);
+        self.core.length.fetch_sub(1, Ordering::Relaxed);
+        Ok(value)
     }
 }
 
