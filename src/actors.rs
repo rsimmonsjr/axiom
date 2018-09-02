@@ -1,15 +1,35 @@
-use mailbox::DequeueResult;
-use pooled_queue;
-use pooled_queue::*;
+use mailbox;
+use mailbox::*;
 use std::any::Any;
 use std::marker::{Send, Sync};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// This is a type used by the system for sending a message through a channel to the actor.
 /// All messages are sent as this type and it is up to the message handler to cast the message
 /// properly and deal with it. It is recommended that the user make use of the [`dispatch`]
 /// utility function to help in the casting and calling operation.
 pub type Message = dyn Any + Sync + Send;
+
+/// A result returned by the dequeue function that indicates the disposition of the message.
+#[derive(Debug, Eq, PartialEq)]
+pub enum DequeueResult {
+    /// The message was processed and can be removed from the channel. Note that this doesn't
+    /// necessarily mean that anything was done with the message, just that it can be removed.
+    /// It is up to the message handler to decide what if anything to do with the message.
+    Processed,
+    /// The message was skipped and should remain in the queue and the dequeue should loop
+    /// to fetch the next pending message; once a message is skipped then a skip tail will
+    /// be created in the channel that will act as the actual tail until the [`SkipCleared']
+    /// result is returned from a message handler. This enables an actor to skip messages while
+    /// working on a process and then clear the skip buffer and resume normal processing.
+    Skipped,
+    /// Clears the skip tail on the channel. A skip tail is present when a message has been
+    /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
+    /// the same as [`Processed`].
+    SkipCleared,
+    /// The message generated an error of some kind and a panic should occur.
+    Panic,
+}
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
 /// that handler with the message. If the dispatch is successful it will return the result of the
@@ -20,14 +40,6 @@ pub type Message = dyn Any + Sync + Send;
 ///
 /// Dispatches the message to one of 3 different funtions thath andle different types or returns
 /// the Panic result if the code cannot dispatch the message.
-///
-/// ```rust
-/// dispatch(self, msg.clone(), Counter::handle_i32)
-///      .or_else(|| dispatch(self, msg.clone(), Counter::handle_op))
-///      .or_else(|| dispatch(self, msg.clone(), Counter::handle_bool))
-///      .or_else(|| dispatch(self, msg.clone(), Counter::handle_f32))
-///      .unwrap_or(DispatchResult::Panic)
-/// ```
 pub fn dispatch<T: 'static, S, R>(
     state: &mut S,
     message: Arc<Message>,
@@ -62,38 +74,33 @@ pub struct ActorContext {
     /// The id of this actor.
     aid: ActorId,
     /// The transmit side of the channel to use to send messages to the actor.
-    tx: Enqueue<Arc<Message>>,
+    tx: MailboxSender<Arc<Message>>,
     /// The receiver part of the channel being sent to the actor.
-    rx: Mutex<Dequeue<Arc<Message>>>, // TODO Add the ability to track execution time in min/mean/max/std_deviation
+    rx: MailboxReceiver<Arc<Message>>, // TODO Add the ability to track execution time in min/mean/max/std_deviation
 }
 
 impl ActorContext {
     /// Creates a new actor context with the given actor id.
     pub fn new(aid: ActorId) -> ActorContext {
         // FIXME Allow user to pass a mailbox size and potentially a grow function.
-        let (tx, rx) = pooled_queue::create::<Arc<Message>>(16);
-        ActorContext {
-            aid,
-            tx,
-            rx: Mutex::new(rx),
-        }
+        let (tx, rx) = mailbox::create::<Arc<Message>>(16);
+        ActorContext { aid, tx, rx }
     }
 
     /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
     /// if the user wants to retain the message they should clone the `Arc` before calling this
     /// function.
-    fn send(&mut self, message: Arc<Message>) {
+    fn send(&mut self, message: Arc<Message>) -> Result<usize, MailboxErrors> {
         // FIXME this should be part of the private API.
-        self.tx.push(message).unwrap();
+        self.tx.send(message)
     }
 
     /// Receives the message on the actor and calls the handler for that actor. This function
     /// will be typically called by the scheduler to process messages in the actor's channel.
-    fn receive(&mut self) -> Arc<Message> {
+    fn receive(&mut self) -> Result<Arc<Message>, MailboxErrors> {
         // FIXME move this to private api.
         // FIXME We have to change this to enable message skipping according to the dispatcher.
-        let message = self.rx.lock().unwrap().pop().unwrap();
-        message
+        self.rx.receive()
     }
 }
 
@@ -118,7 +125,7 @@ pub trait Actor {
 
     /// Returns the total number of messages that have been sent to this actor.
     fn sent(&self) -> usize {
-        self.context().tx.enqueued()
+        self.context().rx.enqueued()
     }
 
     /// Returns the total number of messages that have been received by this actor.
@@ -134,17 +141,17 @@ pub trait Actor {
     /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
     /// if the user wants to retain the message they should clone the `Arc` before calling this
     /// function.
-    fn send(&mut self, message: Arc<Message>) {
+    fn send(&mut self, message: Arc<Message>) -> Result<usize, MailboxErrors> {
         // FIXME this should be part of the private API.
         self.context_mut().send(message)
     }
 
     /// Receives the message on the actor and calls the dispatcher for that actor. This function
     /// will be typically called by the scheduler to process messages in the actor's channel.
-    fn receive(&mut self) -> DequeueResult {
+    fn receive(&mut self) {
         // FIXME this should be part of the private API.
-        let message: Arc<Message> = self.context_mut().receive();
-        self.handle_message(message)
+        let message: Arc<Message> = self.context_mut().receive().unwrap();
+        let handle_result = self.handle_message(message);
     }
 }
 
@@ -152,8 +159,8 @@ pub trait Actor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use actor_system::*;
+    use super::*;
 
     #[derive(Debug)]
     enum Operation {

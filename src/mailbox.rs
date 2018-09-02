@@ -1,405 +1,527 @@
-//! Implements a mailbox that is principally a FIFO queue but has the a dequeue position as
-//! well as a cursor where messages can be dequeued while skipping messages in the mailbox.
-//!
-//! Positions values in the mailbox structure are made up of two components. The upper half
-//! contains a lap variable that signals that a node is enabled for writing (on even laps)
-//! and reading (on odd laps). The lower half is the actual index of the position in the buffer.
-//! We need this combination because we need to swap out the whole position atomically.
-//!
-//! ## Detailed Explanation
-//!
-//! The following shows some examples of the mailbox structure with 5 node. D is the Dequeue
-//! position and points to the first possible node to be dequeued. C is the position of the
-//! cursor which will be the same as D if the mailbox has never skipped a message; however
-//! if the mailbox has skipped a message it might be advanced from the D position. E is the
-//! current enqueue position in the mailbox. For all pointers the value in the parentheses
-//! is the "lap" of the pointer which not only indicates how many trips around the buffer the
-//! pointer has had but also is used to signal if a node can be read or written. E starts at
-//! 0 whereas D and C start at 1. When the pointer reaches the end of the allocated buffer the
-//! value wraps around and the lap is increased by 2. This means E will always be even and D
-//! and C will always be odd. A pointer can operate on a node when in the buffer when the lap
-//! in the node matches the pointer. In the following structures an N indicates the node has
-//! no value and a S indicates there is a value in the node. The second element per node is
-//! the lap for that node which is always incremented by 1 so that it alternates between
-//! writable and readable.
-//!
-//! The starting structure looks like this for a 5 node allocated buffer. Note that there is
-//! nothing to dequeue because the D and C point at a node where the lap is less than the
-//! lap in D and C.
-//! ```
-//! 0: [ N, 0] <-- E(0) <-- D(1) <-- C(1)
-//! 1: [ N, 0]
-//! 2: [ N, 0]
-//! 3: [ N, 0]
-//! 4: [ N, 0]
-//! ```
-//!
-//! After enqueueing a few messages the D and C value stay the same but E has moved and the
-//! lap on the nodes written have been incremented by one indicating they can be read.
-//! ```
-//! 0: [ S, 1] <-- D(1) <-- C(1)
-//! 1: [ S, 1]
-//! 2: [ S, 1]
-//! 3: [ S, 1]
-//! 4: [ N, 0] <-- E(0)
-//! ```
-//!
-//! After dequeueing 2 nodes the lap has been incremented again and  the D and C have moved.
-//! ```
-//! 0: [ N, 2]
-//! 1: [ N, 2]
-//! 2: [ S, 1] <-- D(1) <-- C(1)
-//! 3: [ S, 1]
-//! 4: [ N, 0] <-- E(0)
-//! ```
-//!
-//! Enqueueing 1 more node means E has to lap around the buffer and this its lap is incremented
-//! by 2 and thus remains even and points at a node with a matching lap so the node can be
-//! written to in the queue.
-//! ```
-//! 0: [ N, 2] <-- E(2)
-//! 1: [ N, 2]
-//! 2: [ S, 1] <-- D(1) <-- C(1)
-//! 3: [ S, 1]
-//! 4: [ S, 1]
-//! ```
-//!
-//! If we enqueue a couple more messages E now points at a node with an odd numbered lap and
-//! the pending messages are the size of the queue so there is no way another message can
-//! be enqueued to the buffer and the buffer is full. C or D will have to increment the node lap
-//! in order to allow the node to be an even number again and thus writable.
-//! ```
-//! 0: [ S, 3]
-//! 1: [ S, 3]
-//! 2: [ S, 1] <-- D(1) <-- C(1) <-- E(2)
-//! 3: [ S, 1]
-//! 4: [ S, 1]
-//! ```
-//!
-//! Now we enqueue a few more nodes and dequeue more and D and C have to wrap around, again being
-//! Incremented by two.
-//! ```
-//! 0: [ S, 3] <-- D(3) <-- C(3)
-//! 1: [ S, 3]
-//! 2: [ S, 3]
-//! 3: [ S, 3]
-//! 4: [ N, 2] <-- E(2)
-//! ```
-//!
-//! Now things get a bit more complicated, We begin to skip some messages in the mailbox and
-//! thus the cursor advances in front of D, skipping messages.
-//! ```
-//! 0: [ S, 3] <-- D(3)
-//! 1: [ S, 3]
-//! 2: [ S, 3] <-- C(3)
-//! 3: [ S, 3]
-//! 4: [ N, 2] <-- E(2)
-//! ```
-//!
-//! The cursor finds a message that it wants to dequeue and removes it from the buffer and
-//! sets the value in the node to a N but does not yet increment the lap. Also note that at
-//! this time E cannot advance because D is still officially the first node that can be dequeued.
-//! In this case if the developer needed to enqueue more messages they should have made the
-//! buffer bigger.
-//! ```
-//! 0: [ S, 3] <-- D(3)
-//! 1: [ S, 3]
-//! 2: [ N, 3]
-//! 3: [ S, 3] <-- C(3)
-//! 4: [ N, 2] <-- E(2)
-//! ```
-//!
-//! Now C has been reset back to D and the skipped messages will be read now. Note that the
-//! node at 2 has not been read but the node at 3 has been.
-//! ```
-//! 0: [ S, 3] <-- D(3) <-- C(3)
-//! 1: [ S, 3]
-//! 2: [ N, 3]
-//! 3: [ S, 3]
-//! 4: [ N, 2] <-- E(2)
-//! ```
-//!
-//! Now C and D both point to the node that was previously dequeued when the cursor was
-//! active. When the node is checked for being dequeued, it will notice no more message in
-//! that node (an N) and then will skip to the next node automatically. Also note that E
-//! can advance again.
-//! ```
-//! 0: [ N, 4]
-//! 1: [ N, 4]
-//! 2: [ N, 3] <-- D(3) <-- C(3)
-//! 3: [ S, 3]
-//! 4: [ N, 2] <-- E(2)
-//! ```
-//!
-//! ## Credits:
-//! Based on a modified version of (Go channels on steroids)
-//! [https://docs.google.com/document/d/1yIAYmbvL3JxOKOjuCyon7JhW4cSv1wy5hC0ApeGMV9s/pub
+//! Implements a mailbox which is a queue based on pre-allocated pool of nodes so no LinkedList
+//! allocations occur on enqueue. This mailbox supports skipping messages and peeking at the
+//! current message. The mailbox locks internally on send and receive to enforce concurrency
+//! restrictions in the code.
 
-use actors::Message;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
+use std::ptr::null_mut;
 use std::sync::Arc;
-use std::thread;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
-type HalfUsize = u32;
-
-const HALF_USIZE_BITS: i8 = 32;
-
-//#[cfg(target_pointer_width = "64")]
-//type HalfUsize = u32;
-
-//#[cfg(target_pointer_width = "32")]
-//const HALF_USIZE_BITS: i8 = 32;
-
-//#[cfg(target_pointer_width = "32")]
-//type HalfUsize = u16;
-
-//#[cfg(target_pointer_width = "32")]
-//const HALF_USIZE_BITS: i8 = 16;
-
-/// A result returned by the dequeue function that indicates the disposition of the message.
+/// Error values that can be returned as a result of methods on the PooledQueue.
 #[derive(Debug, Eq, PartialEq)]
-pub enum DequeueResult {
-    /// The message was processed and can be removed from the channel. Note that this doesn't
-    /// necessarily mean that anything was done with the message, just that it can be removed.
-    /// It is up to the message handler to decide what if anything to do with the message.
-    Processed,
-    /// The message was skipped and should remain in the queue and the dequeue should loop
-    /// to fetch the next pending message; once a message is skipped then a skip tail will
-    /// be created in the channel that will act as the actual tail until the [`SkipCleared']
-    /// result is returned from a message handler. This enables an actor to skip messages while
-    /// working on a process and then clear the skip buffer and resume normal processing.
-    Skipped,
-    /// Clears the skip tail on the channel. A skip tail is present when a message has been
-    /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
-    /// the same as [`Processed`].
-    SkipCleared,
-    /// The message generated an error of some kind and a panic should occur.
-    Panic,
+pub enum MailboxErrors {
+    /// The structure is full, cannot enqueue anything else.
+    Full,
+    /// The structure is empty, nothing to dequeue.
+    Empty,
 }
 
-/// A single node in the ring buffer.
-pub struct Node {
-    /// Could be empty or contains a value set in the node.
-    message: Option<Arc<Message>>,
-    /// This is the "lap" variable that provides an indication of whether the node is ready to
-    /// read or write and encompasses the semantics that all even numbers indicate ready for
-    /// writing while all odd numbers indicate ready for reading. This enables us to avoid
-    /// comparing portions all the time.
-    lap: AtomicUsize,
+/// A node in a LinkedNodeList
+struct MailboxNode<T: Sync + Send> {
+    /// Value that the node is holding or None if the node is empty.
+    value: Option<T>,
+    /// The pointer to the next node in the list.
+    next: AtomicPtr<MailboxNode<T>>,
 }
 
-/// Holds the mailbox for an Actor that manages the messages being sent to the actor. This
-/// is implemented as a ring buffer with a bounded size that allows the reader to skip messages
-/// rather than currently process the messages in the queue. This enables an actor to perform
-/// some process that requires other messages to be skipped for the time being. Note that all
-/// counters are kept as atomics and thus are O(1) to access. In this case we get more perfomance
-/// by tracking the counters rather than iterating the structure.
-pub struct Mailbox {
-    /// The buffer holding the nodes that make up the mailbox. Actors should usually need
-    /// only small buffers unless they expect that there will be a lot of backlogged messages
-    /// from slow actors or they will be doing extensive skipping. Usually if you are creating
-    /// huge ring buffers you may want to rethink your actor topology.
-    buffer: Vec<Node>,
-    /// Position in the buffer at which to enqueue the next message.
-    enqueue_pos: AtomicUsize,
-    /// Position in the buffer at which to the last message available to be dequeued occupies.
-    /// It is worth noting that the cursor which represents where the queue is actually
-    /// dequeueing may be lagging behind if some messages are being skipped.
-    dequeue_pos: AtomicUsize,
-    /// The number of messages that have been skipped in the mailbox at the current time.
-    /// Note that this will mostly be 0 unless a mailbox has skipped some messages while
-    /// waiting for some other message.
-    skipped: AtomicUsize,
-    /// The total number of messages that have been sent to this mailbox. When the mailbox
-    /// pending is the same as the capacity then the mailbox is full.
-    pending: AtomicUsize,
-    /// The total number of messages that have been sent to this mailbox (enqueued).
+trait MailboxCoreOps<T: Sync + Send> {
+    // Fetch the core of the mailbox.
+    fn core(&self) -> &MailboxCore<T>;
+
+    /// Returns the capacity of the list.
+    fn capacity(&self) -> usize {
+        self.core().capacity
+    }
+
+    /// Returns the length indicating how many total items are in the queue currently.
+    fn length(&self) -> usize {
+        self.core().length.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total number of objects that have been enqueued to the list.
+    fn enqueued(&self) -> usize {
+        self.core().enqueued.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total number of objects that have been dequeued from the list.
+    fn dequeued(&self) -> usize {
+        self.core().dequeued.load(Ordering::Relaxed)
+    }
+}
+
+/// Core data shared by both the enqueue and dequeue side of the data structure.
+struct MailboxCore<T: Sync + Send> {
+    /// Capacity of the list, which is the total number of items that can be stored. Note
+    /// that there are 2 more nodes than the capacity because neither the queue nor pool
+    /// should ever be empty.
+    capacity: usize,
+    /// Node storage of the nodes. These nodes are never read directly except during
+    /// allocation and tests. Therefore they can be stored in an [UnsafeCell]. It is critical
+    /// that the nodes don't change memory location so they are in a `Box<[Node<T>]>` slice
+    /// and the surrounding [Vec] allows for expanding the storage without moving existing.
+    nodes: UnsafeCell<Vec<Box<[MailboxNode<T>]>>>,
+    /// Number of values currently in the list.
+    length: AtomicUsize,
+    /// Total number of values that have been enqueued.
     enqueued: AtomicUsize,
-    /// The total number of messages that have been received from this mailbox (dequeued)
+    /// Total number of values that have been dequeued.
     dequeued: AtomicUsize,
 }
 
-impl Mailbox {
-    /// Creates a new mailbox with the size of the given capacity.  The most possible mistakes
-    /// when calling this method are either failing to assign a buffer big enough to
-    /// accommodate the message flow or assigning a buffer that is too big and wasting space.
-    /// The developer should pay close attention to load testing
-    /// their actor and assigning it a buffer that is appropriate for the amount of messages it
-    /// will receive and the amount of skipping being done.
-    pub fn new(capacity: HalfUsize) -> Mailbox {
-        let mut buffer = Vec::<Node>::with_capacity(capacity as usize);
-        for _ in 0..capacity {
-            buffer.push(Node {
-                message: None,
-                lap: AtomicUsize::new(0),
-            })
-        }
-        Mailbox {
-            buffer,
-            enqueue_pos: AtomicUsize::new(0),
-            dequeue_pos: AtomicUsize::new(1 << HALF_USIZE_BITS as usize),
-            skipped: AtomicUsize::new(0),
-            pending: AtomicUsize::new(0),
-            enqueued: AtomicUsize::new(0),
-            dequeued: AtomicUsize::new(0),
-        }
+impl<T: Sync + Send> MailboxCoreOps<T> for MailboxCore<T> {
+    // Fetch the core of the mailbox.
+    fn core(&self) -> &MailboxCore<T> {
+        &self
     }
+}
 
-    /// The total number of messages that are currently pending in the mailbox.
-    pub fn pending(&self) -> usize {
-        self.pending.load(Ordering::Relaxed)
-    }
+/// The enqueue side of the data structure.
+pub struct MailboxSender<T: Sync + Send> {
+    /// Reference to data common to enqueue and dequeue side of the data structure.
+    core: Arc<MailboxCore<T>>,
+    /// Lock used internally during send.
+    send_lock: Mutex<bool>,
+    /// Head of the nodes in the pool list
+    pool_head: *mut MailboxNode<T>,
+    /// Tail of the nodes in the queue list
+    queue_tail: *mut MailboxNode<T>,
+}
 
-    /// The total number of messages that have been enqueued to this mailbox.
-    pub fn enqueued(&self) -> usize {
-        self.enqueued.load(Ordering::Relaxed)
-    }
-
-    /// The total number of messages that have been dequeued from this mailbox.
-    pub fn dequeued(&self) -> usize {
-        self.dequeued.load(Ordering::Relaxed)
-    }
-
-    /// The total number of messages that are currently skipped in the mailbox.
-    pub fn skipped(&self) -> usize {
-        self.skipped.load(Ordering::Relaxed)
-    }
-
-    /// Starts the channel skipping messages at the current back of the channel the
-    /// rationale here is that in this case, no message could possibly match the message
-    /// we are looking for if the message was sent before this time. This process is
-    /// important in the case where the actor that owns this mailbox is waiting for
-    /// one or more responses before it goes back into normal state.
-    pub fn start_skip() {}
-
-    /// Finds a node using the given position reference and either returns the node,
-    /// incrementing the position as needed or returns a None, indicating no node was
-    /// available.
-    fn find_next_node<'a>(
-        buffer: &'a mut Vec<Node>,
-        position: &mut AtomicUsize,
-    ) -> Option<&'a mut Node> {
-        let capacity = buffer.len();
-        loop {
-            // First decode the lap and idx from the position passed.
-            let pos = position.load(Ordering::Relaxed);
-            let idx = pos & 0xFFFFFFFF; // slice the lap off
-            let lap = pos >> HALF_USIZE_BITS;
-            let node_lap = buffer[idx].lap.load(Ordering::Relaxed);
-            if lap == node_lap {
-                // We know this node is ready on the lap so try to increment the pointer
-                // so that no one else can access this node.
-                let new_pos = if capacity > idx + 1 {
-                    // simple increment of the position will suffice
-                    pos + 1
-                } else {
-                    // Reached the end of the buffer so loop and add 2 to the lap.
-                    (lap + 2) << HALF_USIZE_BITS
-                };
-                // If this atomic swap works then we have access to the node and can do
-                //our operation without fear that other threads will do the same.
-                if pos == position.compare_and_swap(pos, new_pos, Ordering::Relaxed) {
-                    return Some(&mut buffer[idx]);
-                }
-            } else {
-                return None;
+impl<T: Sync + Send> MailboxSender<T> {
+    /// Pushes a value into the queue at the back of the queue.
+    pub fn send(&mut self, value: T) -> Result<usize, MailboxErrors> {
+        // Lock to make sure threads are managed here.
+        let _guard = self.send_lock.lock().unwrap();
+        // The pool head will become the new queue tail and the value will be put in the
+        // current queue tai.
+        unsafe {
+            let nil = null_mut();
+            let pool_head = &mut (*self.pool_head);
+            let queue_tail = &mut (*self.queue_tail);
+            let next_pool_head = pool_head.next.load(Ordering::Relaxed);
+            if next_pool_head == nil {
+                return Err(MailboxErrors::Full);
             }
-            // THe node lap was less than the position lap so we cannot operate on this node.
+            pool_head.next.store(nil, Ordering::Relaxed);
+            queue_tail.next.load(Ordering::Acquire);
+            queue_tail.value = Some(value);
+            queue_tail.next.store(self.pool_head, Ordering::Release);
+            self.queue_tail = self.pool_head;
+            self.pool_head = next_pool_head;
+            self.core.enqueued.fetch_add(1, Ordering::Relaxed);
+            let old_lenth = self.core.length.fetch_add(1, Ordering::Relaxed);
+            Ok(old_lenth + 1)
         }
     }
 
-    /// Enqueues a message into the mailbox and returns either a result with the number
-    /// of messages now pending or an error if there was a problem enququing.
-    pub fn enqueue(&mut self, message: Arc<Message>) -> Result<usize, String> {
-        match Mailbox::find_next_node(&mut self.buffer, &mut self.enqueue_pos) {
-            None => Err("Mailbox Full".to_string()),
-            Some(node) => {
-                node.message = Some(message.clone());
-                node.lap.fetch_add(1, Ordering::Relaxed);
-                let old_pending = self.pending.fetch_add(1, Ordering::Relaxed);
-                self.enqueued.fetch_add(1, Ordering::Relaxed);
-                // Manually yield after the enqueue.
-                thread::yield_now();
-                Ok(old_pending + 1)
-            }
-        }
-    }
+    // FIXME enable peek, cursor and popping from the middle.
+}
 
-    /// Dequeue the result, passing it to the provided function that will handle the
-    /// message and then return the status off the message after being handled. The first
-    /// parameter is this mailbox, the next parameter is a type T and a function that takes
-    /// a type T and a message and returns a [`DequeueResult`].
-    pub fn dequeue<T, F: FnMut(&mut T, Arc<Message>) -> DequeueResult>(
-        &mut self,
-        t: &mut T,
-        mut f: F,
-    ) -> Result<usize, String> {
-        loop {
-            match Mailbox::find_next_node(&mut self.buffer, &mut self.dequeue_pos) {
-                None => return Err("Mailbox Empty".to_string()), // fixme turn into enums
-                Some(node) => {
-                    // If the message is a None, it might have been dequeued by a cursor so we
-                    // just loop and try to get the next node, otherwise we fetch the message
-                    // for processing.
-                    if let Some(ref mut message) = node.message {
-                        // FIXME implement message skipping based upon the processing function.
-                        let _result = f(t, message.clone());
-                        self.dequeued.fetch_add(1, Ordering::Relaxed);
-                        let old_pending = self.pending.fetch_sub(1, Ordering::Relaxed);
-                        // Manually yield after the dequeue.
-                        thread::yield_now();
-                        return Ok(old_pending - 1);
-                    }
-                }
+impl<T: Sync + Send> MailboxCoreOps<T> for MailboxSender<T> {
+    // Fetch the core of the mailbox.
+    fn core(&self) -> &MailboxCore<T> {
+        &self.core
+    }
+}
+
+unsafe impl<T: Send + Sync> Send for MailboxSender<T> {}
+
+unsafe impl<T: Send + Sync> Sync for MailboxSender<T> {}
+
+/// The dequeue side of the data structure.
+pub struct MailboxReceiver<T: Sync + Send> {
+    /// Reference to data common to enqueue and dequeue side of the data structure.
+    core: Arc<MailboxCore<T>>,
+    /// Lock used internally during send.
+    receive_lock: Mutex<bool>,
+    /// Tail of the nodes in the pool list
+    pool_tail: *mut MailboxNode<T>,
+    /// Head of the nodes in the queue list
+    queue_head: *mut MailboxNode<T>,
+}
+
+impl<T: Sync + Send> MailboxReceiver<T> {
+    /// Pops the head of the queue, removing it from the queue.
+    pub fn receive(&mut self) -> Result<T, MailboxErrors> {
+        let _lock = self.receive_lock.lock().unwrap();
+        // The value will be pulled off the queue head and the node for the queue head
+        // will now be the new pool tail.
+        unsafe {
+            let nil = null_mut();
+            let queue_head = &mut (*self.queue_head);
+            let pool_tail = &mut (*self.pool_tail);
+            let next_queue_head = queue_head.next.load(Ordering::Acquire);
+            if nil == next_queue_head {
+                return Err(MailboxErrors::Empty);
             }
+            let result = queue_head.value.take().unwrap();
+            queue_head.next.store(nil, Ordering::Relaxed);
+            pool_tail.next.store(self.queue_head, Ordering::Relaxed);
+            self.pool_tail = self.queue_head;
+            self.queue_head = next_queue_head;
+            self.core.dequeued.fetch_add(1, Ordering::Relaxed);
+            self.core.length.fetch_sub(1, Ordering::Relaxed);
+            Ok(result)
         }
     }
 }
 
-// --------------------- Test Cases ---------------------
+impl<T: Sync + Send> MailboxCoreOps<T> for MailboxReceiver<T> {
+    // Fetch the core of the mailbox.
+    fn core(&self) -> &MailboxCore<T> {
+        &self.core
+    }
+}
+
+unsafe impl<T: Send + Sync> Send for MailboxReceiver<T> {}
+
+unsafe impl<T: Send + Sync> Sync for MailboxReceiver<T> {}
+
+/// Creates a pooled queue enqueue and dequeue mechanisms.
+pub fn create<T: Sync + Send>(capacity: usize) -> (MailboxSender<T>, MailboxReceiver<T>) {
+    if capacity < 1 {
+        panic!("capacity cannot be smaller than 1");
+    }
+
+    // we add two to the allocated capacity to account for the mandatory nodes on each list.
+    let mut nodes_vec = Vec::<MailboxNode<T>>::with_capacity((capacity + 2) as usize);
+    // The queue just gets one initial node with no data and the queue_tail is just
+    // the same as the queue_head.
+    let nil = null_mut();
+    nodes_vec.push(MailboxNode {
+        value: None,
+        next: AtomicPtr::new(nil),
+    });
+    let queue_head: *mut _ = nodes_vec.last_mut().unwrap();
+    let queue_tail = queue_head;
+
+    // Allocate the pool of nodes that will be used for the list using a cons like
+    // operation order with H -> N0 -> N1 -> N2 -> Nn <- T
+    nodes_vec.push(MailboxNode {
+        value: None,
+        next: AtomicPtr::new(nil),
+    });
+    let mut pool_head: *mut _ = nodes_vec.last_mut().unwrap();
+    let pool_tail = pool_head;
+    for _ in 0..capacity {
+        nodes_vec.push(MailboxNode {
+            value: None,
+            next: AtomicPtr::new(pool_head),
+        });
+        pool_head = nodes_vec.last_mut().unwrap();
+    }
+
+    let common = Arc::new(MailboxCore {
+        capacity,
+        nodes: UnsafeCell::new(vec![nodes_vec.into_boxed_slice()]),
+        length: AtomicUsize::new(0),
+        enqueued: AtomicUsize::new(0),
+        dequeued: AtomicUsize::new(0),
+    });
+
+    let enqueue = MailboxSender {
+        core: common.clone(),
+        send_lock: Mutex::new(true),
+        pool_head,
+        queue_tail,
+    };
+
+    let dequeue = MailboxReceiver {
+        core: common,
+        receive_lock: Mutex::new(true),
+        pool_tail,
+        queue_head,
+    };
+
+    (enqueue, dequeue)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// An enum used for testing message passing.
-    enum TestMsg {
-        MsgOne,
+    /// A macro to assert that pointers point to the right nodes.
+    macro_rules! assert_pointer_nodes {
+        (
+            $pointers:expr,
+            $enqueue:expr,
+            $dequeue:expr,
+            $queue_head:expr,
+            $queue_tail:expr,
+            $pool_head:expr,
+            $pool_tail:expr
+        ) => {{
+            assert_eq!(
+                $pointers[$queue_head], $dequeue.queue_head,
+                "<== queue_head mismatch\n"
+            );
+            assert_eq!(
+                $pointers[$queue_tail], $enqueue.queue_tail,
+                "<== queue_tail mismatch\n"
+            );
+            assert_eq!(
+                $pointers[$pool_head], $enqueue.pool_head,
+                "<== pool_head mismatch\n"
+            );
+            assert_eq!(
+                $pointers[$pool_tail], $dequeue.pool_tail,
+                "<== pool_tail mismatch\n"
+            );
+        }};
     }
 
-    fn assert_counters(
-        mailbox: &Mailbox,
-        pending: usize,
-        enqueued: usize,
-        dequeued: usize,
-        skipped: usize,
-    ) {
-        assert_eq!(pending, mailbox.pending());
-        assert_eq!(enqueued, mailbox.enqueued());
-        assert_eq!(dequeued, mailbox.dequeued());
-        assert_eq!(skipped, mailbox.skipped());
+    /// Asserts that the given node in the queue has the expected next pointer.
+    macro_rules! assert_node_next {
+        ($pointers:expr, $node:expr, $next:expr) => {
+            unsafe {
+                assert_eq!(
+                    (*$pointers[$node]).next.load(Ordering::Relaxed),
+                    $pointers[$next]
+                )
+            }
+        };
     }
 
+    /// Asserts that the given node in the queue has the expected next pointing to null_mut().
+    macro_rules! assert_node_next_nil {
+        ($pointers:expr, $node:expr) => {
+            unsafe {
+                assert_eq!(
+                    (*$pointers[$node]).next.load(Ordering::Relaxed),
+                    null_mut() as *mut _
+                )
+            }
+        };
+    }
+
+    // Items that will be put in the list
+    #[derive(Debug, Eq, PartialEq)]
+    enum Items {
+        A,
+        B,
+        C,
+        D,
+        E,
+        F,
+    }
+
+    fn pointers_vec<T: Sync + Send>(common: &MailboxCore<T>) -> Vec<*mut MailboxNode<T>> {
+        unsafe {
+            let mut results = Vec::<*mut _>::new();
+            let nodes_vec = &*common.nodes.get();
+            for i in 0..nodes_vec.len() {
+                let nodes = &nodes_vec[i];
+                for j in 0..nodes.len() {
+                    results.push(&nodes[j] as *const _ as *mut _)
+                }
+            }
+            results
+        }
+    }
+
+    /// Tests the basics of the queue.
     #[test]
-    fn test_basic_operations() {
-        let mut mailbox = Mailbox::new(3);
-        assert_eq!(3, mailbox.buffer.len());
-        assert_counters(&mailbox, 0, 0, 0, 0);
+    fn test_queue_dequeue() {
+        let pooled_queue = create::<Items>(5);
+        let (mut enqueue, mut dequeue) = pooled_queue;
 
-        let m1 = Arc::new(10 as u32);
-        let result = mailbox.enqueue(m1.clone());
-        assert_eq!(Ok(1), result);
-        assert_counters(&mailbox, 1, 1, 0, 0);
-        assert_eq!(0, mailbox.skipped());
+        // fetch the pointers for easy checking of the nodes.
+        let pointers = pointers_vec(&*enqueue.core);
 
-        let m2 = Arc::new("hello".to_string());
-        let result = mailbox.enqueue(m2.clone());
-        assert_eq!(Ok(2), result);
-        assert_counters(&mailbox, 2, 2, 0, 0);
+        assert_eq!(7, pointers.len());
+        assert_eq!(5, enqueue.core.capacity);
+        assert_eq!(5, enqueue.capacity());
+        assert_eq!(5, dequeue.capacity());
 
-        let m3 = Arc::new(TestMsg::MsgOne);
-        let result = mailbox.enqueue(m3.clone());
-        assert_eq!(Ok(3), result);
-        assert_counters(&mailbox, 3, 3, 0, 0);
+        // Write out the nodes list to facilitate testing
+        println!("queue nodes list is:");
+        for i in 0..pointers.len() {
+            println!("[{}] -> {:?}", i, &pointers[i]);
+        }
+        println!();
+
+        // Check the initial structure.
+        assert_eq!(0, enqueue.length());
+        assert_eq!(0, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+        assert_node_next_nil!(pointers, 0);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 1);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 0, 6, 1); // ( qh, qt, ph, pt)
+
+        // Check that enqueueing removes pool head and appends to queue tail and changes
+        // nothing else in the node structure.
+        assert_eq!(Ok(1), enqueue.send(Items::A));
+        assert_eq!(1, enqueue.length());
+        assert_eq!(1, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 1);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 6, 5, 1);
+
+        // Second enqueue should also move the pool_head node.
+        assert_eq!(Ok(2), enqueue.send(Items::B));
+        assert_eq!(2, enqueue.length());
+        assert_eq!(2, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 1);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 5, 4, 1);
+
+        assert_eq!(Ok(3), enqueue.send(Items::C));
+        assert_eq!(3, enqueue.length());
+        assert_eq!(3, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next_nil!(pointers, 4);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 1);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 4, 3, 1);
+
+        assert_eq!(Ok(4), enqueue.send(Items::D));
+        assert_eq!(4, enqueue.length());
+        assert_eq!(4, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next_nil!(pointers, 3);
+        assert_node_next!(pointers, 2, 1);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 3, 2, 1);
+
+        assert_eq!(Ok(5), enqueue.send(Items::E));
+        assert_eq!(5, enqueue.length());
+        assert_eq!(5, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 0, 2, 1, 1);
+
+        assert_eq!(Err(MailboxErrors::Full), enqueue.send(Items::F));
+        assert_eq!(5, enqueue.length());
+        assert_eq!(5, enqueue.enqueued());
+        assert_eq!(0, enqueue.dequeued());
+
+        assert_eq!(Ok(Items::A), dequeue.receive());
+        assert_eq!(4, dequeue.length());
+        assert_eq!(5, dequeue.enqueued());
+        assert_eq!(1, dequeue.dequeued());
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next_nil!(pointers, 0);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 6, 2, 1, 0);
+
+        assert_eq!(Ok(Items::B), dequeue.receive());
+        assert_eq!(3, dequeue.length());
+        assert_eq!(5, dequeue.enqueued());
+        assert_eq!(2, dequeue.dequeued());
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 5, 2, 1, 6);
+
+        assert_eq!(Ok(Items::C), dequeue.receive());
+        assert_eq!(2, dequeue.length());
+        assert_eq!(5, dequeue.enqueued());
+        assert_eq!(3, dequeue.dequeued());
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 4, 2, 1, 5);
+
+        assert_eq!(Ok(Items::D), dequeue.receive());
+        assert_eq!(1, dequeue.length());
+        assert_eq!(5, dequeue.enqueued());
+        assert_eq!(4, dequeue.dequeued());
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next_nil!(pointers, 4);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 3, 2, 1, 4);
+
+        assert_eq!(Ok(Items::E), dequeue.receive());
+        assert_eq!(0, dequeue.length());
+        assert_eq!(5, dequeue.enqueued());
+        assert_eq!(5, dequeue.dequeued());
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next_nil!(pointers, 3);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 2, 2, 1, 3);
+
+        assert_eq!(Err(MailboxErrors::Empty), dequeue.receive());
+        assert_eq!(0, dequeue.length());
+        assert_eq!(5, dequeue.enqueued());
+        assert_eq!(5, dequeue.dequeued());
+
+        assert_eq!(Ok(1), enqueue.send(Items::F));
+        assert_eq!(1, dequeue.length());
+        assert_eq!(6, dequeue.enqueued());
+        assert_eq!(5, dequeue.dequeued());
+        assert_node_next!(pointers, 2, 1);
+        assert_node_next_nil!(pointers, 1);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next_nil!(pointers, 3);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 2, 1, 0, 3);
+
+        assert_eq!(Ok(Items::F), dequeue.receive());
+        assert_eq!(0, dequeue.length());
+        assert_eq!(6, dequeue.enqueued());
+        assert_eq!(6, dequeue.dequeued());
+        assert_node_next_nil!(pointers, 1);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(pointers, enqueue, dequeue, 1, 1, 0, 2);
     }
 }
