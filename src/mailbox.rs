@@ -91,7 +91,7 @@ pub struct MailboxSender<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> MailboxSender<T> {
-    /// Pushes a value into the queue at the back of the queue.
+    /// Sends a value into the mailbox, the value will be moved into the mailbox and it will take ownership of the value.
     pub fn send(&mut self, value: T) -> Result<usize, MailboxErrors> {
         // The pool head will become the new queue tail and the value will be put in the
         // current queue tai.
@@ -143,7 +143,7 @@ pub struct MailboxReceiver<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> MailboxReceiver<T> {
-    /// Pops the head of the queue, removing it from the queue.
+    /// Receives the head of the queue, removing it from the queue.
     pub fn receive(&mut self) -> Result<T, MailboxErrors> {
         // The value will be pulled off the queue head and the node for the queue head
         // will now be the new pool tail.
