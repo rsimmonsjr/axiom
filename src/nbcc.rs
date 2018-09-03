@@ -4,8 +4,8 @@
 //! messages in the buffer and process those messages later by using a cursor.
 
 use std::cell::UnsafeCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Type alias for half of a usize on 64 bit platform.
 type HalfUsize = u32;
@@ -137,10 +137,10 @@ impl<T: Sync + Send> ChannelSender<T> {
                 let next_send_ptrs = (pool_head << HALF_USIZE_BITS) | next_pool_head;
                 if send_ptrs
                     == self.queue_tail_pool_head.compare_and_swap(
-                    send_ptrs,
-                    next_send_ptrs,
-                    Ordering::Acquire,
-                ) {
+                        send_ptrs,
+                        next_send_ptrs,
+                        Ordering::Acquire,
+                    ) {
                     (*pool_head_ptr).next.store(NIL_NODE, Ordering::Relaxed);
                     let queue_tail_ptr =
                         (*self.core().node_ptrs.get())[queue_tail] as *mut ChannelNode<T>;
@@ -199,10 +199,10 @@ impl<T: Sync + Send> ChannelReceiver<T> {
                 let next_receive_ptrs = (next_queue_head << HALF_USIZE_BITS) | queue_head;
                 if receive_ptrs
                     == self.queue_head_pool_tail.compare_and_swap(
-                    receive_ptrs,
-                    next_receive_ptrs,
-                    Ordering::Acquire,
-                ) {
+                        receive_ptrs,
+                        next_receive_ptrs,
+                        Ordering::Acquire,
+                    ) {
                     (*queue_head_ptr).next.store(NIL_NODE, Ordering::Relaxed);
                     let value = (*(*queue_head_ptr).cell.get()).take().unwrap() as T;
                     let pool_tail_ptr =
@@ -229,7 +229,7 @@ unsafe impl<T: Send + Sync> Send for ChannelReceiver<T> {}
 
 unsafe impl<T: Send + Sync> Sync for ChannelReceiver<T> {}
 
-/// Creates a pooled queue enqueue and dequeue mechanisms.
+/// Creates the sender and receiver sides of this channel.
 pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, ChannelReceiver<T>) {
     // FIXME support reallocation of size ?
     if capacity < 1 {
@@ -289,11 +289,22 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
     (sender, receiver)
 }
 
+/// Creates the sender and receiver sides of the channel for multiple producers and
+/// multiple consumers by returning sender and receiver each wrapped in [Arc] instances.
+pub fn create_with_arcs<T: Sync + Send>(
+    capacity: HalfUsize,
+) -> (Arc<ChannelSender<T>>, Arc<ChannelReceiver<T>>) {
+    let (sender, receiver) = create(capacity);
+    (Arc::new(sender), Arc::new(receiver))
+}
+
 // --------------------- Test Cases ---------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Duration;
 
     /// A macro to assert that pointers point to the right nodes.
     macro_rules! assert_pointer_nodes {
@@ -550,5 +561,37 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
         assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2);
+    }
+
+    #[test]
+    fn test_spsc() {
+        let message_count = 100;
+        let capacity = 32;
+        let (sender, receiver) = create_with_arcs::<u32>(capacity);
+
+        let rx = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            let mut count = 0;
+            while count < message_count {
+                match receiver.receive() {
+                    Ok(v) => {
+                        println!("====> Received: {:?}", v);
+                        count += 1;
+                    },
+                    _ => (),
+                };
+            }
+        });
+
+        let tx = thread::spawn(move || {
+            for i in 0..message_count {
+                let result = sender.send(i);
+                println!("----> Sent: {:?}", result);
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        tx.join().unwrap();
+        rx.join().unwrap();
     }
 }
