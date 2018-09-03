@@ -4,8 +4,9 @@
 //! messages in the buffer and process those messages later by using a cursor.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// Type alias for half of a usize on 64 bit platform.
 type HalfUsize = u32;
@@ -109,6 +110,8 @@ pub struct ChannelCore<T: Sync + Send> {
 pub struct ChannelSender<T: Sync + Send> {
     /// The core of the channel.
     core: Arc<ChannelCore<T>>,
+    /// Used to create a read lock on the channel.
+    write_lock: Mutex<bool>,
     /// Indexes in the node_ptrs used for enqueue of elements in the channel. The upper 32
     /// bits encode the queue_tail and the lower 32 bits encode the pool_head.
     queue_tail_pool_head: AtomicUsize,
@@ -118,41 +121,33 @@ impl<T: Sync + Send> ChannelSender<T> {
     /// Sends a value into the mailbox, the value will be moved into the mailbox and it will take
     /// ownership of the value.
     pub fn send(&self, value: T) -> Result<usize, ChannelErrors> {
-        loop {
+        unsafe {
+            let _guard = self.write_lock.lock().unwrap();
             // Retrieve send pointers and the encoded indexes inside them.
             let send_ptrs = self.queue_tail_pool_head.load(Ordering::Acquire);
             let queue_tail = send_ptrs >> HALF_USIZE_BITS;
             let pool_head = send_ptrs & LOWER_USIZE_BITMASK;
 
-            unsafe {
-                // Get a pointer to the current pool_head and see if we have space to send.
-                let pool_head_ptr =
-                    (*self.core().node_ptrs.get())[pool_head] as *mut ChannelNode<T>;
-                let next_pool_head = (*pool_head_ptr).next.load(Ordering::Acquire);
-                if NIL_NODE == next_pool_head {
-                    return Err(ChannelErrors::Full);
-                }
-
-                // Pool head moves to become the queue tail or else loop and try again!
-                let next_send_ptrs = (pool_head << HALF_USIZE_BITS) | next_pool_head;
-                if send_ptrs
-                    == self.queue_tail_pool_head.compare_and_swap(
-                        send_ptrs,
-                        next_send_ptrs,
-                        Ordering::Acquire,
-                    ) {
-                    (*pool_head_ptr).next.store(NIL_NODE, Ordering::Relaxed);
-                    let queue_tail_ptr =
-                        (*self.core().node_ptrs.get())[queue_tail] as *mut ChannelNode<T>;
-                    (*(*queue_tail_ptr).cell.get()) = Some(value);
-                    (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
-
-                    // Once we complete the write we have to adjust the channel statistics.
-                    self.core.enqueued.fetch_add(1, Ordering::Relaxed);
-                    let old_length = self.core.length.fetch_add(1, Ordering::Relaxed);
-                    return Ok(old_length + 1);
-                }
+            // Get a pointer to the current pool_head and see if we have space to send.
+            let pool_head_ptr = (*self.core().node_ptrs.get())[pool_head] as *mut ChannelNode<T>;
+            let next_pool_head = (*pool_head_ptr).next.load(Ordering::Acquire);
+            if NIL_NODE == next_pool_head {
+                return Err(ChannelErrors::Full);
             }
+
+            // Pool head moves to become the queue tail or else loop and try again!
+            let next_send_ptrs = (pool_head << HALF_USIZE_BITS) | next_pool_head;
+            let queue_tail_ptr = (*self.core().node_ptrs.get())[queue_tail] as *mut ChannelNode<T>;
+            (*(*queue_tail_ptr).cell.get()) = Some(value);
+            (*pool_head_ptr).next.store(NIL_NODE, Ordering::Release);
+            (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
+            self.queue_tail_pool_head
+                .store(next_send_ptrs, Ordering::Release);
+
+            // Once we complete the write we have to adjust the channel statistics.
+            self.core.enqueued.fetch_add(1, Ordering::Relaxed);
+            let old_length = self.core.length.fetch_add(1, Ordering::Relaxed);
+            return Ok(old_length + 1);
         }
     }
 }
@@ -171,6 +166,8 @@ unsafe impl<T: Send + Sync> Sync for ChannelSender<T> {}
 pub struct ChannelReceiver<T: Sync + Send> {
     /// The core of the channel.
     core: Arc<ChannelCore<T>>,
+    /// Used to create a read lock on the channel.
+    read_lock: Mutex<bool>,
     /// Position in the buffer where the nodes can be dequeued from the queue and put back
     /// on the pool. The upper 32 bits cover the pool head index in `nodes_ptr` and the lower
     /// 32 bits cover the pool tail index in `nodes_ptr`.
@@ -180,41 +177,33 @@ pub struct ChannelReceiver<T: Sync + Send> {
 impl<T: Sync + Send> ChannelReceiver<T> {
     /// Receives the head of the queue, removing it from the queue.
     pub fn receive(&self) -> Result<T, ChannelErrors> {
-        loop {
+        unsafe {
+            let _guard = self.read_lock.lock().unwrap();
             // Retrieve send pointers and the encoded indexes inside them.
             let receive_ptrs = self.queue_head_pool_tail.load(Ordering::Acquire);
             let queue_head = receive_ptrs >> HALF_USIZE_BITS;
             let pool_tail = receive_ptrs & LOWER_USIZE_BITMASK;
 
-            unsafe {
-                // Get a pointer to the current queue_head and see if there is anything to read.
-                let queue_head_ptr =
-                    (*self.core().node_ptrs.get())[queue_head] as *mut ChannelNode<T>;
-                let next_queue_head = (*queue_head_ptr).next.load(Ordering::Acquire);
-                if NIL_NODE == next_queue_head {
-                    return Err(ChannelErrors::Empty);
-                }
-
-                // Queue head moves to become the pool tail or else loop and try again!
-                let next_receive_ptrs = (next_queue_head << HALF_USIZE_BITS) | queue_head;
-                if receive_ptrs
-                    == self.queue_head_pool_tail.compare_and_swap(
-                        receive_ptrs,
-                        next_receive_ptrs,
-                        Ordering::Acquire,
-                    ) {
-                    (*queue_head_ptr).next.store(NIL_NODE, Ordering::Relaxed);
-                    let value = (*(*queue_head_ptr).cell.get()).take().unwrap() as T;
-                    let pool_tail_ptr =
-                        (*self.core().node_ptrs.get())[pool_tail] as *mut ChannelNode<T>;
-                    (*pool_tail_ptr).next.store(queue_head, Ordering::Release);
-
-                    // Once we complete the write we have to adjust the channel statistics.
-                    self.core.dequeued.fetch_add(1, Ordering::Relaxed);
-                    self.core.length.fetch_sub(1, Ordering::Relaxed);
-                    return Ok(value);
-                }
+            // Get a pointer to the current queue_head and see if there is anything to read.
+            let queue_head_ptr = (*self.core().node_ptrs.get())[queue_head] as *mut ChannelNode<T>;
+            let next_queue_head = (*queue_head_ptr).next.load(Ordering::Acquire);
+            if NIL_NODE == next_queue_head {
+                return Err(ChannelErrors::Empty);
             }
+
+            // Queue head moves to become the pool tail or else loop and try again!
+            let next_receive_ptrs = (next_queue_head << HALF_USIZE_BITS) | queue_head;
+            let value = (*(*queue_head_ptr).cell.get()).take().unwrap() as T;
+            let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail] as *mut ChannelNode<T>;
+            (*pool_tail_ptr).next.store(queue_head, Ordering::Release);
+            (*queue_head_ptr).next.store(NIL_NODE, Ordering::Release);
+            self.queue_head_pool_tail
+                .store(next_receive_ptrs, Ordering::Release);
+
+            // Once we complete the write we have to adjust the channel statistics.
+            self.core.dequeued.fetch_add(1, Ordering::Relaxed);
+            self.core.length.fetch_sub(1, Ordering::Relaxed);
+            return Ok(value);
         }
     }
 }
@@ -278,11 +267,13 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
 
     let sender = ChannelSender {
         core: core.clone(),
+        write_lock: Mutex::new(true),
         queue_tail_pool_head: AtomicUsize::new(queue_tail_pool_head),
     };
 
     let receiver = ChannelReceiver {
         core,
+        read_lock: Mutex::new(true),
         queue_head_pool_tail: AtomicUsize::new(queue_head_pool_tail),
     };
 
@@ -302,9 +293,9 @@ pub fn create_with_arcs<T: Sync + Send>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread;
     use std::time::Duration;
+    use super::*;
 
     /// A macro to assert that pointers point to the right nodes.
     macro_rules! assert_pointer_nodes {
@@ -564,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_spsc() {
+    fn test_single_producer_single_receiver() {
         let message_count = 100;
         let capacity = 32;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
@@ -577,7 +568,7 @@ mod tests {
                     Ok(v) => {
                         println!("====> Received: {:?}", v);
                         count += 1;
-                    },
+                    }
                     _ => (),
                 };
             }
