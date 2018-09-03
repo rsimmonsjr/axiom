@@ -251,7 +251,7 @@ mod tests {
         One,
         Two,
         Three,
-        Four
+        Four,
     }
 
     /// Checks that the counters in the run queue are correct.

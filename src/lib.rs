@@ -3,6 +3,7 @@ extern crate uuid;
 pub mod actor_system;
 pub mod actors;
 pub mod mailbox;
+pub mod nbcc;
 pub mod run_queue;
 
 #[cfg(test)]
