@@ -297,7 +297,6 @@ mod tests {
         };
     }
 
-    // Items that will be put in the list
     #[derive(Debug, Eq, PartialEq)]
     enum Items {
         A,
