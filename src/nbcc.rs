@@ -180,7 +180,7 @@ impl<T: Sync + Send> ChannelSender<T> {
                     value = v;
                     let (ref mutex, ref condvar) = &*self.core.has_capacity;
                     let guard = mutex.lock().unwrap();
-                    if self.core.length.load(Ordering::Acquire) > self.core.capacity {
+                    if self.core.length.load(Ordering::Acquire) < self.core.capacity {
                         // race occurred, there is space to send now, loop and try again.
                         continue;
                     }
@@ -223,7 +223,7 @@ pub struct ChannelReceiver<T: Sync + Send> {
     core: Arc<ChannelCore<T>>,
     /// Position in the buffer where the nodes can be dequeued from the queue and put back
     /// on the pool.
-    queue_head_pool_tail: Mutex<(usize, usize)>,
+    queue_head_pool_tail_cursor: Mutex<(usize, usize, usize)>,
 }
 
 impl<T: Sync + Send> ChannelReceiver<T> {
@@ -231,8 +231,8 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     pub fn receive(&self) -> Result<T, ChannelErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
-            let mut receive_ptrs = self.queue_head_pool_tail.lock().unwrap();
-            let (queue_head, pool_tail) = *receive_ptrs;
+            let mut receive_ptrs = self.queue_head_pool_tail_cursor.lock().unwrap();
+            let (queue_head, pool_tail, _cursor) = *receive_ptrs; // FIXME cursor not used
 
             // Get a pointer to the current queue_head and see if there is anything to read.
             let queue_head_ptr = (*self.core().node_ptrs.get())[queue_head] as *mut ChannelNode<T>;
@@ -242,7 +242,7 @@ impl<T: Sync + Send> ChannelReceiver<T> {
             }
 
             // Queue head moves to become the pool tail or else loop and try again!
-            *receive_ptrs = (next_queue_head, queue_head);
+            *receive_ptrs = (next_queue_head, queue_head, next_queue_head); // FIXME cursor not used
             let value = (*(*queue_head_ptr).cell.get()).take().unwrap() as T;
             let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail] as *mut ChannelNode<T>;
             (*pool_tail_ptr).next.store(queue_head, Ordering::Release);
@@ -359,7 +359,7 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
 
     let receiver = ChannelReceiver {
         core,
-        queue_head_pool_tail: Mutex::new((queue_head, pool_tail)),
+        queue_head_pool_tail_cursor: Mutex::new((queue_head, pool_tail, queue_head)),
     };
 
     (sender, receiver)
@@ -394,8 +394,8 @@ mod tests {
         ) => {{
             let queue_tail_pool_head = $sender.queue_tail_pool_head.lock().unwrap();
             let (queue_tail, pool_head) = *queue_tail_pool_head;
-            let queue_head_pool_tail = $receiver.queue_head_pool_tail.lock().unwrap();
-            let (queue_head, pool_tail) = *queue_head_pool_tail;
+            let queue_head_pool_tail = $receiver.queue_head_pool_tail_cursor.lock().unwrap();
+            let (queue_head, pool_tail, _cursor) = *queue_head_pool_tail; // fixme cursor not used
 
             assert_eq!($queue_head, queue_head, " <== queue_head mismatch\n");
             assert_eq!($queue_tail, queue_tail, "<== queue_tail mismatch\n");
