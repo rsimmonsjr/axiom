@@ -4,8 +4,8 @@
 //! messages in the buffer and process those messages later by using a cursor.
 
 use std::cell::UnsafeCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 
@@ -168,23 +168,26 @@ impl<T: Sync + Send> ChannelSender<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary.
-    pub fn send_await(&self, value: T) -> Result<usize, ChannelErrors<T>> {
-        match self.send(value) {
-            Err(ChannelErrors::Full(v)) => {
-                let (ref mutex, ref condvar) = &*self.core.has_capacity;
-                let guard = mutex.lock().unwrap();
-                if self.core.length.load(Ordering::Relaxed) > self.core.capacity {
-                    // race occurred, there is space to send now.
-                    return self.send_await(v);
+    pub fn send_await(&self, mut value: T) -> Result<usize, ChannelErrors<T>> {
+        loop {
+            match self.send(value) {
+                Err(ChannelErrors::Full(v)) => {
+                    value = v;
+                    let (ref mutex, ref condvar) = &*self.core.has_capacity;
+                    let guard = mutex.lock().unwrap();
+                    if self.core.length.load(Ordering::Acquire) > self.core.capacity {
+                        // race occurred, there is space to send now, loop and try again.
+                        continue;
+                    }
+                    // nope, still no capacity, wait.
+                    self.core.awaited_capacity.fetch_add(1, Ordering::Relaxed);
+                    println!("Awaiting capacity!");
+                    let _condvar_guard = condvar.wait(guard).unwrap();
+                    println!("Awaiting capacity done!");
+                    // loop and try again.
                 }
-                // nope, still no capacity, wait.
-                self.core.awaited_capacity.fetch_add(1, Ordering::Relaxed);
-                println!("Awaiting capacity!");
-                let _condvar_guard = condvar.wait(guard).unwrap();
-                println!("Awaiting capacity done!");
-                self.send_await(v)
+                v => return v,
             }
-            v => v,
         }
     }
 }
@@ -245,22 +248,23 @@ impl<T: Sync + Send> ChannelReceiver<T> {
 
     /// Send to the channel, awaiting capacity if necessary.
     pub fn receive_await(&self) -> Result<T, ChannelErrors<T>> {
-        match self.receive() {
-            Err(ChannelErrors::Empty) => {
-                let (ref mutex, ref condvar) = &*self.core.has_messages;
-                let guard = mutex.lock().unwrap();
-                if self.core.length.load(Ordering::Relaxed) > 0 {
-                    // race occurred, there is space to send now.
-                    return self.receive_await();
+        loop {
+            match self.receive() {
+                Err(ChannelErrors::Empty) => {
+                    let (ref mutex, ref condvar) = &*self.core.has_messages;
+                    let guard = mutex.lock().unwrap();
+                    if self.core.length.load(Ordering::Acquire) > 0 {
+                        continue;
+                    }
+                    // nope, still no messages, wait.
+                    self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
+                    println!("Awaiting messages!");
+                    let _condvar_guard = condvar.wait(guard).unwrap();
+                    println!("Awaiting messages Done!");
+                    // loop and try again.
                 }
-                // nope, still no capacity, wait.
-                self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
-                println!("Awaiting messages!");
-                let _condvar_guard = condvar.wait(guard).unwrap();
-                println!("Awaiting messages Done!");
-                self.receive_await()
+                v => return v,
             }
-            v => v,
         }
     }
 }
@@ -349,9 +353,9 @@ pub fn create_with_arcs<T: Sync + Send>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::thread;
     use std::time::Duration;
-    use super::*;
 
     /// A macro to assert that pointers point to the right nodes.
     macro_rules! assert_pointer_nodes {
@@ -651,7 +655,7 @@ mod tests {
         let tx = thread::spawn(move || {
             for i in 0..(message_count / 3) {
                 match sender1.send_await(i) {
-                    Ok(c) => println!("----> Sent: {}:{:?}", i, c),
+                    Ok(c) => println!("Sent: {}: {}, {}", i, c, sender1.length()),
                     Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
                 }
             }
@@ -661,7 +665,7 @@ mod tests {
         let tx2 = thread::spawn(move || {
             for i in (message_count / 3)..((message_count / 3) * 2) {
                 match sender2.send_await(i) {
-                    Ok(c) => println!("----> Sent: {}:{:?}", i, c),
+                    Ok(c) => println!("Sent: {}: {}, {}", i, c, sender2.length()),
                     Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
                 }
             }
@@ -671,7 +675,7 @@ mod tests {
         let tx3 = thread::spawn(move || {
             for i in ((message_count / 3) * 2)..(message_count) {
                 match sender3.send_await(i) {
-                    Ok(c) => println!("----> Sent: {}:{:?}", i, c),
+                    Ok(c) => println!("Sent: {}: {}, {}", i, c, sender3.length()),
                     Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
                 }
             }
