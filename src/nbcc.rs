@@ -4,8 +4,9 @@
 //! messages in the buffer and process those messages later by using a cursor.
 
 use std::cell::UnsafeCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 
 /// Type alias for half of a usize on 64 bit platform.
@@ -16,8 +17,8 @@ const NIL_NODE: usize = 1 << 63 as usize;
 
 /// Errors potentially returned from run queue operations.
 #[derive(Debug, Eq, PartialEq)]
-pub enum ChannelErrors {
-    Full,
+pub enum ChannelErrors<T: Sync + Send> {
+    Full(T),
     Empty,
 }
 
@@ -60,6 +61,16 @@ pub trait ChannelCoreOps<T: Sync + Send> {
         self.core().capacity
     }
 
+    /// Count of the number of times receivers of this channel called awaiting messages.
+    fn awaited_messages(&self) -> usize {
+        self.core().awaited_messages.load(Ordering::Relaxed)
+    }
+
+    /// Count of the number of times a sender was called and awaited capacity.
+    fn awaited_capacity(&self) -> usize {
+        self.core().awaited_capacity.load(Ordering::Relaxed)
+    }
+
     /// Returns the length indicating how many total items are in the queue currently.
     fn length(&self) -> usize {
         self.core().length.load(Ordering::Relaxed)
@@ -92,6 +103,17 @@ pub struct ChannelCore<T: Sync + Send> {
     /// order during the operations of the queue. If the channel has to be resized it should
     /// push the new pointers into the [Vec] at the back and never remove a pointer.
     node_ptrs: UnsafeCell<Vec<*mut ChannelNode<T>>>,
+    /// Cond var that is set when the channel transitions from no messages available to some
+    /// messages available. All threads are notified only when the length goes from 0 to 1.
+    has_messages: Arc<(Mutex<bool>, Condvar)>,
+    /// Count of the number of times receivers of this channel called awaiting messages.
+    awaited_messages: AtomicUsize,
+    /// Cond var that is set when the channel transitions from being full to having space in
+    /// which a new message can be enqueued. All threads are notified when length goes from
+    /// capacity to capacity - 1.
+    has_capacity: Arc<(Mutex<bool>, Condvar)>,
+    /// Count of the number of times a sender was called and awaited capacity.
+    awaited_capacity: AtomicUsize,
     /// Number of values currently in the list.
     length: AtomicUsize,
     /// Total number of values that have been enqueued.
@@ -112,7 +134,7 @@ pub struct ChannelSender<T: Sync + Send> {
 impl<T: Sync + Send> ChannelSender<T> {
     /// Sends a value into the mailbox, the value will be moved into the mailbox and it will take
     /// ownership of the value.
-    pub fn send(&self, value: T) -> Result<usize, ChannelErrors> {
+    pub fn send(&self, value: T) -> Result<usize, ChannelErrors<T>> {
         unsafe {
             // Retrieve send pointers and the encoded indexes inside them.
             let mut send_ptrs = self.queue_tail_pool_head.lock().unwrap();
@@ -122,7 +144,7 @@ impl<T: Sync + Send> ChannelSender<T> {
             let pool_head_ptr = (*self.core().node_ptrs.get())[pool_head] as *mut ChannelNode<T>;
             let next_pool_head = (*pool_head_ptr).next.load(Ordering::Acquire);
             if NIL_NODE == next_pool_head {
-                return Err(ChannelErrors::Full);
+                return Err(ChannelErrors::Full(value));
             }
 
             // Pool head moves to become the queue tail or else loop and try again!
@@ -134,8 +156,30 @@ impl<T: Sync + Send> ChannelSender<T> {
 
             // Once we complete the write we have to adjust the channel statistics.
             self.core.enqueued.fetch_add(1, Ordering::Relaxed);
-            let old_length = self.core.length.fetch_add(1, Ordering::Relaxed);
+            let old_length = self.core.length.fetch_add(1, Ordering::Release);
+            // If we enqueued a new message into an empty buffer, notify waiters
+            if old_length == 0 {
+                let (ref mutex, ref condvar) = &*self.core.has_messages;
+                let _guard = mutex.lock().unwrap();
+                condvar.notify_all();
+            }
             return Ok(old_length + 1);
+        }
+    }
+
+    /// Send to the channel, awaiting capacity if necessary.
+    pub fn send_await(&self, value: T) -> Result<usize, ChannelErrors<T>> {
+        match self.send(value) {
+            Err(ChannelErrors::Full(v)) => {
+                let (ref mutex, ref condvar) = &*self.core.has_capacity;
+                let guard = mutex.lock().unwrap();
+                self.core.awaited_capacity.fetch_add(1, Ordering::Relaxed);
+                println!("Awaiting capacity!");
+                let _condvar_guard = condvar.wait(guard).unwrap();
+                println!("Awaiting capacity done!");
+                self.send_await(v)
+            }
+            v => v,
         }
     }
 }
@@ -161,7 +205,7 @@ pub struct ChannelReceiver<T: Sync + Send> {
 
 impl<T: Sync + Send> ChannelReceiver<T> {
     /// Receives the head of the queue, removing it from the queue.
-    pub fn receive(&self) -> Result<T, ChannelErrors> {
+    pub fn receive(&self) -> Result<T, ChannelErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
             let mut receive_ptrs = self.queue_head_pool_tail.lock().unwrap();
@@ -183,8 +227,30 @@ impl<T: Sync + Send> ChannelReceiver<T> {
 
             // Once we complete the write we have to adjust the channel statistics.
             self.core.dequeued.fetch_add(1, Ordering::Relaxed);
-            self.core.length.fetch_sub(1, Ordering::Relaxed);
+            let old_length = self.core.length.fetch_sub(1, Ordering::Release);
+            // If we dequeued a message from a full buffer notify any waiters.
+            if old_length == self.core.capacity {
+                let (ref mutex, ref condvar) = &*self.core.has_capacity;
+                let _guard = mutex.lock().unwrap();
+                condvar.notify_all();
+            }
             return Ok(value);
+        }
+    }
+
+    /// Send to the channel, awaiting capacity if necessary.
+    pub fn receive_await(&self) -> Result<T, ChannelErrors<T>> {
+        match self.receive() {
+            Err(ChannelErrors::Empty) => {
+                let (ref mutex, ref condvar) = &*self.core.has_messages;
+                let guard = mutex.lock().unwrap();
+                self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
+                println!("Awaiting messages!");
+                let _condvar_guard = condvar.wait(guard).unwrap();
+                println!("Awaiting messages Done!");
+                self.receive_await()
+            }
+            v => v,
         }
     }
 }
@@ -238,6 +304,10 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
         capacity: capacity as usize,
         nodes: UnsafeCell::new(vec![nodes.into_boxed_slice()]),
         node_ptrs: UnsafeCell::new(node_ptrs),
+        has_messages: Arc::new((Mutex::new(true), Condvar::new())),
+        awaited_messages: AtomicUsize::new(0),
+        has_capacity: Arc::new((Mutex::new(true), Condvar::new())),
+        awaited_capacity: AtomicUsize::new(0),
         length: AtomicUsize::new(0),
         enqueued: AtomicUsize::new(0),
         dequeued: AtomicUsize::new(0),
@@ -269,9 +339,9 @@ pub fn create_with_arcs<T: Sync + Send>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::thread;
     use std::time::Duration;
-    use super::*;
 
     /// A macro to assert that pointers point to the right nodes.
     macro_rules! assert_pointer_nodes {
@@ -288,7 +358,7 @@ mod tests {
             let queue_head_pool_tail = $receiver.queue_head_pool_tail.lock().unwrap();
             let (queue_head, pool_tail) = *queue_head_pool_tail;
 
-            assert_eq!($queue_head, queue_head , " <== queue_head mismatch\n");
+            assert_eq!($queue_head, queue_head, " <== queue_head mismatch\n");
             assert_eq!($queue_tail, queue_tail, "<== queue_tail mismatch\n");
             assert_eq!($pool_head, pool_head, "<== pool_head mismatch\n");
             assert_eq!($pool_tail, pool_tail, " <== pool_tail mismatch\n");
@@ -414,7 +484,7 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1);
 
-        assert_eq!(Err(ChannelErrors::Full), sender.send(Items::F));
+        assert_eq!(Err(ChannelErrors::Full(Items::F)), sender.send(Items::F));
         assert_eq!(5, sender.length());
         assert_eq!(5, sender.enqueued());
         assert_eq!(0, sender.dequeued());
@@ -549,54 +619,63 @@ mod tests {
 
     #[test]
     fn test_multiple_producer_single_receiver() {
-        let message_count = 3000;
-        let capacity = 512;
+        let message_count = 30;
+        let capacity = 10;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
-        let sender1 = sender.clone();
-        let sender2 = sender.clone();
 
+        let receiver1 = receiver.clone();
         let rx = thread::spawn(move || {
             let mut count = 0;
             while count < message_count {
-                match receiver.receive() {
-                    Ok(_) => {
+                match receiver1.receive_await() {
+                    Ok(v) => {
                         count += 1;
-                        println!("----> Received Message: {:?}", count);
+                        println!("Received: {:?}: {}, {}", v, count, receiver1.length());
                     }
                     _ => (),
                 };
             }
         });
 
+        let sender1 = sender.clone();
         let tx = thread::spawn(move || {
             for i in 0..(message_count / 3) {
-                match sender.send(i) {
-                    Ok(c) => println!("----> Sent Message: {}:{:?}", i, c),
-                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e)
+                match sender1.send_await(i) {
+                    Ok(c) => println!("----> Sent: {}:{:?}", i, c),
+                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
                 }
             }
         });
 
+        let sender2 = sender.clone();
         let tx2 = thread::spawn(move || {
-            for i in message_count..(message_count / 3) {
-                match sender1.send(i) {
-                    Ok(c) => println!("----> Sent Message: {}:{:?}", i, c),
-                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e)
+            for i in (message_count / 3)..((message_count / 3) * 2) {
+                match sender2.send_await(i) {
+                    Ok(c) => println!("----> Sent: {}:{:?}", i, c),
+                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
                 }
             }
         });
 
+        let sender3 = sender.clone();
         let tx3 = thread::spawn(move || {
             for i in ((message_count / 3) * 2)..(message_count) {
-                match sender2.send(i) {
-                    Ok(c) => println!("----> Sent Message: {}:{:?}", i, c),
-                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e)
+                match sender3.send_await(i) {
+                    Ok(c) => println!("----> Sent: {}:{:?}", i, c),
+                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
                 }
             }
         });
+
         tx.join().unwrap();
         tx2.join().unwrap();
         tx3.join().unwrap();
         rx.join().unwrap();
+
+        println!(
+            "All messages complete: awaited_messages: {}, awaited_capacity: {}",
+            receiver.awaited_messages(),
+            sender.awaited_capacity()
+        );
     }
 }
