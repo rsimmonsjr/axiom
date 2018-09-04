@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// Type alias for half of a usize on 64 bit platform.
 type HalfUsize = u32;
@@ -167,8 +168,12 @@ impl<T: Sync + Send> ChannelSender<T> {
         }
     }
 
-    /// Send to the channel, awaiting capacity if necessary.
-    pub fn send_await(&self, mut value: T) -> Result<usize, ChannelErrors<T>> {
+    /// Send to the channel, awaiting capacity if necessary with an optional timeout.
+    pub fn send_await_timeout(
+        &self,
+        mut value: T,
+        timeout: Option<Duration>,
+    ) -> Result<usize, ChannelErrors<T>> {
         loop {
             match self.send(value) {
                 Err(ChannelErrors::Full(v)) => {
@@ -181,14 +186,24 @@ impl<T: Sync + Send> ChannelSender<T> {
                     }
                     // nope, still no capacity, wait.
                     self.core.awaited_capacity.fetch_add(1, Ordering::Relaxed);
-                    println!("Awaiting capacity!");
-                    let _condvar_guard = condvar.wait(guard).unwrap();
-                    println!("Awaiting capacity done!");
+                    match timeout {
+                        Some(dur) => {
+                            let _condvar_guard = condvar.wait_timeout(guard, dur).unwrap();
+                        }
+                        None => {
+                            let _condvar_guard = condvar.wait(guard).unwrap();
+                        }
+                    };
                     // loop and try again.
                 }
                 v => return v,
             }
         }
+    }
+
+    /// Helper to call [send_await_with_timeout] using a None for the timeout.
+    pub fn send_await(&self, value: T) -> Result<usize, ChannelErrors<T>> {
+        self.send_await_timeout(value, None)
     }
 }
 
@@ -247,7 +262,7 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary.
-    pub fn receive_await(&self) -> Result<T, ChannelErrors<T>> {
+    pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, ChannelErrors<T>> {
         loop {
             match self.receive() {
                 Err(ChannelErrors::Empty) => {
@@ -258,14 +273,24 @@ impl<T: Sync + Send> ChannelReceiver<T> {
                     }
                     // nope, still no messages, wait.
                     self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
-                    println!("Awaiting messages!");
-                    let _condvar_guard = condvar.wait(guard).unwrap();
-                    println!("Awaiting messages Done!");
+                    match timeout {
+                        Some(dur) => {
+                            let _condvar_guard = condvar.wait_timeout(guard, dur).unwrap();
+                        }
+                        None => {
+                            let _condvar_guard = condvar.wait(guard).unwrap();
+                        }
+                    };
                     // loop and try again.
                 }
                 v => return v,
             }
         }
+    }
+
+    /// A helper to call [receive_await_timeout] with [None] for a timeout.
+    pub fn receive_await(&self) -> Result<T, ChannelErrors<T>> {
+        self.receive_await_timeout(None)
     }
 }
 
@@ -633,8 +658,8 @@ mod tests {
 
     #[test]
     fn test_multiple_producer_single_receiver() {
-        let message_count = 30;
-        let capacity = 10;
+        let message_count = 100;
+        let capacity = 32;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
 
         let receiver1 = receiver.clone();
