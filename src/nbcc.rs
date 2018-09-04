@@ -11,12 +11,6 @@ use std::sync::Mutex;
 /// Type alias for half of a usize on 64 bit platform.
 type HalfUsize = u32;
 
-/// Number of bits in half of a usize on 64 bit platform.
-const HALF_USIZE_BITS: u8 = 32;
-
-/// Bitmask used to mask out the upper bits of a usize, leaving only lower bits.
-const LOWER_USIZE_BITMASK: usize = 0xFFFFFFFF;
-
 /// Value used to indicate that a position index points to no other node.
 const NIL_NODE: usize = 1 << 63 as usize;
 
@@ -110,11 +104,9 @@ pub struct ChannelCore<T: Sync + Send> {
 pub struct ChannelSender<T: Sync + Send> {
     /// The core of the channel.
     core: Arc<ChannelCore<T>>,
-    /// Used to create a read lock on the channel.
-    write_lock: Mutex<bool>,
-    /// Indexes in the node_ptrs used for enqueue of elements in the channel. The upper 32
-    /// bits encode the queue_tail and the lower 32 bits encode the pool_head.
-    queue_tail_pool_head: AtomicUsize,
+    /// Indexes in the node_ptrs used for enqueue of elements in the channel wrapped in
+    /// a mutex that acts as a lock.
+    queue_tail_pool_head: Mutex<(usize, usize)>,
 }
 
 impl<T: Sync + Send> ChannelSender<T> {
@@ -122,11 +114,9 @@ impl<T: Sync + Send> ChannelSender<T> {
     /// ownership of the value.
     pub fn send(&self, value: T) -> Result<usize, ChannelErrors> {
         unsafe {
-            let _guard = self.write_lock.lock().unwrap();
             // Retrieve send pointers and the encoded indexes inside them.
-            let send_ptrs = self.queue_tail_pool_head.load(Ordering::Acquire);
-            let queue_tail = send_ptrs >> HALF_USIZE_BITS;
-            let pool_head = send_ptrs & LOWER_USIZE_BITMASK;
+            let mut send_ptrs = self.queue_tail_pool_head.lock().unwrap();
+            let (queue_tail, pool_head) = *send_ptrs;
 
             // Get a pointer to the current pool_head and see if we have space to send.
             let pool_head_ptr = (*self.core().node_ptrs.get())[pool_head] as *mut ChannelNode<T>;
@@ -136,13 +126,11 @@ impl<T: Sync + Send> ChannelSender<T> {
             }
 
             // Pool head moves to become the queue tail or else loop and try again!
-            let next_send_ptrs = (pool_head << HALF_USIZE_BITS) | next_pool_head;
+            *send_ptrs = (pool_head, next_pool_head);
             let queue_tail_ptr = (*self.core().node_ptrs.get())[queue_tail] as *mut ChannelNode<T>;
             (*(*queue_tail_ptr).cell.get()) = Some(value);
             (*pool_head_ptr).next.store(NIL_NODE, Ordering::Release);
             (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
-            self.queue_tail_pool_head
-                .store(next_send_ptrs, Ordering::Release);
 
             // Once we complete the write we have to adjust the channel statistics.
             self.core.enqueued.fetch_add(1, Ordering::Relaxed);
@@ -166,23 +154,18 @@ unsafe impl<T: Send + Sync> Sync for ChannelSender<T> {}
 pub struct ChannelReceiver<T: Sync + Send> {
     /// The core of the channel.
     core: Arc<ChannelCore<T>>,
-    /// Used to create a read lock on the channel.
-    read_lock: Mutex<bool>,
     /// Position in the buffer where the nodes can be dequeued from the queue and put back
-    /// on the pool. The upper 32 bits cover the pool head index in `nodes_ptr` and the lower
-    /// 32 bits cover the pool tail index in `nodes_ptr`.
-    queue_head_pool_tail: AtomicUsize,
+    /// on the pool.
+    queue_head_pool_tail: Mutex<(usize, usize)>,
 }
 
 impl<T: Sync + Send> ChannelReceiver<T> {
     /// Receives the head of the queue, removing it from the queue.
     pub fn receive(&self) -> Result<T, ChannelErrors> {
         unsafe {
-            let _guard = self.read_lock.lock().unwrap();
-            // Retrieve send pointers and the encoded indexes inside them.
-            let receive_ptrs = self.queue_head_pool_tail.load(Ordering::Acquire);
-            let queue_head = receive_ptrs >> HALF_USIZE_BITS;
-            let pool_tail = receive_ptrs & LOWER_USIZE_BITMASK;
+            // Retrieve receive pointers and the encoded indexes inside them.
+            let mut receive_ptrs = self.queue_head_pool_tail.lock().unwrap();
+            let (queue_head, pool_tail) = *receive_ptrs;
 
             // Get a pointer to the current queue_head and see if there is anything to read.
             let queue_head_ptr = (*self.core().node_ptrs.get())[queue_head] as *mut ChannelNode<T>;
@@ -192,13 +175,11 @@ impl<T: Sync + Send> ChannelReceiver<T> {
             }
 
             // Queue head moves to become the pool tail or else loop and try again!
-            let next_receive_ptrs = (next_queue_head << HALF_USIZE_BITS) | queue_head;
+            *receive_ptrs = (next_queue_head, queue_head);
             let value = (*(*queue_head_ptr).cell.get()).take().unwrap() as T;
             let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail] as *mut ChannelNode<T>;
             (*pool_tail_ptr).next.store(queue_head, Ordering::Release);
             (*queue_head_ptr).next.store(NIL_NODE, Ordering::Release);
-            self.queue_head_pool_tail
-                .store(next_receive_ptrs, Ordering::Release);
 
             // Once we complete the write we have to adjust the channel statistics.
             self.core.dequeued.fetch_add(1, Ordering::Relaxed);
@@ -252,10 +233,7 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
         pool_head = nodes.len() - 1;
     }
 
-    // Create the channel structures to send back
-    let queue_tail_pool_head = (queue_tail << HALF_USIZE_BITS) | pool_head;
-    let queue_head_pool_tail = (queue_head << HALF_USIZE_BITS) | pool_tail;
-
+    // Create the channel structures
     let core = Arc::new(ChannelCore {
         capacity: capacity as usize,
         nodes: UnsafeCell::new(vec![nodes.into_boxed_slice()]),
@@ -267,14 +245,12 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
 
     let sender = ChannelSender {
         core: core.clone(),
-        write_lock: Mutex::new(true),
-        queue_tail_pool_head: AtomicUsize::new(queue_tail_pool_head),
+        queue_tail_pool_head: Mutex::new((queue_tail, pool_head)),
     };
 
     let receiver = ChannelReceiver {
         core,
-        read_lock: Mutex::new(true),
-        queue_head_pool_tail: AtomicUsize::new(queue_head_pool_tail),
+        queue_head_pool_tail: Mutex::new((queue_head, pool_tail)),
     };
 
     (sender, receiver)
@@ -306,31 +282,17 @@ mod tests {
             $queue_tail:expr,
             $pool_head:expr,
             $pool_tail:expr
-        ) => {
-            let queue_tail_pool_head = $sender.queue_tail_pool_head.load(Ordering::Relaxed);
-            let queue_head_pool_tail = $receiver.queue_head_pool_tail.load(Ordering::Relaxed);
+        ) => {{
+            let queue_tail_pool_head = $sender.queue_tail_pool_head.lock().unwrap();
+            let (queue_tail, pool_head) = *queue_tail_pool_head;
+            let queue_head_pool_tail = $receiver.queue_head_pool_tail.lock().unwrap();
+            let (queue_head, pool_tail) = *queue_head_pool_tail;
 
-            assert_eq!(
-                $queue_head,
-                queue_head_pool_tail >> HALF_USIZE_BITS,
-                "<== queue_head mismatch\n"
-            );
-            assert_eq!(
-                $queue_tail,
-                queue_tail_pool_head >> HALF_USIZE_BITS,
-                "<== queue_tail mismatch\n"
-            );
-            assert_eq!(
-                $pool_head,
-                queue_tail_pool_head & LOWER_USIZE_BITMASK,
-                "<== pool_head mismatch\n"
-            );
-            assert_eq!(
-                $pool_tail,
-                queue_head_pool_tail & LOWER_USIZE_BITMASK,
-                "<== pool_tail mismatch\n"
-            );
-        };
+            assert_eq!($queue_head, queue_head , " <== queue_head mismatch\n");
+            assert_eq!($queue_tail, queue_tail, "<== queue_tail mismatch\n");
+            assert_eq!($pool_head, pool_head, "<== pool_head mismatch\n");
+            assert_eq!($pool_tail, pool_tail, " <== pool_tail mismatch\n");
+        }};
     }
 
     /// Asserts that the given node in the queue has the expected next pointer.
@@ -556,12 +518,11 @@ mod tests {
 
     #[test]
     fn test_single_producer_single_receiver() {
-        let message_count = 100;
+        let message_count = 200;
         let capacity = 32;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
 
         let rx = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
             let mut count = 0;
             while count < message_count {
                 match receiver.receive() {
@@ -583,6 +544,59 @@ mod tests {
         });
 
         tx.join().unwrap();
+        rx.join().unwrap();
+    }
+
+    #[test]
+    fn test_multiple_producer_single_receiver() {
+        let message_count = 3000;
+        let capacity = 512;
+        let (sender, receiver) = create_with_arcs::<u32>(capacity);
+        let sender1 = sender.clone();
+        let sender2 = sender.clone();
+
+        let rx = thread::spawn(move || {
+            let mut count = 0;
+            while count < message_count {
+                match receiver.receive() {
+                    Ok(_) => {
+                        count += 1;
+                        println!("----> Received Message: {:?}", count);
+                    }
+                    _ => (),
+                };
+            }
+        });
+
+        let tx = thread::spawn(move || {
+            for i in 0..(message_count / 3) {
+                match sender.send(i) {
+                    Ok(c) => println!("----> Sent Message: {}:{:?}", i, c),
+                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e)
+                }
+            }
+        });
+
+        let tx2 = thread::spawn(move || {
+            for i in message_count..(message_count / 3) {
+                match sender1.send(i) {
+                    Ok(c) => println!("----> Sent Message: {}:{:?}", i, c),
+                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e)
+                }
+            }
+        });
+
+        let tx3 = thread::spawn(move || {
+            for i in ((message_count / 3) * 2)..(message_count) {
+                match sender2.send(i) {
+                    Ok(c) => println!("----> Sent Message: {}:{:?}", i, c),
+                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e)
+                }
+            }
+        });
+        tx.join().unwrap();
+        tx2.join().unwrap();
+        tx3.join().unwrap();
         rx.join().unwrap();
     }
 }
