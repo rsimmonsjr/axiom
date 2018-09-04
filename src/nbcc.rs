@@ -4,8 +4,8 @@
 //! messages in the buffer and process those messages later by using a cursor.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Condvar;
 use std::sync::Mutex;
 
@@ -173,6 +173,11 @@ impl<T: Sync + Send> ChannelSender<T> {
             Err(ChannelErrors::Full(v)) => {
                 let (ref mutex, ref condvar) = &*self.core.has_capacity;
                 let guard = mutex.lock().unwrap();
+                if self.core.length.load(Ordering::Relaxed) > self.core.capacity {
+                    // race occurred, there is space to send now.
+                    return self.send_await(v);
+                }
+                // nope, still no capacity, wait.
                 self.core.awaited_capacity.fetch_add(1, Ordering::Relaxed);
                 println!("Awaiting capacity!");
                 let _condvar_guard = condvar.wait(guard).unwrap();
@@ -244,6 +249,11 @@ impl<T: Sync + Send> ChannelReceiver<T> {
             Err(ChannelErrors::Empty) => {
                 let (ref mutex, ref condvar) = &*self.core.has_messages;
                 let guard = mutex.lock().unwrap();
+                if self.core.length.load(Ordering::Relaxed) > 0 {
+                    // race occurred, there is space to send now.
+                    return self.receive_await();
+                }
+                // nope, still no capacity, wait.
                 self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
                 println!("Awaiting messages!");
                 let _condvar_guard = condvar.wait(guard).unwrap();
@@ -339,9 +349,9 @@ pub fn create_with_arcs<T: Sync + Send>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread;
     use std::time::Duration;
+    use super::*;
 
     /// A macro to assert that pointers point to the right nodes.
     macro_rules! assert_pointer_nodes {
