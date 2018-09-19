@@ -768,10 +768,7 @@ mod tests {
             let mut count = 0;
             while count < message_count {
                 match receiver.receive() {
-                    Ok(v) => {
-                        println!("====> Received: {:?}", v);
-                        count += 1;
-                    }
+                    Ok(_v) => count += 1,
                     _ => (),
                 };
             }
@@ -779,8 +776,7 @@ mod tests {
 
         let tx = thread::spawn(move || {
             for i in 0..message_count {
-                let result = sender.send(i);
-                println!("----> Sent: {:?}", result);
+                 sender.send(i).unwrap();
                 thread::sleep(Duration::from_millis(1));
             }
         });
@@ -791,8 +787,8 @@ mod tests {
 
     #[test]
     fn test_multiple_producer_single_receiver() {
-        let message_count = 100;
-        let capacity = 32;
+        let message_count = 1000;
+        let capacity = 100;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
 
         let receiver1 = receiver.clone();
@@ -800,10 +796,7 @@ mod tests {
             let mut count = 0;
             while count < message_count {
                 match receiver1.receive_await() {
-                    Ok(v) => {
-                        count += 1;
-                        println!("Received: {:?}: {}, {}", v, count, receiver1.length());
-                    }
+                    Ok(_) => count += 1,
                     _ => (),
                 };
             }
@@ -813,8 +806,8 @@ mod tests {
         let tx = thread::spawn(move || {
             for i in 0..(message_count / 3) {
                 match sender1.send_await(i) {
-                    Ok(c) => println!("Sent: {}: {}, {}", i, c, sender1.length()),
-                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
+                    Ok(_c) => (),
+                    Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                 }
             }
         });
@@ -823,8 +816,8 @@ mod tests {
         let tx2 = thread::spawn(move || {
             for i in (message_count / 3)..((message_count / 3) * 2) {
                 match sender2.send_await(i) {
-                    Ok(c) => println!("Sent: {}: {}, {}", i, c, sender2.length()),
-                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
+                    Ok(_c) => (),
+                    Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                 }
             }
         });
@@ -833,8 +826,8 @@ mod tests {
         let tx3 = thread::spawn(move || {
             for i in ((message_count / 3) * 2)..(message_count) {
                 match sender3.send_await(i) {
-                    Ok(c) => println!("Sent: {}: {}, {}", i, c, sender3.length()),
-                    Err(e) => println!("----> Error while sending: {}:{:?}", i, e),
+                    Ok(_c) => (),
+                    Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                 }
             }
         });
