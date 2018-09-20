@@ -1,7 +1,23 @@
-//! An Non-Blocking Concurrent Channel (NBCC) is a channel that allows users to send and receive
-//! data from multiple threads using a ring buffer as the backing store for the channel. The
-//! channel also allows skip semantics with a cursor which allows the user to skip dequeueing
-//! messages in the buffer and process those messages later by using a cursor.
+//! An Skip Enabled Concurrent Channel (SECC) is a channel that allows users to send and receive
+//! data from multiple threads and allows the user to skip reading messages if they choose and
+//! then reset the skip later to read the messages. In the purest sense the channel is FIFO
+//! unless the user intends to skip one or more messages in which case a message could be read
+//! in a different order. The channel does guarantee that the messages will remain in the same
+//! order as inserted and unless skipped will be processed in order.
+//!
+//! The module is implemented using two linked lists where one list acts as a pool and the
+//! other list acts as the queue holding the messages. This allows us to move data in and out
+//! of the list and even skip a message with O(1) efficiency. If there are 1000 messages and
+//! the user desires to skip one in the middle they will incur virtually the exact same performance
+//! as a normal read operation. There are only a couple more pointer operations to dequeue a
+//! node out of the middle of the linked list that is the queue. When a node is dequeued the
+//! node is removed from the queue and appended to the tail of the pool and when a message is
+//! enqueued the node moves from the head of the pool to the tail of the queue. In this manner
+//! nodes are constantly cycled in and out of the queue and we only need to allocate them once
+//! when the channel is created.
+//!
+//! Although the channel is currently bounded, adding the ability for the channel to grow would
+//! be trivial.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +34,7 @@ const NIL_NODE: usize = 1 << 63 as usize;
 
 /// Errors potentially returned from run queue operations.
 #[derive(Debug, Eq, PartialEq)]
-pub enum ChannelErrors<T: Sync + Send> {
+pub enum SeccErrors<T: Sync + Send> {
     /// Channel is full, no more messages can be enqueued, contains the last message attempted
     /// to be enqueued.
     Full(T),
@@ -29,7 +45,7 @@ pub enum ChannelErrors<T: Sync + Send> {
 }
 
 /// A single node in the run queue's ring buffer.
-struct ChannelNode<T: Sync + Send> {
+struct SeccNode<T: Sync + Send> {
     /// Contains a value set in the node in a Some or a None if empty. Note that this is unsafe
     /// in order to get around Rust mutability locks so that this data structure can be passed
     /// around immutably but also still be able to enqueue and dequeue.
@@ -39,18 +55,18 @@ struct ChannelNode<T: Sync + Send> {
     // FIXME Add tracking of time in channel by milliseconds.
 }
 
-impl<T: Sync + Send> ChannelNode<T> {
+impl<T: Sync + Send> SeccNode<T> {
     /// Creates a new node where the next index is set to the nil node.
-    pub fn new() -> ChannelNode<T> {
-        ChannelNode {
+    pub fn new() -> SeccNode<T> {
+        SeccNode {
             cell: UnsafeCell::new(None),
             next: AtomicUsize::new(NIL_NODE),
         }
     }
 
     /// Creates a new node where the next index is the given value.
-    pub fn with_next(next: usize) -> ChannelNode<T> {
-        ChannelNode {
+    pub fn with_next(next: usize) -> SeccNode<T> {
+        SeccNode {
             cell: UnsafeCell::new(None),
             next: AtomicUsize::new(next),
         }
@@ -58,9 +74,9 @@ impl<T: Sync + Send> ChannelNode<T> {
 }
 
 /// Operations that work on the core of the channel.
-pub trait ChannelCoreOps<T: Sync + Send> {
+pub trait SeccCoreOps<T: Sync + Send> {
     /// Fetch the core of the channel.
-    fn core(&self) -> &ChannelCore<T>;
+    fn core(&self) -> &SeccCore<T>;
 
     /// Returns the capacity of the channel.
     fn capacity(&self) -> usize {
@@ -101,7 +117,7 @@ pub trait ChannelCoreOps<T: Sync + Send> {
 
 /// Data structure that contains the core of the channel including tracking fo statistics
 /// and data storage.
-pub struct ChannelCore<T: Sync + Send> {
+pub struct SeccCore<T: Sync + Send> {
     /// Capacity of the channel, which is the total number of items that can be stored.
     /// Note that there are 2 more nodes than the capacity because neither the queue nor pool
     /// should ever be empty.
@@ -110,12 +126,12 @@ pub struct ChannelCore<T: Sync + Send> {
     /// allocation and tests. Therefore they can be stored in an [UnsafeCell]. It is critical
     /// that the nodes don't change memory location so they are in a `Box<[Node<T>]>` slice
     /// and the surrounding [Vec] allows for expanding the storage without moving existing.
-    nodes: UnsafeCell<Vec<Box<[ChannelNode<T>]>>>,
+    nodes: UnsafeCell<Vec<Box<[SeccNode<T>]>>>,
     /// Pointers to the nodes in the channel. It is critical that these pointers never change
     /// order during the operations of the channel. If the channel has to be resized it should
     /// push the new pointers into the [Vec] at the back and never remove a pointer. Note that
     /// resizing the channel is not currently supported.
-    node_ptrs: UnsafeCell<Vec<*mut ChannelNode<T>>>,
+    node_ptrs: UnsafeCell<Vec<*mut SeccNode<T>>>,
     /// Cond var that is set when the channel transitions from no messages available to some
     /// messages available. All threads are notified only when the length goes from 0 to 1.
     has_messages: Arc<(Mutex<bool>, Condvar)>,
@@ -139,19 +155,19 @@ pub struct ChannelCore<T: Sync + Send> {
 }
 
 /// Sender side of the channel.
-pub struct ChannelSender<T: Sync + Send> {
+pub struct SeccSender<T: Sync + Send> {
     /// The core of the channel.
-    core: Arc<ChannelCore<T>>,
+    core: Arc<SeccCore<T>>,
     /// Indexes in the node_ptrs used for enqueue of elements in the channel wrapped in
     /// a mutex that acts as a lock.
     queue_tail_pool_head: Mutex<(usize, usize)>,
 }
 
-impl<T: Sync + Send> ChannelSender<T> {
+impl<T: Sync + Send> SeccSender<T> {
     /// Sends a value into the mailbox, the value will be moved into the mailbox and it will take
     /// ownership of the value. This function will either return the count of readable messages
     /// in an [Ok] or an [Err] if something went wrong.
-    pub fn send(&self, value: T) -> Result<usize, ChannelErrors<T>> {
+    pub fn send(&self, value: T) -> Result<usize, SeccErrors<T>> {
         unsafe {
             // Retrieve send pointers and the encoded indexes inside them.
             let mut send_ptrs = self.queue_tail_pool_head.lock().unwrap();
@@ -161,7 +177,7 @@ impl<T: Sync + Send> ChannelSender<T> {
             let pool_head_ptr = (*self.core().node_ptrs.get())[pool_head];
             let next_pool_head = (*pool_head_ptr).next.load(Ordering::Acquire);
             if NIL_NODE == next_pool_head {
-                return Err(ChannelErrors::Full(value));
+                return Err(SeccErrors::Full(value));
             }
 
             // Pool head moves to become the queue tail or else loop and try again!
@@ -191,10 +207,10 @@ impl<T: Sync + Send> ChannelSender<T> {
         &self,
         mut value: T,
         timeout: Option<Duration>,
-    ) -> Result<usize, ChannelErrors<T>> {
+    ) -> Result<usize, SeccErrors<T>> {
         loop {
             match self.send(value) {
-                Err(ChannelErrors::Full(v)) => {
+                Err(SeccErrors::Full(v)) => {
                     value = v;
                     let (ref mutex, ref condvar) = &*self.core.has_capacity;
                     let guard = mutex.lock().unwrap();
@@ -220,34 +236,34 @@ impl<T: Sync + Send> ChannelSender<T> {
     }
 
     /// Helper to call [send_await_with_timeout] using a None for the timeout.
-    pub fn send_await(&self, value: T) -> Result<usize, ChannelErrors<T>> {
+    pub fn send_await(&self, value: T) -> Result<usize, SeccErrors<T>> {
         self.send_await_timeout(value, None)
     }
 }
 
-impl<T: Sync + Send> ChannelCoreOps<T> for ChannelSender<T> {
-    fn core(&self) -> &ChannelCore<T> {
+impl<T: Sync + Send> SeccCoreOps<T> for SeccSender<T> {
+    fn core(&self) -> &SeccCore<T> {
         &self.core
     }
 }
 
-unsafe impl<T: Send + Sync> Send for ChannelSender<T> {}
+unsafe impl<T: Send + Sync> Send for SeccSender<T> {}
 
-unsafe impl<T: Send + Sync> Sync for ChannelSender<T> {}
+unsafe impl<T: Send + Sync> Sync for SeccSender<T> {}
 
 /// Receiver side of the channel.
-pub struct ChannelReceiver<T: Sync + Send> {
+pub struct SeccReceiver<T: Sync + Send> {
     /// The core of the channel.
-    core: Arc<ChannelCore<T>>,
+    core: Arc<SeccCore<T>>,
     /// Position in the buffer where the nodes can be dequeued from the queue and put back
     /// on the pool. The queue head is where we can dequeue the next message and the pool
     /// tail is where to put nodes back into the pool.
     queue_head_pool_tail_precursor_cursor: Mutex<(usize, usize, usize, usize)>,
 }
 
-impl<T: Sync + Send> ChannelReceiver<T> {
+impl<T: Sync + Send> SeccReceiver<T> {
     /// Receives the message at the head of the channel.
-    pub fn receive(&self) -> Result<T, ChannelErrors<T>> {
+    pub fn receive(&self) -> Result<T, SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
             let mut receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
@@ -261,7 +277,7 @@ impl<T: Sync + Send> ChannelReceiver<T> {
             };
             let next_read_pos = (*read_ptr).next.load(Ordering::Acquire);
             if NIL_NODE == next_read_pos {
-                return Err(ChannelErrors::Empty);
+                return Err(SeccErrors::Empty);
             }
 
             let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail];
@@ -301,10 +317,10 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary.
-    pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, ChannelErrors<T>> {
+    pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, SeccErrors<T>> {
         loop {
             match self.receive() {
-                Err(ChannelErrors::Empty) => {
+                Err(SeccErrors::Empty) => {
                     let (ref mutex, ref condvar) = &*self.core.has_messages;
                     let guard = mutex.lock().unwrap();
                     if self.core.readable.load(Ordering::Acquire) > 0 {
@@ -330,14 +346,14 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     }
 
     /// A helper to call [receive_await_timeout] with [None] for a timeout.
-    pub fn receive_await(&self) -> Result<T, ChannelErrors<T>> {
+    pub fn receive_await(&self) -> Result<T, SeccErrors<T>> {
         self.receive_await_timeout(None)
     }
 
     /// A helper used for skipping messages in the channel. If the user passed [true] for
     /// to_end then the skip mechanism will skip to the end of the channel inside a single
     /// lock. This function returns the total number of readable messages or an error.
-    fn skip_helper(&self, to_end: bool) -> Result<usize, ChannelErrors<T>> {
+    fn skip_helper(&self, to_end: bool) -> Result<usize, SeccErrors<T>> {
         // FIXME Need tests!
         // FIXME Track Metrics.
         unsafe {
@@ -357,7 +373,7 @@ impl<T: Sync + Send> ChannelReceiver<T> {
                 // just return the total number readable, otherwise we will return an error.
                 if NIL_NODE == next_read_pos {
                     if count == 0 {
-                        return Err(ChannelErrors::Empty);
+                        return Err(SeccErrors::Empty);
                     } else {
                         return Ok(self.core.readable.load(Ordering::Relaxed));
                     }
@@ -384,7 +400,7 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     /// the number of readable messages will drop by one because message is skipped. To read the
     /// message again the user will need to call [reset_skip] in order to reset the skip pointer
     /// back to the head of the channel.
-    pub fn skip(&self) -> Result<usize, ChannelErrors<T>> {
+    pub fn skip(&self) -> Result<usize, SeccErrors<T>> {
         self.skip_helper(false)
     }
 
@@ -393,7 +409,7 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     /// as the channel needs to traverse all messages to get to the end and there could be a race
     /// to get to the end before new data is sent to the channel so the user should be aware that
     /// the channel may not completely be at the end of the channel.
-    pub fn skip_to_end(&self) -> Result<usize, ChannelErrors<T>> {
+    pub fn skip_to_end(&self) -> Result<usize, SeccErrors<T>> {
         // FIXME Need tests!
         self.skip_helper(true)
     }
@@ -417,18 +433,18 @@ impl<T: Sync + Send> ChannelReceiver<T> {
     }
 }
 
-impl<T: Sync + Send> ChannelCoreOps<T> for ChannelReceiver<T> {
-    fn core(&self) -> &ChannelCore<T> {
+impl<T: Sync + Send> SeccCoreOps<T> for SeccReceiver<T> {
+    fn core(&self) -> &SeccCore<T> {
         &self.core
     }
 }
 
-unsafe impl<T: Send + Sync> Send for ChannelReceiver<T> {}
+unsafe impl<T: Send + Sync> Send for SeccReceiver<T> {}
 
-unsafe impl<T: Send + Sync> Sync for ChannelReceiver<T> {}
+unsafe impl<T: Send + Sync> Sync for SeccReceiver<T> {}
 
 /// Creates the sender and receiver sides of this channel.
-pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, ChannelReceiver<T>) {
+pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (SeccSender<T>, SeccReceiver<T>) {
     // FIXME support reallocation of size ?
     if capacity < 1 {
         panic!("capacity cannot be smaller than 1");
@@ -437,32 +453,32 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
     // We add two to the allocated capacity to account for the mandatory two placeholder nodes
     // that guarantee that both queue and pool are never empty.
     let alloc_capacity = (capacity + 2) as usize;
-    let mut nodes = Vec::<ChannelNode<T>>::with_capacity(alloc_capacity);
-    let mut node_ptrs = Vec::<*mut ChannelNode<T>>::with_capacity(alloc_capacity);
+    let mut nodes = Vec::<SeccNode<T>>::with_capacity(alloc_capacity);
+    let mut node_ptrs = Vec::<*mut SeccNode<T>>::with_capacity(alloc_capacity);
 
     // The queue just gets one initial node with no data and the queue_tail is just
     // the same as the queue_head.
-    nodes.push(ChannelNode::<T>::new());
-    node_ptrs.push(nodes.last_mut().unwrap() as *mut ChannelNode<T>);
+    nodes.push(SeccNode::<T>::new());
+    node_ptrs.push(nodes.last_mut().unwrap() as *mut SeccNode<T>);
     let queue_head = nodes.len() - 1;
     let queue_tail = queue_head;
 
     // Allocate the tail in the pool of nodes that will be added to in order to form
     // the pool. Note that although this is expensive, it only has to be done once.
-    nodes.push(ChannelNode::<T>::new());
-    node_ptrs.push(nodes.last_mut().unwrap() as *mut ChannelNode<T>);
+    nodes.push(SeccNode::<T>::new());
+    node_ptrs.push(nodes.last_mut().unwrap() as *mut SeccNode<T>);
     let mut pool_head = nodes.len() - 1;
     let pool_tail = pool_head;
 
     // Allocate the rest of the pool pushing each node onto the previous node.
     for _ in 0..capacity {
-        nodes.push(ChannelNode::<T>::with_next(pool_head));
-        node_ptrs.push(nodes.last_mut().unwrap() as *mut ChannelNode<T>);
+        nodes.push(SeccNode::<T>::with_next(pool_head));
+        node_ptrs.push(nodes.last_mut().unwrap() as *mut SeccNode<T>);
         pool_head = nodes.len() - 1;
     }
 
     // Create the channel structures
-    let core = Arc::new(ChannelCore {
+    let core = Arc::new(SeccCore {
         capacity: capacity as usize,
         nodes: UnsafeCell::new(vec![nodes.into_boxed_slice()]),
         node_ptrs: UnsafeCell::new(node_ptrs),
@@ -476,12 +492,12 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
         dequeued: AtomicUsize::new(0),
     });
 
-    let sender = ChannelSender {
+    let sender = SeccSender {
         core: core.clone(),
         queue_tail_pool_head: Mutex::new((queue_tail, pool_head)),
     };
 
-    let receiver = ChannelReceiver {
+    let receiver = SeccReceiver {
         core,
         queue_head_pool_tail_precursor_cursor: Mutex::new((
             queue_head, pool_tail, NIL_NODE, NIL_NODE,
@@ -495,7 +511,7 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (ChannelSender<T>, Channel
 /// multiple consumers by returning sender and receiver each wrapped in [Arc] instances.
 pub fn create_with_arcs<T: Sync + Send>(
     capacity: HalfUsize,
-) -> (Arc<ChannelSender<T>>, Arc<ChannelReceiver<T>>) {
+) -> (Arc<SeccSender<T>>, Arc<SeccReceiver<T>>) {
     let (sender, receiver) = create(capacity);
     (Arc::new(sender), Arc::new(receiver))
 }
@@ -656,7 +672,7 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
 
-        assert_eq!(Err(ChannelErrors::Full(Items::F)), sender.send(Items::F));
+        assert_eq!(Err(SeccErrors::Full(Items::F)), sender.send(Items::F));
         assert_eq!(5, sender.length());
         assert_eq!(5, sender.enqueued());
         assert_eq!(0, sender.dequeued());
@@ -726,7 +742,7 @@ mod tests {
         assert_node_next_nil!(pointers, 3);
         assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL_NODE, NIL_NODE);
 
-        assert_eq!(Err(ChannelErrors::Empty), receiver.receive());
+        assert_eq!(Err(SeccErrors::Empty), receiver.receive());
         assert_eq!(0, receiver.length());
         assert_eq!(5, receiver.enqueued());
         assert_eq!(5, receiver.dequeued());
@@ -776,7 +792,7 @@ mod tests {
 
         let tx = thread::spawn(move || {
             for i in 0..message_count {
-                 sender.send(i).unwrap();
+                sender.send(i).unwrap();
                 thread::sleep(Duration::from_millis(1));
             }
         });

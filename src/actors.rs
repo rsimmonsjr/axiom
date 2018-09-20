@@ -1,5 +1,5 @@
-use mailbox;
-use mailbox::*;
+use secc;
+use secc::*;
 use std::any::Any;
 use std::marker::{Send, Sync};
 use std::sync::Arc;
@@ -38,7 +38,7 @@ pub enum DequeueResult {
 ///
 /// ## Examples
 ///
-/// Dispatches the message to one of 3 different funtions thath andle different types or returns
+/// Dispatches the message to one of 3 different functions that handle different types or returns
 /// the Panic result if the code cannot dispatch the message.
 pub fn dispatch<T: 'static, S, R>(
     state: &mut S,
@@ -74,30 +74,30 @@ pub struct ActorContext {
     /// The id of this actor.
     aid: ActorId,
     /// The transmit side of the channel to use to send messages to the actor.
-    tx: MailboxSender<Arc<Message>>,
+    tx: Arc<SeccSender<Arc<Message>>>,
     /// The receiver part of the channel being sent to the actor.
-    rx: MailboxReceiver<Arc<Message>>, // TODO Add the ability to track execution time in min/mean/max/std_deviation
+    rx: Arc<SeccReceiver<Arc<Message>>>, // TODO Add the ability to track execution time in min/mean/max/std_deviation
 }
 
 impl ActorContext {
     /// Creates a new actor context with the given actor id.
     pub fn new(aid: ActorId) -> ActorContext {
         // FIXME Allow user to pass a mailbox size and potentially a grow function.
-        let (tx, rx) = mailbox::create::<Arc<Message>>(16);
+        let (tx, rx) = secc::create_with_arcs::<Arc<Message>>(32);
         ActorContext { aid, tx, rx }
     }
 
     /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
     /// if the user wants to retain the message they should clone the `Arc` before calling this
     /// function.
-    fn send(&mut self, message: Arc<Message>) -> Result<usize, MailboxErrors> {
+    fn send(&mut self, message: Arc<Message>) -> Result<usize, SeccErrors<Arc<Message>>> {
         // FIXME this should be part of the private API.
         self.tx.send(message)
     }
 
     /// Receives the message on the actor and calls the handler for that actor. This function
     /// will be typically called by the scheduler to process messages in the actor's channel.
-    fn receive(&mut self) -> Result<Arc<Message>, MailboxErrors> {
+    fn receive(&mut self) -> Result<Arc<Message>, SeccErrors<Arc<Message>>> {
         // FIXME move this to private api.
         // FIXME We have to change this to enable message skipping according to the dispatcher.
         self.rx.receive()
@@ -141,7 +141,7 @@ pub trait Actor {
     /// Sends the actor a message contained in an arc. Since this function moves the `Arc`,
     /// if the user wants to retain the message they should clone the `Arc` before calling this
     /// function.
-    fn send(&mut self, message: Arc<Message>) -> Result<usize, MailboxErrors> {
+    fn send(&mut self, message: Arc<Message>) -> Result<usize, SeccErrors<Arc<Message>>> {
         // FIXME this should be part of the private API.
         self.context_mut().send(message)
     }

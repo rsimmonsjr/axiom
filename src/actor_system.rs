@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+// TODO Investigate (NUMA)[https://en.wikipedia.org/wiki/Non-uniform_memory_access]
+
 pub struct ActorSystem {
     /// Holds a table of actors in the system keyed by their actor id (aid).
     actors_by_aid: HashMap<ActorId, Arc<Mutex<Actor>>>,
