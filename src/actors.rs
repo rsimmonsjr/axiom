@@ -143,7 +143,6 @@ impl ActorContext {
     fn receive(&self) -> Result<Arc<Message>, SeccErrors<Arc<Message>>> {
         self.receiver.receive()
     }
-
 }
 
 /// This is the core Actor type in the actor system. The user should see the `README.md` for
