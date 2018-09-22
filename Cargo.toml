@@ -1,10 +1,13 @@
 [package]
 name = "rlib_actors"
 version = "0.1.0"
-authors = ["Robert Simmons <robert.simmons@victiv.com>"]
+authors = ["Robert Simmons <kraythe@gmail.com>"]
+publish = false
 
 [dependencies]
-uuid = "0.6"
-lazy_static = "1.0.2"
+uuid = "0.7.1"
+lazy_static = "1.1.0"
 
+[features]
+default = ["uuid/v4"]
 
