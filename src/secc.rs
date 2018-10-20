@@ -126,7 +126,7 @@ pub struct SeccCore<T: Sync + Send> {
     /// allocation and tests. Therefore they can be stored in an [UnsafeCell]. It is critical
     /// that the nodes don't change memory location so they are in a `Box<[Node<T>]>` slice
     /// and the surrounding [Vec] allows for expanding the storage without moving existing.
-    nodes: UnsafeCell<Vec<Box<[SeccNode<T>]>>>,
+    _nodes: UnsafeCell<Vec<Box<[SeccNode<T>]>>>,
     /// Pointers to the nodes in the channel. It is critical that these pointers never change
     /// order during the operations of the channel. If the channel has to be resized it should
     /// push the new pointers into the [Vec] at the back and never remove a pointer. Note that
@@ -202,7 +202,9 @@ impl<T: Sync + Send> SeccSender<T> {
         }
     }
 
-    /// Send to the channel, awaiting capacity if necessary with an optional timeout.
+    /// Send to the channel, awaiting capacity if necessary with an optional timeout. This
+    /// function will either return the count of readable messages /// in an [Ok] or an [Err]
+    /// if something went wrong.
     pub fn send_await_timeout(
         &self,
         mut value: T,
@@ -235,7 +237,9 @@ impl<T: Sync + Send> SeccSender<T> {
         }
     }
 
-    /// Helper to call [send_await_with_timeout] using a None for the timeout.
+    /// Helper to call [send_await_with_timeout] using a None for the timeout. This function
+    /// will either return the count of readable messages in an [Ok] or an [Err] if
+    /// something went wrong.
     pub fn send_await(&self, value: T) -> Result<usize, SeccErrors<T>> {
         self.send_await_timeout(value, None)
     }
@@ -480,7 +484,7 @@ pub fn create<T: Sync + Send>(capacity: HalfUsize) -> (SeccSender<T>, SeccReceiv
     // Create the channel structures
     let core = Arc::new(SeccCore {
         capacity: capacity as usize,
-        nodes: UnsafeCell::new(vec![nodes.into_boxed_slice()]),
+        _nodes: UnsafeCell::new(vec![nodes.into_boxed_slice()]),
         node_ptrs: UnsafeCell::new(node_ptrs),
         has_messages: Arc::new((Mutex::new(true), Condvar::new())),
         awaited_messages: AtomicUsize::new(0),

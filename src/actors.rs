@@ -8,6 +8,8 @@ use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::thread::JoinHandle;
 use uuid::Uuid;
 
 /// This is a type used by the system for sending a message through a channel to the actor.
@@ -61,8 +63,8 @@ pub fn dispatch<T: 'static, S, R>(
 pub enum ActorSender {
     /// A Sender used for sending messages to local actors.
     Local(SeccSender<Arc<Message>>),
-    Remote,
-    // FIXME Create a remote sender.
+    /// The remote sender.
+    Remote, // FIXME not implemented.
 }
 
 /// Encapsulates an ID to an actor.
@@ -76,6 +78,8 @@ pub struct ActorId {
     /// case a tell will serialize the object to the remote node and then use the [ActorId]
     /// there instead to send the message.
     sender: ActorSender,
+    /// Holds a reference to the actor system that the [ActorId] is declared on.
+    actor_system: Arc<ActorSystem>,
 }
 
 impl ActorId {
@@ -83,7 +87,13 @@ impl ActorId {
     /// to send and returns the number of messages currently in the actor's channel.
     pub fn send(&self, message: Arc<Message>) -> Result<usize, SeccErrors<Arc<Message>>> {
         match &self.sender {
-            ActorSender::Local(sender) => sender.send_await(message),
+            ActorSender::Local(sender) => {
+                let readable = sender.send_await(message).unwrap();
+                if readable == 1 { // From 0 to 1 message readable triggers schedule.
+                    self.actor_system.schedule_actor(&self);
+                }
+                Ok(readable)
+            }
             _ => unimplemented!("Remote actors not implemented currently."),
         }
     }
@@ -125,23 +135,16 @@ pub struct ActorContext {
 
 impl ActorContext {
     /// Creates a new actor context with the given actor id.
-    pub fn new(node_id: Uuid) -> ActorContext {
+    pub fn new(actor_system: Arc<ActorSystem>) -> ActorContext {
         // FIXME Allow user to pass a mailbox size and potentially a grow function.
         let (tx, receiver) = secc::create::<Arc<Message>>(32);
-        let id = Uuid::new_v4();
-        let sender = ActorSender::Local(tx);
         let aid = Arc::new(ActorId {
-            id,
-            node_id,
-            sender,
+            id: Uuid::new_v4(),
+            node_id: actor_system.node_id,
+            sender: ActorSender::Local(tx),
+            actor_system: actor_system.clone()
         });
         ActorContext { aid, receiver }
-    }
-
-    /// Receives the message on the actor and calls the handler for that actor. This function
-    /// will be typically called by the scheduler to process messages in the actor's channel.
-    fn receive(&self) -> Result<Arc<Message>, SeccErrors<Arc<Message>>> {
-        self.receiver.receive()
     }
 }
 
@@ -178,21 +181,79 @@ pub trait Actor: Send + Sync {
     fn pending(&self) -> usize {
         self.context().receiver.length()
     }
+
+    /// A helper for an actor to send a message to itself. See codumentation for [ActorId::send].
+    fn send_to_self(&self, message: Arc<Message>) -> Result<usize, SeccErrors<Arc<Message>>> {
+        self.context().aid.send(message)
+    }
+
+    /// Receives the message on the actor and calls the handler for that actor. This function
+    /// will be typically called by the scheduler to process messages in the actor's channel.
+    fn receive(&mut self) -> Result<Arc<Message>, SeccErrors<Arc<Message>>> {
+        let message = self.context_mut().receiver.receive_await().unwrap();
+        self.handle_message(message) // FIXME deal with skip returned.
+    }
 }
 
-/// An actor system that contains and manages the actors spawned inside it.
+/// An actor system that contains and manages the actors spawned inside it. The actor system
+/// embodies principally two main components, a AID table that maps [ActorId]s to the actors
+/// and a run channel that the actors are sent to when they have pending messages.
+///
+/// ## Run Channel
+/// The Run Queue is necessary because not all actors will have messages at all times and
+/// repeatedly iterating over the map of actors would be wasteful. An actor will be put
+/// into the run channel by the [ActorId] upon sending a message when the
 pub struct ActorSystem {
     /// Id for this actor system and node.
     node_id: Uuid,
     /// Holds a table of actors in the system keyed by their actor id (aid).
-    actors_by_aid: HashMap<Arc<ActorId>, Arc<dyn Actor>>,
+    actors_by_aid: HashMap<Arc<ActorId>, Arc<Mutex<dyn Actor>>>,
+    /// Holds the Run Channel sender.
+    run_channel_sender: Arc<SeccSender<Arc<Mutex<Actor>>>>,
+    /// Holde the receiver side of the Run channel.
+    run_channel_receiver: Arc<SeccReceiver<Arc<Mutex<Actor>>>>,
+    /// Holds handles to the pool of threads processing the run queue.
+    thread_pool: Vec<JoinHandle<()>>,
 }
 
 impl ActorSystem {
+    /// Starts a thread for the dispatcher that will process actor messages.
+    fn start_dispatcher_thread(
+        tx: Arc<SeccSender<Arc<Mutex<Actor>>>>,
+        rx: Arc<SeccReceiver<Arc<Mutex<Actor>>>>,
+    ) -> JoinHandle<()> {
+        thread::spawn(move || {
+            match rx.receive_await() {
+                Err(_) => println!("Error"), // FIXME turn this into logging instead.
+                Ok(mutex) => {
+                    let mut guard = mutex.lock().unwrap();
+                    let mut context = guard.context_mut();
+                    context.receive().unwrap(); // FIXME An actor shouldn't return error to scheduler
+                    if context.receiver.readable() > 0 {
+                        // if there are additional messages pending in the actor,
+                        // re-enqueue the message at the back of the queue.
+                        tx.send_await(mutex.clone());
+                    }
+                }
+            }
+        })
+    }
+
     pub fn new() -> ActorSystem {
+        // This channel will be used as a run queue to execute the messages.
+        // FIXME Let the user pass the size of the run queue when creating actor system.
+        let (sender, receiver) = secc::create_with_arcs::<Arc<Mutex<dyn Actor>>>(100);
+        // Creates the thread pool which will be constantly trying to grab messages out of the run queue.
+        // FIXME Let the user pass the amount of threads to create. Result<Arc<Message>, SeccErrors<Arc<Message>>>
+        let thread_pool: Vec<JoinHandle<()>> = (1..4)
+            .map(|_i| ActorSystem::start_dispatcher_thread(sender.clone(), receiver.clone()))
+            .collect();
         ActorSystem {
             node_id: Uuid::new_v4(),
             actors_by_aid: HashMap::new(),
+            run_channel_sender: sender,
+            run_channel_receiver: receiver,
+            thread_pool,
         }
     }
 
@@ -200,7 +261,7 @@ impl ActorSystem {
     /// This is seaprated from the raw spawn method to facilitate various means of tracking actors
     /// as well as to make testing easier.
     fn spawn_internal<T: Actor + 'static, F: Fn(ActorContext) -> T>(&mut self, f: F) -> T {
-        let context = ActorContext::new(self.node_id);
+        let context = ActorContext::new(self);
         f(context)
     }
 
@@ -208,13 +269,19 @@ impl ActorSystem {
     pub fn spawn<T: Actor + 'static, F: Fn(ActorContext) -> T>(&mut self, f: F) -> Arc<ActorId> {
         let actor = self.spawn_internal(f);
         let aid = actor.aid();
-        self.actors_by_aid.insert(aid.clone(), Arc::new(actor));
+        self.actors_by_aid
+            .insert(aid.clone(), Arc::new(Mutex::new(actor)));
         aid
+    }
+
+    /// Schedules the actor with the given AID to be run by the dispatcher.
+    fn schedule_actor(&self, aid: &ActorId) {
+        self.run_channel_sender.send_await(self.actors_by_aid.get().unwrap().clone());
     }
 }
 
 /// Holds an instance to the default actor system. Note that although a user could theoretically create another actor
-/// system, there owuld be almost no reason to do so.
+/// system, there would be almost no reason to do so except for testing.
 lazy_static! {
     static ref ACTOR_SYSTEM: Mutex<ActorSystem> = Mutex::new(ActorSystem::new());
 }
