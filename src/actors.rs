@@ -35,8 +35,6 @@ pub enum DequeueResult {
     /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
     /// the same as [`Processed`].
     SkipCleared,
-    /// The message generated an error of some kind and a panic should occur.
-    Panic,
 }
 
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
@@ -79,7 +77,7 @@ pub struct ActorId {
     /// there instead to send the message.
     sender: ActorSender,
     /// Holds a reference to the actor system that the [ActorId] is declared on.
-    actor_system: Arc<ActorSystem>,
+    system: Arc<ActorSystem>,
 }
 
 impl ActorId {
@@ -90,7 +88,7 @@ impl ActorId {
             ActorSender::Local(sender) => {
                 let readable = sender.send_await(message).unwrap();
                 if readable == 1 { // From 0 to 1 message readable triggers schedule.
-                    self.actor_system.schedule_actor(&self);
+                    self.system.schedule_actor(&self);
                 }
                 Ok(readable)
             }
@@ -125,73 +123,97 @@ impl Hash for ActorId {
     }
 }
 
+
+/// This is the core Actor type in the actor system. The user should see the `README.md` for
+/// a detailed description of an actor and the Actor model. Callers communicate with the actor
+/// by means of a channel which holds the messages in the order received. The messages are
+/// then processed by the message handler and the appropriate state of the message is returned.
+pub trait Actor: Send + Sync 
+where
+    Self: std::marker::Sized {
+    /// Process the the message and return the result of the dispatching.
+    fn handle_msg(&mut self, context: &ActorContext, message: Arc<Message>) -> DequeueResult;
+}
+
 /// Context for an actor storing the information core to the actor and its management.
 pub struct ActorContext {
     /// The id of this actor.
     aid: Arc<ActorId>,
     /// The receiver part of the channel being sent to the actor.
+    /// FIXME does this really need an arc message since ownership is being transferred? 
     receiver: SeccReceiver<Arc<Message>>,
+    /// The actor to be gatting messages. 
+    actor: dyn Actor,
 }
 
 impl ActorContext {
     /// Creates a new actor context with the given actor id.
-    pub fn new(actor_system: Arc<ActorSystem>) -> ActorContext {
+    pub fn new(actor_system: Arc<ActorSystem>, actor: dyn Actor) -> ActorContext {
         // FIXME Allow user to pass a mailbox size and potentially a grow function.
         let (tx, receiver) = secc::create::<Arc<Message>>(32);
         let aid = Arc::new(ActorId {
             id: Uuid::new_v4(),
             node_id: actor_system.node_id,
             sender: ActorSender::Local(tx),
-            actor_system: actor_system.clone()
+            system: actor_system.clone()
         });
-        ActorContext { aid, receiver }
+        ActorContext { aid, receiver, actor }
     }
-}
-
-/// This is the core Actor type in the actor system. The user should see the `README.md` for
-/// a detailed description of an actor and the Actor model. Callers communicate with the actor
-/// by means of a channel which holds the messages in the order received. The messages are
-/// then processed by the message handler and the appropriate state of the message is returned.
-pub trait Actor: Send + Sync {
-    /// Fetches the context for this actor.
-    fn context(&self) -> &ActorContext;
-
-    /// Fetches the mutable context for this actor.
-    fn context_mut(&mut self) -> &mut ActorContext;
-
-    /// Process the the message and return the result of the dispatching.
-    fn handle_message(&mut self, message: Arc<Message>) -> DequeueResult;
 
     /// fetches the actor id for this actor.
     fn aid(&self) -> Arc<ActorId> {
-        self.context().aid.clone()
+        self.aid.clone()
     }
 
     /// Returns the total number of messages that have been sent to this actor.
     fn sent(&self) -> usize {
-        self.context().receiver.enqueued()
+        self.receiver.enqueued()
     }
 
     /// Returns the total number of messages that have been received by this actor.
     fn received(&self) -> usize {
-        self.context().receiver.dequeued()
+        self.receiver.dequeued()
     }
 
     /// Returns the total number of messages that are currently pending in the actor's channel.
     fn pending(&self) -> usize {
-        self.context().receiver.length()
+        self.receiver.length()
     }
 
     /// A helper for an actor to send a message to itself. See codumentation for [ActorId::send].
     fn send_to_self(&self, message: Arc<Message>) -> Result<usize, SeccErrors<Arc<Message>>> {
-        self.context().aid.send(message)
+        self.aid.send(message)
     }
 
-    /// Receives the message on the actor and calls the handler for that actor. This function
-    /// will be typically called by the scheduler to process messages in the actor's channel.
-    fn receive(&mut self) -> Result<Arc<Message>, SeccErrors<Arc<Message>>> {
-        let message = self.context_mut().receiver.receive_await().unwrap();
-        self.handle_message(message) // FIXME deal with skip returned.
+    /// Skips to the end of the channel immediately. Note that if the user calls this after they
+    /// send a message to another actor, they could incur a race condition where the message to the
+    /// other actor arrives before the skip operation is completed. Therefore it is recommended 
+    /// skip only before sending the message. This message is useful when trying to skip all the 
+    /// way without having to pre-emptively process and manually skip each message in between.
+    pub fn skip_to_end(&self) -> Result<usize, SeccErrors<Arc<Message>>> {
+        self.receiver.skip_to_end()
+    }
+
+    /// Receive as message off the channel and processes it with the actor. 
+    fn receive(&mut self) {
+        match self.receiver.peek() {
+            Result::Err(err) => {
+                // TODO Log the error from the channel. 
+                return;
+            },
+            Result::Ok(message) => {
+                let result = self.actor.handle_msg(self, message);
+                let queue_result = match result {
+                    DequeueResult::Processed => self.receiver.pop(),
+                    DequeueResult::Skipped => self.receiver.skip(),
+                    DequeueResult::SkipCleared => self.receiver.reset_skip(),
+                };
+                match queue_result {
+                    Ok(_) => (),
+                    Err(e) => println!("Error Occurred {:?}", e), // TODO Log this
+                };
+            }
+        }
     }
 }
 
@@ -207,11 +229,11 @@ pub struct ActorSystem {
     /// Id for this actor system and node.
     node_id: Uuid,
     /// Holds a table of actors in the system keyed by their actor id (aid).
-    actors_by_aid: HashMap<Arc<ActorId>, Arc<Mutex<dyn Actor>>>,
+    actors_by_aid: HashMap<Arc<ActorId>, Arc<Mutex<ActorContext>>>,
     /// Holds the Run Channel sender.
-    run_channel_sender: Arc<SeccSender<Arc<Mutex<Actor>>>>,
+    run_channel_sender: Arc<SeccSender<Arc<Mutex<ActorContext>>>>,
     /// Holde the receiver side of the Run channel.
-    run_channel_receiver: Arc<SeccReceiver<Arc<Mutex<Actor>>>>,
+    run_channel_receiver: Arc<SeccReceiver<Arc<Mutex<ActorContext>>>>,
     /// Holds handles to the pool of threads processing the run queue.
     thread_pool: Vec<JoinHandle<()>>,
 }
@@ -219,16 +241,15 @@ pub struct ActorSystem {
 impl ActorSystem {
     /// Starts a thread for the dispatcher that will process actor messages.
     fn start_dispatcher_thread(
-        tx: Arc<SeccSender<Arc<Mutex<Actor>>>>,
-        rx: Arc<SeccReceiver<Arc<Mutex<Actor>>>>,
+        tx: Arc<SeccSender<Arc<Mutex<ActorContext>>>>,
+        rx: Arc<SeccReceiver<Arc<Mutex<ActorContext>>>>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             match rx.receive_await() {
                 Err(_) => println!("Error"), // FIXME turn this into logging instead.
                 Ok(mutex) => {
-                    let mut guard = mutex.lock().unwrap();
-                    let mut context = guard.context_mut();
-                    context.receive().unwrap(); // FIXME An actor shouldn't return error to scheduler
+                    let mut context = mutex.lock().unwrap();
+                    context.receive(); // FIXME An actor shouldn't return error to scheduler
                     if context.receiver.readable() > 0 {
                         // if there are additional messages pending in the actor,
                         // re-enqueue the message at the back of the queue.
@@ -242,7 +263,7 @@ impl ActorSystem {
     pub fn new() -> ActorSystem {
         // This channel will be used as a run queue to execute the messages.
         // FIXME Let the user pass the size of the run queue when creating actor system.
-        let (sender, receiver) = secc::create_with_arcs::<Arc<Mutex<dyn Actor>>>(100);
+        let (sender, receiver) = secc::create_with_arcs::<Arc<Mutex<ActorContext>>>(100);
         // Creates the thread pool which will be constantly trying to grab messages out of the run queue.
         // FIXME Let the user pass the amount of threads to create. Result<Arc<Message>, SeccErrors<Arc<Message>>>
         let thread_pool: Vec<JoinHandle<()>> = (1..4)
@@ -260,17 +281,15 @@ impl ActorSystem {
     /// Spawns a new actor using the given function to create the actor from the passed context.
     /// This is seaprated from the raw spawn method to facilitate various means of tracking actors
     /// as well as to make testing easier.
-    fn spawn_internal<T: Actor + 'static, F: Fn(ActorContext) -> T>(&mut self, f: F) -> T {
-        let context = ActorContext::new(self);
-        f(context)
+    fn spawn_internal<A: Actor + 'static>(&mut self, actor: dyn Actor) -> ActorContext {
+        ActorContext::new(&self, actor)
     }
 
     /// Spawns a new actor using the given function to create the actor from the passed context.
-    pub fn spawn<T: Actor + 'static, F: Fn(ActorContext) -> T>(&mut self, f: F) -> Arc<ActorId> {
-        let actor = self.spawn_internal(f);
-        let aid = actor.aid();
-        self.actors_by_aid
-            .insert(aid.clone(), Arc::new(Mutex::new(actor)));
+    pub fn spawn<T: Actor + 'static>(&mut self, actor: dyn Actor) -> Arc<ActorId> {
+        let actor_context = self.spawn_internal(actor);
+        let aid = actor_context.aid();
+        self.actors_by_aid.insert(aid.clone(), Arc::new(Mutex::new(actor_context)));
         aid
     }
 

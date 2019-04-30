@@ -49,7 +49,7 @@ struct SeccNode<T: Sync + Send> {
     /// Contains a value set in the node in a Some or a None if empty. Note that this is unsafe
     /// in order to get around Rust mutability locks so that this data structure can be passed
     /// around immutably but also still be able to enqueue and dequeue.
-    cell: UnsafeCell<Option<T>>,
+    cell: UnsafeCell<Option<Arc<T>>>,
     /// The pointer to the next node in the channel.
     next: AtomicUsize,
     // FIXME Add tracking of time in channel by milliseconds.
@@ -183,7 +183,7 @@ impl<T: Sync + Send> SeccSender<T> {
             // Pool head moves to become the queue tail or else loop and try again!
             *send_ptrs = (pool_head, next_pool_head);
             let queue_tail_ptr = (*self.core().node_ptrs.get())[queue_tail];
-            (*(*queue_tail_ptr).cell.get()) = Some(value);
+            (*(*queue_tail_ptr).cell.get()) = Some(Arc::new(value));
             (*pool_head_ptr).next.store(NIL_NODE, Ordering::Release);
             (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
 
@@ -266,6 +266,33 @@ pub struct SeccReceiver<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> SeccReceiver<T> {
+        /// Receives the message at the head of the channel.
+    pub fn peek(&self) -> Result<Arc<T>, SeccErrors<T>> {
+        unsafe {
+            // Retrieve receive pointers and the encoded indexes inside them.
+            let mut receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
+            let (queue_head, pool_tail, precursor, cursor) = *receive_ptrs;
+
+            // Get a pointer to the current queue_head or cursor and see if there is anything to read.
+            let read_ptr = if cursor == NIL_NODE {
+                (*self.core().node_ptrs.get())[queue_head]
+            } else {
+                (*self.core().node_ptrs.get())[cursor]
+            };
+            let next_read_pos = (*read_ptr).next.load(Ordering::Acquire);
+            if NIL_NODE == next_read_pos {
+                return Err(SeccErrors::Empty);
+            }
+
+            let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail];
+
+            match (*read_ptr).cell.get() {
+                Some(v) => return Ok(v.clone()),
+                None => panic!("Somehow a None was in a cell when there should be data there. ")
+            }
+        }
+    }
+
     /// Receives the message at the head of the channel.
     pub fn receive(&self) -> Result<T, SeccErrors<T>> {
         unsafe {
@@ -285,7 +312,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
             }
 
             let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail];
-            let value = (*(*read_ptr).cell.get()).take().unwrap() as T;
+            let value = *(*(*read_ptr).cell.get()).take().unwrap() as T;
             if cursor == NIL_NODE {
                 // If we aren't using a cursor then the queue_head moves to become the pool tail or else loop and try again.
                 (*pool_tail_ptr).next.store(queue_head, Ordering::Release);
@@ -318,6 +345,13 @@ impl<T: Sync + Send> SeccReceiver<T> {
             }
             return Ok(value);
         }
+    }
+
+    /// Pops the first message of the channel, discarding it and returning the remaining
+    /// messages in the channel or an error if the channel was empty.
+    pub fn pop(&self) ->  Result<usize, SeccErrors<T>> {
+        self.receive()?;
+        Ok(self.core.length.load(Ordering::Relaxed))
     }
 
     /// Send to the channel, awaiting capacity if necessary.
@@ -420,20 +454,20 @@ impl<T: Sync + Send> SeccReceiver<T> {
 
     /// Cancels skipping messages in the channel and resets the pointers of the channel back to
     /// the head returning the current number of messages readable in the channel.
-    pub fn reset_skip(&self) -> usize {
+    pub fn reset_skip(&self) -> Result<usize, SeccErrors<T>> {
         // FIXME Need tests!
         // FIXME Track Metrics.
         // Retrieve receive pointers and the encoded indexes inside them.
         let mut receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
         let (queue_head, pool_tail, _precursor, cursor) = *receive_ptrs;
         if cursor == NIL_NODE {
-            return self.core.length.load(Ordering::Relaxed); // nothing to do.
+            return Err(SeccErrors::Empty); // nothing to do.
         };
         // no current cursor, establish one,
         let length = self.core.length.load(Ordering::Acquire);
         self.core.readable.store(length, Ordering::Release);
         *receive_ptrs = (queue_head, pool_tail, NIL_NODE, NIL_NODE);
-        length
+        Ok(length)
     }
 }
 
