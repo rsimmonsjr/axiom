@@ -19,37 +19,25 @@ use uuid::Uuid;
 /// utility function to help in the casting and calling operation.
 pub type Message = dyn Any + Sync + Send;
 
-/// A result returned by the dequeue function that indicates the disposition of the message.
+/// Status of the message resulting from processing a message with an actor.
 #[derive(Debug, Eq, PartialEq)]
-pub enum DequeueResult {
+pub enum Status {
     /// The message was processed and can be removed from the channel. Note that this doesn't
     /// necessarily mean that anything was done with the message, just that it can be removed.
-    /// It is up to the message handler to decide what if anything to do with the message.
+    /// It is up to the mctor's essage processor to decide what if anything to do with the message.
     Processed,
-    /// The message was skipped and should remain in the queue and the dequeue should loop
-    /// to fetch the next pending message; once a message is skipped then a skip tail will
-    /// be created in the channel that will act as the actual tail until the [`ResetSkip']
-    /// result is returned from a message handler. This enables an actor to skip messages while
-    /// working on a process and then clear the skip buffer and resume normal processing.
+    /// The message was skipped and should remain in the queue. Once a message is skipped then
+    /// a skip tail will be created in the channel that will act as the actual tail until the
+    /// [`ResetSkip'] status is returned from an actor's processor. This enables an actor to
+    /// skip messages while working on a process and then clear the skip buffer and resume normal
+    /// processing. This functionality is critical for actors that act as a finite state machine
+    /// and thus might temporarily change the implementation of the processor and then switch
+    /// back to a state where the previously enqueued messages are delivered.
     Skipped,
     /// Clears the skip tail on the channel. A skip tail is present when a message has been
     /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
     /// the same as [`Processed`].
     ResetSkip,
-}
-
-/// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
-/// that handler with the message. If the dispatch is successful it will return the result of the
-/// call to the caller, otherwise it will return None back to the caller.
-pub fn dispatch<T: 'static, S, R>(
-    state: &mut S,
-    message: Arc<Message>,
-    mut func: impl FnMut(&mut S, &T) -> R,
-) -> Option<R> {
-    match message.downcast_ref::<T>() {
-        Some(x) => Some(func(state, x)),
-        None => None,
-    }
 }
 
 /// An enum that holds a sender for an actor. This is usually wrapped in an actor id.
@@ -75,9 +63,9 @@ pub struct ActorId {
 }
 
 impl fmt::Debug for ActorId {
-    fn fmt(&self, f: &'_ mut Formatter) -> fmt::Result {
+    fn fmt(&self, formatter: &'_ mut Formatter) -> fmt::Result {
         write!(
-            f,
+            formatter,
             "ActorId{{ id: {}, node_id: {} }}",
             self.id.to_string(),
             self.node_id.to_string()
@@ -100,11 +88,22 @@ impl Hash for ActorId {
     }
 }
 
-/// A type for a user function that processes messages for an actor.
-pub type Processor<State> = Fn(Arc<ActorId>, State, Message) -> (DequeueResult, State);
+/// A type for a user function that processes messages for an actor. This will be passed
+/// to a spawn funtion to specify the handler used for managing the state of the actor based
+/// on the messages passed to the actor. The rewulting state passed will be used in the
+/// next message call.
+pub trait Processor<State: Send + Sync>:
+    (FnMut(Arc<ActorId>, &mut State, Arc<Message>) -> Status) + Send + Sync
+{
+}
 
-/// A type that is used by an actor to hold the handler for messages.
-type Handler = Fn(Message) -> DequeueResult + Send + Sync;
+// Allows any function, static or closure, to be used as a processor.
+impl<F, State> Processor<State> for F
+where
+    State: Send + Sync,
+    F: (FnMut(Arc<ActorId>, &mut State, Arc<Message>) -> Status) + Send + Sync,
+{
+}
 
 /// An actual actor in the system that manages the message processing.
 pub struct Actor {
@@ -114,7 +113,7 @@ pub struct Actor {
     receiver: SeccReceiver<Arc<Message>>,
     /// Function processes messages sent to the actor wrapped in a closure to erase the
     /// state type that the actor is maanaging.
-    handler: Box<Handler>,
+    handler: Box<dyn (FnMut(Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync>,
 }
 
 impl Actor {
@@ -122,12 +121,16 @@ impl Actor {
     /// initial state of the actor as well as the processor that will be used to process
     /// messages sent to the actor. The system and node id are passed separately because
     /// of restrictions on mutex guards not being re-entrant in rust.
-    pub fn new<State>(
-        system: Arc<Mutex<ActorSystem>>,
+    pub fn new<'a, F, State>(
+        system: Arc<ActorSystem>,
         node_id: Uuid,
-        starting_state: State,
-        processor: Processor<State>,
-    ) -> Arc<ActorId> {
+        mut state: State,
+        mut processor: F,
+    ) -> Arc<ActorId>
+    where
+        State: Send + Sync + 'a,
+        F: Processor<State> + 'static,
+    {
         // TODO Let the user pass the size of the channel queue when creating the actor.
         // Create the channel for the actor.
         let (tx, receiver) = secc::create::<Arc<Message>>(32);
@@ -141,17 +144,7 @@ impl Actor {
         };
 
         // This handler will manage the state for the actor.
-        let handler = Box::new({
-            // Store the state in a temporary container that can be empty so we can pass the
-            // state by value to the processing function.
-            let mut current_state = Some(starting_state);
-            move |aid, message| {
-                let (res, new_state) = processor(aid, current_state.take().unwrap(), message);
-                // Now we have the state back so lets stuff it in the some again.
-                current_state = Some(new_state);
-                res
-            }
-        });
+        let handler = Box::new({ move |aid, message| processor(aid, &mut state, message) });
 
         // The actor context will be the holder of the actual actor.
         let actor = Actor {
@@ -162,9 +155,9 @@ impl Actor {
 
         // We will copy the reference to the actor in the actor id which means when handling
         // messages we will not have to look up the actor in a map once we have the actor id.
-        aid.actor = Some(Mutex::new(Arc::new(actor)));
+        aid.actor = Some(Arc::new(Mutex::new(actor)));
 
-        actor.aid
+        actor.aid.clone()
     }
 
     /// fetches the actor id for this actor.
@@ -195,11 +188,11 @@ impl Actor {
                 return;
             }
             Result::Ok(message) => {
-                let result = self.actor.handle_msg(self, message);
+                let result = self.handler(self, message);
                 let queue_result = match result {
-                    DequeueResult::Processed => self.receiver.pop(),
-                    DequeueResult::Skipped => self.receiver.skip(),
-                    DequeueResult::ResetSkip => self.receiver.reset_skip(),
+                    Status::Processed => self.receiver.pop(),
+                    Status::Skipped => self.receiver.skip(),
+                    Status::ResetSkip => self.receiver.reset_skip(),
                 };
                 match queue_result {
                     Ok(_) => (),
@@ -217,86 +210,119 @@ pub struct ActorSystem {
     /// Id for this actor system and node.
     pub node_id: Uuid,
     /// Holds the actor id objects keyed by Uuid of the actor.
-    actors_by_aid: HashMap<Uuid, Arc<ActorId>>,
+    actors_by_aid: Mutex<HashMap<Uuid, Arc<ActorId>>>,
     /// Holds handles to the pool of threads processing the run queue.
     thread_pool: Vec<JoinHandle<()>>,
-    /// Sender side of the dispatcher channel. When an actor gets a message and its pending
+    /// Sender side of the work channel. When an actor gets a message and its pending
     /// count goes from 0 to 1 it will put itself in the channel via the sender.
-    dispatch_sender: Arc<SeccSender<Arc<ActorId>>>,
-    /// Receiver side of the dispatcher channel. All threads in the pool will be grabbing
+    sender: Arc<SeccSender<Arc<ActorId>>>,
+    /// Receiver side of the work channel. All threads in the pool will be grabbing
     /// actor ids from this receiver. When a thread gets an actor it will lock the
     /// mutex of the actor inside the id and then will process the message. If the
     /// actor has pending messages after the processing is done then the actor will
     /// be put back in the channel to be re-queued.
-    dispatch_receiver: Arc<SeccReceiver<Arc<ActorId>>>,
+    receiver: Arc<SeccReceiver<Arc<ActorId>>>,
 }
 
 impl ActorSystem {
-    /// Creates a new actor system with the given size for the dispatcher channel and thread
+    /// Creates an actor system with the given size for the dispatcher channel and thread
     /// pool. The user should benchmark how many slots in the run channel and the number of
     /// threads they need in order to satisfy the requirements of the system they are creating.
-    pub fn new(run_channel_size: HalfUsize, thread_pool_size: HalfUsize) -> ActorSystem {
-        let (sender, receiver) = secc::create::<Arc<ActorId>>(run_channel_size);
+    pub fn create(run_channel_size: HalfUsize, thread_pool_size: HalfUsize) -> Arc<ActorSystem> {
+        // We will use arcs for the sender and receivers because the they will surf threads.
+        let (sender, receiver) = secc::create_with_arcs::<Arc<ActorId>>(run_channel_size);
+
+        // Allocate the thread pool of threads grabbing for work in the channel.
         let thread_pool: Vec<JoinHandle<()>> = (1..thread_pool_size)
             .map(|_i| ActorSystem::start_dispatcher_thread(sender.clone(), receiver.clone()))
             .collect();
-        ActorSystem {
+
+        // The map is created with a mutex for interior mutability.
+        let actors_by_aid = Mutex::new(HashMap::new());
+
+        Arc::new(ActorSystem {
             node_id: Uuid::new_v4(),
-            actors_by_aid: HashMap::new(),
-            run_channel_sender: sender,
-            run_channel_receiver: receiver,
+            actors_by_aid,
+            sender,
+            receiver,
             thread_pool,
-        }
+        })
     }
 
     /// Starts a thread for the dispatcher that will process actor messages.
     fn start_dispatcher_thread(
-        dispatch_sender: Arc<SeccSender<Arc<ActorId>>>,
-        dispatch_receiver: Arc<SeccReceiver<Arc<ActorId>>>,
+        sender: Arc<SeccSender<Arc<ActorId>>>,
+        receiver: Arc<SeccReceiver<Arc<ActorId>>>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
-            match dispatch_receiver.receive_await() {
+            match receiver.receive_await() {
                 Err(_) => println!("Error"), // FIXME turn this into logging instead.
                 Ok(aid) => {
                     // FIXME Actor panic shouldnt take down the whole code
-                    let mut mutex = aid.actor.lock().unwrap();
-                    let mut actor = *mutex;
+                    let mut guard = aid.actor.unwrap().lock().unwrap();
+                    let mut actor = *guard;
                     actor.receive();
                     if actor.receiver.readable() > 0 {
                         // if there are additional messages pending in the actor,
                         // re-enqueue the message at the back of the queue.
-                        dispatch_receiver.send_await(mutex.clone());
+                        sender.send_await(aid.clone());
                     }
                 }
             }
         })
     }
 
-    /// Spawns a new actor on the actor system using the given `starting_state` for the actor
-    /// and the given `processor` function that will be used to process actor messages.
-    pub fn spawn<State>(
-        system: Arc<Mutex<ActorSystem>>,
-        starting_state: State,
-        processor: Processor<State>,
-    ) -> Arc<ActorId> {
-        let mut guard = *system.lock().unwrap();
-        let aid = Actor::new(system, guard.node_id, starting_state, processor);
-        guard.actors_by_aid.insert(aid.id, aid.clone());
-        aid
+    /// Schedules the `actor_id` for work on the given actor system.
+    fn schedule(system: Arc<ActorSystem>, aid: Arc<ActorId>) {
+        // Note that this is implemented here rather than calling the sender directly
+        // from the send in order to allow internal optimization of the actor system.
+        aid.system.sender.send(aid);
     }
 }
 
-pub fn send(aid: Arc<ActorId>, message: Arc<Message>) -> Result<usize, SeccErrors<Arc<Message>>> {
+/// Spawns a new actor on the actor `system` using the given `starting_state` for the actor
+/// and the given `processor` function that will be used to process actor messages.
+pub fn spawn<'a, F, State>(
+    system: Arc<ActorSystem>,
+    mut state: State,
+    mut processor: F,
+) -> Arc<ActorId>
+where
+    State: 'a + Send + Sync,
+    F: Processor<State> + 'a,
+{
+    let mut guard = system.actors_by_aid.lock().unwrap();
+    let aid = Actor::new(system, system.node_id, state, processor);
+    guard.insert(aid.id, aid.clone());
+    aid
+}
+
+/// Sends the `message` to the actor identified by the `aid` passed.
+pub fn send(aid: Arc<ActorId>, message: Arc<Message>) {
     match aid.sender {
         ActorSender::Local(sender) => {
             let readable = sender.send_await(message).unwrap();
             // From 0 to 1 message readable triggers schedule.
             if readable == 1 {
-                aid.system.dispatch_sender.send(aid);
+                ActorSystem::schedule(aid.system, aid)
             }
-            Ok(readable)
         }
         _ => unimplemented!("Remote actors not implemented currently."),
+    }
+}
+
+/// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
+/// that handler with the message. If the dispatch is successful it will return the result of the
+/// call to the caller, otherwise it will return None back to the caller.
+pub fn dispatch<T: 'static, S, R>(
+    aid: Arc<ActorId>,
+    state: &mut S,
+    message: Arc<Message>,
+    mut func: impl FnMut(Arc<ActorId>, &mut S, &T) -> R,
+) -> Option<R> {
+    match message.downcast_ref::<T>() {
+        Some(x) => Some(func(aid.clone(), state, x)),
+        None => None,
     }
 }
 
@@ -312,145 +338,39 @@ mod tests {
         Dec,
     }
 
-    /// A struct of a counter.
-    struct Counter {
-        context: ActorContext,
+    struct Data {
         count: i32,
+        value: i32,
     }
 
-    impl Counter {
-        /// Handles a message that is just an i32.
-        fn handle_i32(&mut self, message: &i32) -> DequeueResult {
-            self.count += *message;
-            DequeueResult::Processed
+    fn handle_op(aid: Arc<ActorId>, data: &mut Data, msg: Operation) -> Status {
+        match msg {
+            Operation::Inc => data.count += 1,
+            Operation::Dec => data.count -= 1,
         }
-
-        /// Handles a message that is just an i32.
-        fn handle_f32(&mut self, _message: &f32) -> DequeueResult {
-            DequeueResult::Skipped
-        }
-
-        /// Handles a message that is just an boolean.
-        fn handle_bool(&mut self, _message: &bool) -> DequeueResult {
-            DequeueResult::ResetSkip
-        }
-
-        /// Handles an enum message.
-        fn handle_op(&mut self, message: &Operation) -> DequeueResult {
-            match *message {
-                Operation::Inc => self.count += 1,
-                Operation::Dec => self.count -= 1,
-            }
-            DequeueResult::Processed
-        }
+        Status::Processed
     }
 
-    impl Actor for Counter {
-        fn context(&self) -> &ActorContext {
-            &self.context
-        }
+    fn handle_i32(aid: Arc<ActorId>, data: &mut Data, msg: i32) -> Status {
+        data.value += msg;
+        Status::Processed
+    }
 
-        fn context_mut(&mut self) -> &mut ActorContext {
-            &mut self.context
-        }
-
-        fn handle_message(&mut self, msg: Arc<Message>) -> DequeueResult {
-            dispatch(self, msg.clone(), Counter::handle_i32)
-                .or_else(|| dispatch(self, msg.clone(), Counter::handle_op))
-                .or_else(|| dispatch(self, msg.clone(), Counter::handle_bool))
-                .or_else(|| dispatch(self, msg.clone(), Counter::handle_f32))
-                .unwrap_or(DequeueResult::Panic)
-        }
+    fn handle(aid: Arc<ActorId>, data: &mut Data, msg: Arc<Message>) -> Status {
+        dispatch(aid, data, msg.clone(), handle_op)
+            .or_else(|| dispatch(aid, data, msg.clone(), handle_i32))
+            .unwrap()
     }
 
     #[test]
-    fn test_dispatch() {
-        let node_id = Uuid::new_v4();
-        let mut state = Counter {
-            context: ActorContext::new(node_id),
-            count: 0,
-        };
-        assert_eq!(
-            DequeueResult::Processed,
-            state.handle_message(Arc::new(Operation::Inc))
-        );
-        assert_eq!(1, state.count);
-        assert_eq!(
-            DequeueResult::Processed,
-            state.handle_message(Arc::new(Operation::Inc))
-        );
-        assert_eq!(2, state.count);
-        assert_eq!(
-            DequeueResult::Processed,
-            state.handle_message(Arc::new(Operation::Dec))
-        );
-        assert_eq!(1, state.count);
-        assert_eq!(
-            DequeueResult::Processed,
-            state.handle_message(Arc::new(10 as i32))
-        );
-        assert_eq!(11, state.count);
-        assert_eq!(
-            DequeueResult::ResetSkip,
-            state.handle_message(Arc::new(true))
-        );
-        assert_eq!(11, state.count);
-        assert_eq!(
-            DequeueResult::Skipped,
-            state.handle_message(Arc::new(2.5 as f32))
-        );
-        assert_eq!(11, state.count);
-        assert_eq!(
-            DequeueResult::Panic,
-            state.handle_message(Arc::new(String::from("oh no")))
-        );
-        assert_eq!(11, state.count);
-    }
+    fn test_actor_with_dispatch() {
+        let system = ActorSystem::create(10, 1);
+        let data = Data { count: 0, value: 0 };
+        let aid = spawn(system, data, handle);
+        send(aid, Arc::new(Operation::Inc));
+        send(aid, Arc::new(Operation::Inc));
+        send(aid, Arc::new(10 as i32));
 
-    #[test]
-    fn test_create_struct_actor() {
-        let mut actor_system = ActorSystem::new();
-        let actor = actor_system.spawn_internal(|context| Counter { context, count: 0 });
-        let aid = actor.aid();
-        let context = actor.context();
-        // Send the actor we created some messages.
-        assert_eq!(actor.pending(), 0);
-        assert_eq!(actor.sent(), 0);
-        assert_eq!(actor.sent(), 0);
-        assert_eq!(actor.received(), 0);
-        aid.send(Arc::new(Operation::Inc)).unwrap();
-        assert_eq!(actor.pending(), 1);
-        assert_eq!(actor.sent(), 1);
-        assert_eq!(actor.received(), 0);
-        aid.send(Arc::new(Operation::Inc)).unwrap();
-        assert_eq!(actor.pending(), 2);
-        assert_eq!(actor.sent(), 2);
-        assert_eq!(actor.received(), 0);
-        aid.send(Arc::new(Operation::Dec)).unwrap();
-        assert_eq!(actor.pending(), 3);
-        assert_eq!(actor.sent(), 3);
-        assert_eq!(actor.received(), 0);
-        aid.send(Arc::new(10 as i32)).unwrap();
-        assert_eq!(actor.pending(), 4);
-        assert_eq!(actor.sent(), 4);
-        assert_eq!(actor.received(), 0);
-
-        // Receive messages on the actor.
-        context.receive().unwrap();
-        assert_eq!(actor.pending(), 3);
-        assert_eq!(actor.sent(), 4);
-        assert_eq!(actor.received(), 1);
-        context.receive().unwrap();
-        assert_eq!(actor.pending(), 2);
-        assert_eq!(actor.sent(), 4);
-        assert_eq!(actor.received(), 2);
-        context.receive().unwrap();
-        assert_eq!(actor.pending(), 1);
-        assert_eq!(actor.sent(), 4);
-        assert_eq!(actor.received(), 3);
-        context.receive().unwrap();
-        assert_eq!(actor.pending(), 0);
-        assert_eq!(actor.sent(), 4);
-        assert_eq!(actor.received(), 4);
+        // TODO Assert states after messages.
     }
 }

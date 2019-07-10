@@ -286,7 +286,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
 
             let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail];
 
-            match (*read_ptr).cell.get() {
+            match *(*read_ptr).cell.get() {
                 Some(v) => return Ok(v.clone()),
                 None => panic!("Somehow a None was in a cell when there should be data there. "),
             }
