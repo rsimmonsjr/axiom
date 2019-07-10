@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// Type alias for half of a usize on 64 bit platform.
-type HalfUsize = u32;
+pub type HalfUsize = u32;
 
 /// Value used to indicate that a position index points to no other node.
 const NIL_NODE: usize = 1 << 63 as usize;
@@ -266,7 +266,7 @@ pub struct SeccReceiver<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> SeccReceiver<T> {
-        /// Receives the message at the head of the channel.
+    /// Receives the message at the head of the channel.
     pub fn peek(&self) -> Result<Arc<T>, SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
@@ -288,7 +288,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
 
             match (*read_ptr).cell.get() {
                 Some(v) => return Ok(v.clone()),
-                None => panic!("Somehow a None was in a cell when there should be data there. ")
+                None => panic!("Somehow a None was in a cell when there should be data there. "),
             }
         }
     }
@@ -349,7 +349,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
 
     /// Pops the first message of the channel, discarding it and returning the remaining
     /// messages in the channel or an error if the channel was empty.
-    pub fn pop(&self) ->  Result<usize, SeccErrors<T>> {
+    pub fn pop(&self) -> Result<usize, SeccErrors<T>> {
         self.receive()?;
         Ok(self.core.length.load(Ordering::Relaxed))
     }

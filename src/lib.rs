@@ -1,6 +1,4 @@
 extern crate uuid;
-#[macro_use]
-extern crate lazy_static;
 
 pub mod actors;
 pub mod secc;
