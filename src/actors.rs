@@ -1,3 +1,4 @@
+///
 /// Implements actors and the actor system.
 use secc;
 use secc::HalfUsize;
@@ -91,21 +92,33 @@ impl Hash for ActorId {
 /// A type for a user function that processes messages for an actor. This will be passed
 /// to a spawn funtion to specify the handler used for managing the state of the actor based
 /// on the messages passed to the actor. The rewulting state passed will be used in the
-/// next message call.
-pub trait Processor<State: Send + Sync>:
-    (FnMut(Arc<ActorId>, &mut State, Arc<Message>) -> Status) + Send + Sync
+/// next message call. The processor takes three arguments. First, the `state` is a mutable
+/// reference to the current state of the actor. Second, is the [`ActorId`] enclosed in
+/// an [`Arc`] to allow access to the actor system for spawning, sending to self and so on.
+/// Third is the current message to process in an [`Arc`].
+pub trait Processor<State: Send + Sync + 'static>:
+    (FnMut(&mut State, Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync + 'static
 {
 }
 
 // Allows any function, static or closure, to be used as a processor.
 impl<F, State> Processor<State> for F
 where
-    State: Send + Sync,
-    F: (FnMut(Arc<ActorId>, &mut State, Arc<Message>) -> Status) + Send + Sync,
+    State: Send + Sync + 'static,
+    F: (FnMut(&mut State, Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync + 'static,
 {
 }
 
-/// An actual actor in the system that manages the message processing.
+/// An actual actor in the system. An actor is a worker that allows the asynchronous
+/// processing of messages. The actor will obey a certain set of rules, namely.
+/// 1. An actor can be interracted with only by means of messages.
+/// 2. An actor processes ONLY one message at a time.
+/// 3. An actor will process a message only once.
+/// 4. An actor can send a message to any other actor without knowledge of that
+///    actor's internals (i.e. it won't even knwo if the other actor processes the
+///    message.
+/// 5. Actors send only immutable data as messages, though they may have mutable
+///    internal state.
 pub struct Actor {
     /// Id of the associated actor.
     aid: Arc<ActorId>,
@@ -113,7 +126,7 @@ pub struct Actor {
     receiver: SeccReceiver<Arc<Message>>,
     /// Function processes messages sent to the actor wrapped in a closure to erase the
     /// state type that the actor is maanaging.
-    handler: Box<dyn (FnMut(Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync>,
+    handler: Box<dyn (FnMut(Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync + 'static>,
 }
 
 impl Actor {
@@ -128,8 +141,8 @@ impl Actor {
         mut processor: F,
     ) -> Arc<ActorId>
     where
-        State: Send + Sync + 'a,
-        F: Processor<State> + 'static,
+        State: Send + Sync + 'static,
+        F: Processor<State>,
     {
         // TODO Let the user pass the size of the channel queue when creating the actor.
         // Create the channel for the actor.
@@ -144,7 +157,7 @@ impl Actor {
         };
 
         // This handler will manage the state for the actor.
-        let handler = Box::new({ move |aid, message| processor(aid, &mut state, message) });
+        let handler = Box::new({ move |aid, message| processor(&mut state, aid, message) });
 
         // The actor context will be the holder of the actual actor.
         let actor = Actor {
@@ -183,12 +196,12 @@ impl Actor {
     /// Receive as message off the channel and processes it with the actor.
     fn receive(&mut self) {
         match self.receiver.peek() {
-            Result::Err(err) => {
+            Result::Err(_err) => {
                 // TODO Log the error from the channel.
                 return;
             }
             Result::Ok(message) => {
-                let result = self.handler(self, message);
+                let result = (*self.handler)(self.aid.clone(), message);
                 let queue_result = match result {
                     Status::Processed => self.receiver.pop(),
                     Status::Skipped => self.receiver.skip(),
@@ -273,7 +286,7 @@ impl ActorSystem {
     }
 
     /// Schedules the `actor_id` for work on the given actor system.
-    fn schedule(system: Arc<ActorSystem>, aid: Arc<ActorId>) {
+    fn schedule(aid: Arc<ActorId>) {
         // Note that this is implemented here rather than calling the sender directly
         // from the send in order to allow internal optimization of the actor system.
         aid.system.sender.send(aid);
@@ -282,29 +295,25 @@ impl ActorSystem {
 
 /// Spawns a new actor on the actor `system` using the given `starting_state` for the actor
 /// and the given `processor` function that will be used to process actor messages.
-pub fn spawn<'a, F, State>(
-    system: Arc<ActorSystem>,
-    mut state: State,
-    mut processor: F,
-) -> Arc<ActorId>
+pub fn spawn<'a, F, State>(system: Arc<ActorSystem>, state: State, processor: F) -> Arc<ActorId>
 where
-    State: 'a + Send + Sync,
-    F: Processor<State> + 'a,
+    State: Send + Sync + 'static,
+    F: Processor<State>,
 {
     let mut guard = system.actors_by_aid.lock().unwrap();
-    let aid = Actor::new(system, system.node_id, state, processor);
+    let aid = Actor::new(system.clone(), system.node_id, state, processor);
     guard.insert(aid.id, aid.clone());
     aid
 }
 
 /// Sends the `message` to the actor identified by the `aid` passed.
 pub fn send(aid: Arc<ActorId>, message: Arc<Message>) {
-    match aid.sender {
+    match &aid.sender {
         ActorSender::Local(sender) => {
             let readable = sender.send_await(message).unwrap();
             // From 0 to 1 message readable triggers schedule.
             if readable == 1 {
-                ActorSystem::schedule(aid.system, aid)
+                ActorSystem::schedule(aid.clone())
             }
         }
         _ => unimplemented!("Remote actors not implemented currently."),
@@ -342,31 +351,37 @@ mod tests {
         count: i32,
         value: i32,
     }
-
-    fn handle_op(aid: Arc<ActorId>, data: &mut Data, msg: Operation) -> Status {
-        match msg {
-            Operation::Inc => data.count += 1,
-            Operation::Dec => data.count -= 1,
-        }
-        Status::Processed
-    }
-
-    fn handle_i32(aid: Arc<ActorId>, data: &mut Data, msg: i32) -> Status {
-        data.value += msg;
-        Status::Processed
-    }
-
-    fn handle(aid: Arc<ActorId>, data: &mut Data, msg: Arc<Message>) -> Status {
-        dispatch(aid, data, msg.clone(), handle_op)
-            .or_else(|| dispatch(aid, data, msg.clone(), handle_i32))
-            .unwrap()
-    }
+    /*
+     *
+     *    fn handle_op(aid: Arc<ActorId>, data: &mut Data, msg: Operation) -> Status {
+     *        match msg {
+     *            Operation::Inc => data.count += 1,
+     *            Operation::Dec => data.count -= 1,
+     *        }
+     *        Status::Processed
+     *    }
+     *
+     *    fn handle_i32(aid: Arc<ActorId>, data: &mut Data, msg: i32) -> Status {
+     *        data.value += msg;
+     *        Status::Processed
+     *    }
+     *
+     *    fn handle(aid: Arc<ActorId>, data: &mut Data, msg: Arc<Message>) -> Status {
+     *        dispatch(aid, data, msg.clone(), handle_op)
+     *            .or_else(|| dispatch(aid, data, msg.clone(), handle_i32))
+     *            .unwrap()
+     *    }
+     *
+     */
 
     #[test]
-    fn test_actor_with_dispatch() {
+    fn test_spawn_with_closure() {
         let system = ActorSystem::create(10, 1);
         let data = Data { count: 0, value: 0 };
-        let aid = spawn(system, data, handle);
+        let aid = spawn(system, data, |state, aid, msg| {
+            println!("Got a Message");
+            Status::Processed
+        });
         send(aid, Arc::new(Operation::Inc));
         send(aid, Arc::new(Operation::Inc));
         send(aid, Arc::new(10 as i32));

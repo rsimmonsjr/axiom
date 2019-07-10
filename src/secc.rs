@@ -270,8 +270,8 @@ impl<T: Sync + Send> SeccReceiver<T> {
     pub fn peek(&self) -> Result<Arc<T>, SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
-            let mut receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
-            let (queue_head, pool_tail, precursor, cursor) = *receive_ptrs;
+            let receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
+            let (queue_head, pool_tail, _precursor, cursor) = *receive_ptrs;
 
             // Get a pointer to the current queue_head or cursor and see if there is anything to read.
             let read_ptr = if cursor == NIL_NODE {
@@ -283,13 +283,9 @@ impl<T: Sync + Send> SeccReceiver<T> {
             if NIL_NODE == next_read_pos {
                 return Err(SeccErrors::Empty);
             }
-
-            let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail];
-
-            match *(*read_ptr).cell.get() {
-                Some(v) => return Ok(v.clone()),
-                None => panic!("Somehow a None was in a cell when there should be data there. "),
-            }
+            let value: Arc<T> = *(*read_ptr).cell.get().take();
+            (*(*read_ptr).cell.get()) = Some(value.clone());
+            value
         }
     }
 
