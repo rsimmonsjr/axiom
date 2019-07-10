@@ -164,10 +164,17 @@ pub struct SeccSender<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> SeccSender<T> {
-    /// Sends a value into the mailbox, the value will be moved into the mailbox and it will take
+    /// Sends a value into the channel, the value will be moved into the mailbox and it will take
     /// ownership of the value. This function will either return the count of readable messages
     /// in an [Ok] or an [Err] if something went wrong.
     pub fn send(&self, value: T) -> Result<usize, SeccErrors<T>> {
+        self.send_arc(Arc::new(value))
+    }
+
+    /// Sends a value which is an [`Arc`] into the channel, the value will be moved into the
+    /// mailbox and it will take ownership of the value. This function will either return
+    /// the count of readable messages in an [Ok] or an [Err] if something went wrong.
+    pub fn send_arc(&self, value: Arc<T>) -> Result<usize, SeccErrors<T>> {
         unsafe {
             // Retrieve send pointers and the encoded indexes inside them.
             let mut send_ptrs = self.queue_tail_pool_head.lock().unwrap();
@@ -183,7 +190,7 @@ impl<T: Sync + Send> SeccSender<T> {
             // Pool head moves to become the queue tail or else loop and try again!
             *send_ptrs = (pool_head, next_pool_head);
             let queue_tail_ptr = (*self.core().node_ptrs.get())[queue_tail];
-            (*(*queue_tail_ptr).cell.get()) = Some(Arc::new(value));
+            (*(*queue_tail_ptr).cell.get()) = Some(value);
             (*pool_head_ptr).next.store(NIL_NODE, Ordering::Release);
             (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
 
@@ -204,14 +211,27 @@ impl<T: Sync + Send> SeccSender<T> {
 
     /// Send to the channel, awaiting capacity if necessary with an optional timeout. This
     /// function will either return the count of readable messages /// in an [Ok] or an [Err]
-    /// if something went wrong.
+    /// if something went wrong. This function is semantically identical to [send] but
+    /// simply waits for there to be space in the channel to send before sending.
     pub fn send_await_timeout(
         &self,
         mut value: T,
         timeout: Option<Duration>,
     ) -> Result<usize, SeccErrors<T>> {
+        self.send_arc_await_timeout(Arc::new(value), timeout)
+    }
+
+    /// Send to the channel, awaiting capacity if necessary with an optional timeout. This
+    /// function will either return the count of readable messages /// in an [Ok] or an [Err]
+    /// if something went wrong. This function is semantically identical to [send_arc] but
+    /// simply waits for there to be space in the channel to send before sending.
+    pub fn send_arc_await_timeout(
+        &self,
+        mut value: Arc<T>,
+        timeout: Option<Duration>,
+    ) -> Result<usize, SeccErrors<T>> {
         loop {
-            match self.send(value) {
+            match self.send_arc(value) {
                 Err(SeccErrors::Full(v)) => {
                     value = v;
                     let (ref mutex, ref condvar) = &*self.core.has_capacity;
@@ -243,6 +263,13 @@ impl<T: Sync + Send> SeccSender<T> {
     pub fn send_await(&self, value: T) -> Result<usize, SeccErrors<T>> {
         self.send_await_timeout(value, None)
     }
+
+    /// Helper to call [send_arc_await_with_timeout] using a None for the timeout. This function
+    /// will either return the count of readable messages in an [Ok] or an [Err] if
+    /// something went wrong.
+    pub fn send_arc_await(&self, value: T) -> Result<usize, SeccErrors<T>> {
+        self.send_arc_await_timeout(value, None)
+    }
 }
 
 impl<T: Sync + Send> SeccCoreOps<T> for SeccSender<T> {
@@ -271,7 +298,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
             let receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
-            let (queue_head, pool_tail, _precursor, cursor) = *receive_ptrs;
+            let (queue_head, _pool_tail, _precursor, cursor) = *receive_ptrs;
 
             // Get a pointer to the current queue_head or cursor and see if there is anything to read.
             let read_ptr = if cursor == NIL_NODE {
@@ -283,14 +310,14 @@ impl<T: Sync + Send> SeccReceiver<T> {
             if NIL_NODE == next_read_pos {
                 return Err(SeccErrors::Empty);
             }
-            let value: Arc<T> = *(*read_ptr).cell.get().take();
+            let value: Arc<T> = (*(*read_ptr).cell.get()).take().unwrap();
             (*(*read_ptr).cell.get()) = Some(value.clone());
-            value
+            Ok(value)
         }
     }
 
     /// Receives the message at the head of the channel.
-    pub fn receive(&self) -> Result<T, SeccErrors<T>> {
+    pub fn receive(&self) -> Result<Arc<T>, SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
             let mut receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
@@ -308,7 +335,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
             }
 
             let pool_tail_ptr = (*self.core().node_ptrs.get())[pool_tail];
-            let value = *(*(*read_ptr).cell.get()).take().unwrap() as T;
+            let value: Arc<T> = (*(*read_ptr).cell.get()).take().unwrap();
             if cursor == NIL_NODE {
                 // If we aren't using a cursor then the queue_head moves to become the pool tail or else loop and try again.
                 (*pool_tail_ptr).next.store(queue_head, Ordering::Release);
@@ -343,7 +370,6 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// Pops the first message of the channel, discarding it and returning the remaining
     /// messages in the channel or an error if the channel was empty.
     pub fn pop(&self) -> Result<usize, SeccErrors<T>> {
         self.receive()?;
@@ -351,7 +377,10 @@ impl<T: Sync + Send> SeccReceiver<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary.
-    pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, SeccErrors<T>> {
+    pub fn receive_await_timeout(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Arc<T>, SeccErrors<T>> {
         loop {
             match self.receive() {
                 Err(SeccErrors::Empty) => {
@@ -380,7 +409,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
     }
 
     /// A helper to call [receive_await_timeout] with [None] for a timeout.
-    pub fn receive_await(&self) -> Result<T, SeccErrors<T>> {
+    pub fn receive_await(&self) -> Result<Arc<T>, SeccErrors<T>> {
         self.receive_await_timeout(None)
     }
 
