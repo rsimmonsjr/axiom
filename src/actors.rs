@@ -8,7 +8,7 @@ use std::fmt;
 use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
 use uuid::Uuid;
@@ -58,8 +58,6 @@ pub struct ActorId {
     sender: ActorSender,
     /// Holds a reference to the local actor system that the [ActorId] lives at.
     system: Arc<ActorSystem>,
-    /// Holds an Arc to the actual actor if the actor is local to this node.
-    actor: Option<Arc<Mutex<Actor>>>,
 }
 
 impl fmt::Debug for ActorId {
@@ -96,7 +94,7 @@ impl Hash for ActorId {
 /// an [`Arc`] to allow access to the actor system for spawning, sending to self and so on.
 /// Third is the current message to process in an [`Arc`].
 pub trait Processor<State: Send + Sync + 'static>:
-    (FnMut(&mut State, Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync + 'static
+    (FnMut(&mut State, Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static
 {
 }
 
@@ -104,7 +102,7 @@ pub trait Processor<State: Send + Sync + 'static>:
 impl<F, State> Processor<State> for F
 where
     State: Send + Sync + 'static,
-    F: (FnMut(&mut State, Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync + 'static,
+    F: (FnMut(&mut State, Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static,
 {
 }
 
@@ -123,7 +121,7 @@ pub struct Actor {
     receiver: SeccReceiver<Arc<Message>>,
     /// Function processes messages sent to the actor wrapped in a closure to erase the
     /// state type that the actor is maanaging.
-    handler: Box<dyn (FnMut(Arc<ActorId>, Arc<Message>) -> Status) + Send + Sync + 'static>,
+    handler: Mutex<Box<dyn (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static>>,
 }
 
 impl Actor {
@@ -136,7 +134,7 @@ impl Actor {
         node_id: Uuid,
         mut state: State,
         mut processor: F,
-    ) -> Arc<ActorId>
+    ) -> Arc<Actor>
     where
         State: Send + Sync + 'static,
         F: Processor<State>,
@@ -150,11 +148,12 @@ impl Actor {
             node_id: node_id,
             sender: ActorSender::Local(tx),
             system: system.clone(),
-            actor: None,
         };
 
         // This handler will manage the state for the actor.
-        let handler = Box::new({ move |aid, message| processor(&mut state, aid, message) });
+        let handler = Box::new({
+            move |aid: Arc<ActorId>, message: &Arc<Message>| processor(&mut state, aid, message)
+        });
 
         // The actor context will be the holder of the actual actor.
         let actor = Actor {
@@ -163,11 +162,7 @@ impl Actor {
             handler,
         };
 
-        // We will copy the reference to the actor in the actor id which means when handling
-        // messages we will not have to look up the actor in a map once we have the actor id.
-        aid.actor = Some(Arc::new(Mutex::new(actor)));
-
-        actor.aid.clone()
+        Arc::new(actor)
     }
 
     /// fetches the actor id for this actor.
@@ -198,6 +193,7 @@ impl Actor {
                 return;
             }
             Result::Ok(message) => {
+                let result: &Arc<Message> = message;
                 let result = (*self.handler)(self.aid.clone(), message);
                 let queue_result = match result {
                     Status::Processed => self.receiver.pop(),
@@ -219,48 +215,56 @@ impl Actor {
 pub struct ActorSystem {
     /// Id for this actor system and node.
     pub node_id: Uuid,
-    /// Holds the actor id objects keyed by Uuid of the actor.
-    actors_by_aid: Mutex<HashMap<Uuid, Arc<ActorId>>>,
+    /// Sender side of the work channel. When an actor gets a message and its pending count goes
+    /// from 0 to 1 it will put itself in the channel via the sender.
+    sender: Arc<SeccSender<Arc<ActorId>>>,
+    /// Receiver side of the work channel. All threads in the pool will be grabbing actor ids
+    /// from this receiver. When a thread gets an actor it will lock the mutex of the actor
+    /// inside the id and then will process the message. If the actor has pending messages after
+    /// the processing is done then the actor will be put back in the channel to be re-queued.
+    receiver: Arc<SeccReceiver<Arc<ActorId>>>,
+    /// Holds the [Actor] objects keyed by the [ActorId]. The [RwLock] will be locked for write
+    /// only when a new actor is spawned but otherwise will be locked for read by the threads
+    /// in the threadbool as they try to look up actors to process.
+    actors_by_aid: Arc<RwLock<HashMap<Arc<ActorId>, Arc<Actor>>>>,
     /// Holds handles to the pool of threads processing the run queue.
     thread_pool: Vec<JoinHandle<()>>,
-    /// Sender side of the work channel. When an actor gets a message and its pending
-    /// count goes from 0 to 1 it will put itself in the channel via the sender.
-    sender: Arc<SeccSender<Arc<ActorId>>>,
-    /// Receiver side of the work channel. All threads in the pool will be grabbing
-    /// actor ids from this receiver. When a thread gets an actor it will lock the
-    /// mutex of the actor inside the id and then will process the message. If the
-    /// actor has pending messages after the processing is done then the actor will
-    /// be put back in the channel to be re-queued.
-    receiver: Arc<SeccReceiver<Arc<ActorId>>>,
 }
 
 impl ActorSystem {
-    /// Creates an actor system with the given size for the dispatcher channel and thread
-    /// pool. The user should benchmark how many slots in the run channel and the number of
-    /// threads they need in order to satisfy the requirements of the system they are creating.
+    /// Creates an actor system with the given size for the dispatcher channel and thread pool.
+    /// The user should benchmark how many slots in the run channel and the number of threads
+    /// they need in order to satisfy the requirements of the system they are creating.
     pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
         // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) = secc::create_with_arcs::<Arc<ActorId>>(run_channel_size);
 
+        // The map is created with a mutex for interior mutability.
+        let actors_by_aid = Arc::new(RwLock::new(HashMap::new()));
+
         // Allocate the thread pool of threads grabbing for work in the channel.
         let thread_pool: Vec<JoinHandle<()>> = (1..thread_pool_size)
-            .map(|_i| ActorSystem::start_dispatcher_thread(sender.clone(), receiver.clone()))
+            .map(|_i| {
+                ActorSystem::start_dispatcher_thread(
+                    actors_by_aid,
+                    sender.clone(),
+                    receiver.clone(),
+                )
+            })
             .collect();
-
-        // The map is created with a mutex for interior mutability.
-        let actors_by_aid = Mutex::new(HashMap::new());
 
         Arc::new(ActorSystem {
             node_id: Uuid::new_v4(),
-            actors_by_aid,
             sender,
             receiver,
+            actors_by_aid,
             thread_pool,
         })
     }
 
     /// Starts a thread for the dispatcher that will process actor messages.
     fn start_dispatcher_thread(
+        actors_by_aid: Arc<RwLock<HashMap<Arc<ActorId>, Arc<Actor>>>>,
         sender: Arc<SeccSender<Arc<ActorId>>>,
         receiver: Arc<SeccReceiver<Arc<ActorId>>>,
     ) -> JoinHandle<()> {
@@ -269,10 +273,10 @@ impl ActorSystem {
                 Err(_) => println!("Error"), // FIXME turn this into logging instead.
                 Ok(aid) => {
                     // FIXME Actor panic shouldnt take down the whole code
-                    let mut guard = aid.actor.unwrap().lock().unwrap();
-                    let mut actor = *guard;
-                    actor.receive();
-                    if actor.receiver.readable() > 0 {
+                    let guard = actors_by_aid.read().unwrap();
+                    let actor = guard.get(aid).unwrap();
+                    (*actor).receive();
+                    if actor.receiver.receivable() > 0 {
                         // if there are additional messages pending in the actor,
                         // re-enqueue the message at the back of the queue.
                         sender.send_await(aid.clone());
@@ -290,17 +294,17 @@ impl ActorSystem {
     }
 }
 
-/// Spawns a new actor on the actor `system` using the given `starting_state` for the actor
-/// and the given `processor` function that will be used to process actor messages.
+/// Spawns a new actor on the actor `system` using the given `starting_state` for the actor and
+/// the given `processor` function that will be used to process actor messages.
 pub fn spawn<'a, F, State>(system: Arc<ActorSystem>, state: State, processor: F) -> Arc<ActorId>
 where
     State: Send + Sync + 'static,
     F: Processor<State>,
 {
-    let mut guard = system.actors_by_aid.lock().unwrap();
-    let aid = Actor::new(system.clone(), system.node_id, state, processor);
-    guard.insert(aid.id, aid.clone());
-    aid
+    let mut guard = system.actors_by_aid.write().unwrap();
+    let actor = Actor::new(system.clone(), system.node_id, state, processor);
+    guard.insert(actor.aid.clone(), actor);
+    actor.aid()
 }
 
 /// Sends the `message` to the actor identified by the `aid` passed.
@@ -348,27 +352,28 @@ mod tests {
         count: i32,
         value: i32,
     }
+
     /*
-     *
-     *    fn handle_op(aid: Arc<ActorId>, data: &mut Data, msg: Operation) -> Status {
+     *    fn handle_op(aid: arc<actorid>, data: &mut data, msg: operation) -> status {
      *        match msg {
-     *            Operation::Inc => data.count += 1,
-     *            Operation::Dec => data.count -= 1,
+     *            operation::inc => data.count += 1,
+     *            operation::dec => data.count -= 1,
      *        }
-     *        Status::Processed
+     *        status::processed
      *    }
      *
-     *    fn handle_i32(aid: Arc<ActorId>, data: &mut Data, msg: i32) -> Status {
+     *    fn handle_i32(aid: arc<actorid>, data: &mut data, msg: i32) -> status {
      *        data.value += msg;
-     *        Status::Processed
+     *        status::processed
      *    }
-     *
-     *    fn handle(aid: Arc<ActorId>, data: &mut Data, msg: Arc<Message>) -> Status {
-     *        dispatch(aid, data, msg.clone(), handle_op)
-     *            .or_else(|| dispatch(aid, data, msg.clone(), handle_i32))
-     *            .unwrap()
-     *    }
-     *
+     */
+
+    /*
+     *fn handle(aid: Arc<ActorId>, data: &mut Data, msg: Arc<Message>) -> Status {
+     *    dispatch(aid, data, msg.clone(), handle_op)
+     *        .or_else(|| dispatch(aid, data, msg.clone(), handle_i32))
+     *        .unwrap()
+     *}
      */
 
     #[test]
