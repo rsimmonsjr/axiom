@@ -1,7 +1,6 @@
 ///
 /// Implements actors and the actor system.
 use secc;
-use secc::HalfUsize;
 use secc::*;
 use std::any::Any;
 use std::collections::HashMap;
@@ -33,7 +32,7 @@ pub enum Status {
     /// skip messages while working on a process and then clear the skip buffer and resume normal
     /// processing. This functionality is critical for actors that act as a finite state machine
     /// and thus might temporarily change the implementation of the processor and then switch
-    /// back to a state where the previously enqueued messages are delivered.
+    /// back to a state where the previously sent messages are delivered.
     Skipped,
     /// Clears the skip tail on the channel. A skip tail is present when a message has been
     /// skipped by returning [`Skipped`] If no skip tail is set than this result is semantically
@@ -89,8 +88,8 @@ impl Hash for ActorId {
     }
 }
 
-/// A type for a user function that processes messages for an actor. This will be passed
-/// to a spawn funtion to specify the handler used for managing the state of the actor based
+/// A type for a user function that processes messages for an actor. This will be passed to a
+/// spawn funtion to specify the handler used for managing the state of the actor based
 /// on the messages passed to the actor. The rewulting state passed will be used in the
 /// next message call. The processor takes three arguments. First, the `state` is a mutable
 /// reference to the current state of the actor. Second, is the [`ActorId`] enclosed in
@@ -114,11 +113,9 @@ where
 /// 1. An actor can be interracted with only by means of messages.
 /// 2. An actor processes ONLY one message at a time.
 /// 3. An actor will process a message only once.
-/// 4. An actor can send a message to any other actor without knowledge of that
-///    actor's internals (i.e. it won't even knwo if the other actor processes the
-///    message.
-/// 5. Actors send only immutable data as messages, though they may have mutable
-///    internal state.
+/// 4. An actor can send a message to any other actor without knowledge of that actor's internals
+/// 5. Actors send only immutable data as messages, though they may have mutable internal state.
+/// 6. Actors are location agnostic. An actor can be sent a message from anywhere in the cluster.
 pub struct Actor {
     /// Id of the associated actor.
     aid: Arc<ActorId>,
@@ -130,10 +127,10 @@ pub struct Actor {
 }
 
 impl Actor {
-    /// Creates a new actor context with the given actor id. The user will pass the
-    /// initial state of the actor as well as the processor that will be used to process
-    /// messages sent to the actor. The system and node id are passed separately because
-    /// of restrictions on mutex guards not being re-entrant in rust.
+    /// Creates a new actor context with the given actor id. The user will pass the initial state
+    /// of the actor as well as the processor that will be used to process messages sent to the
+    /// actor. The system and node id are passed separately because of restrictions on mutex
+    /// guards not being re-entrant in rust.
     pub fn new<'a, F, State>(
         system: Arc<ActorSystem>,
         node_id: Uuid,
@@ -180,17 +177,17 @@ impl Actor {
 
     /// Returns the total number of messages that have been sent to this actor.
     fn sent(&self) -> usize {
-        self.receiver.enqueued()
+        self.receiver.sent()
     }
 
     /// Returns the total number of messages that have been received by this actor.
     fn received(&self) -> usize {
-        self.receiver.dequeued()
+        self.receiver.received()
     }
 
     /// Returns the total number of messages that are currently pending in the actor's channel.
     fn pending(&self) -> usize {
-        self.receiver.length()
+        self.receiver.pending()
     }
 
     /// Receive as message off the channel and processes it with the actor.
@@ -241,7 +238,7 @@ impl ActorSystem {
     /// Creates an actor system with the given size for the dispatcher channel and thread
     /// pool. The user should benchmark how many slots in the run channel and the number of
     /// threads they need in order to satisfy the requirements of the system they are creating.
-    pub fn create(run_channel_size: HalfUsize, thread_pool_size: HalfUsize) -> Arc<ActorSystem> {
+    pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
         // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) = secc::create_with_arcs::<Arc<ActorId>>(run_channel_size);
 
