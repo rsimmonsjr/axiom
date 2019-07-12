@@ -92,8 +92,8 @@ impl Hash for ActorId {
 /// reference to the current state of the actor. Second, is the [`ActorId`] enclosed in
 /// an [`Arc`] to allow access to the actor system for spawning, sending to self and so on.
 /// Third is the current message to process in an [`Arc`].
-pub trait Processor<State: Send + Sync + 'static>:
-    (FnMut(&mut State, Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static
+pub trait Processor<State: Send + Sync>:
+    (FnMut(&mut State, Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync
 {
 }
 
@@ -135,7 +135,7 @@ impl Actor {
     /// of the actor as well as the processor that will be used to process messages sent to the
     /// actor. The system and node id are passed separately because of restrictions on mutex
     /// guards not being re-entrant in rust.
-    pub fn new<'a, F, State>(
+    pub fn new<F, State>(
         system: Arc<ActorSystem>,
         node_id: Uuid,
         mut state: State,
@@ -143,7 +143,7 @@ impl Actor {
     ) -> Arc<Actor>
     where
         State: Send + Sync + 'static,
-        F: Processor<State>,
+        F: Processor<State> + 'static,
     {
         // TODO Let the user pass the size of the channel queue when creating the actor.
         // Create the channel for the actor.
@@ -310,10 +310,10 @@ impl ActorSystem {
 
 /// Spawns a new actor on the actor `system` using the given `starting_state` for the actor and
 /// the given `processor` function that will be used to process actor messages.
-pub fn spawn<'a, F, State>(system: Arc<ActorSystem>, state: State, processor: F) -> Arc<ActorId>
+pub fn spawn<F, State>(system: Arc<ActorSystem>, state: State, processor: F) -> Arc<ActorId>
 where
     State: Send + Sync + 'static,
-    F: Processor<State>,
+    F: Processor<State> + 'static,
 {
     let mut guard = system.actors_by_aid.write().unwrap();
     let actor = Actor::new(system.clone(), system.node_id, state, processor);
@@ -323,7 +323,7 @@ where
 }
 
 /// Sends the `message` to the actor identified by the `aid` passed.
-pub fn send(aid: Arc<ActorId>, message: Arc<Message>) {
+pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) {
     match &aid.sender {
         ActorSender::Local(sender) => {
             let readable = sender.send_await(message).unwrap();
@@ -363,6 +363,7 @@ mod tests {
         Dec,
     }
 
+    #[derive(Debug)]
     struct Data {
         count: i32,
         value: i32,
@@ -395,13 +396,25 @@ mod tests {
     fn test_spawn_with_closure() {
         let system = ActorSystem::create(10, 1);
         let data = Data { count: 0, value: 0 };
-        let aid = spawn(system, data, |state, aid, msg| {
-            println!("Got a Message");
-            Status::Processed
-        });
-        send(aid, Arc::new(Operation::Inc));
-        send(aid, Arc::new(Operation::Inc));
-        send(aid, Arc::new(10 as i32));
+        let aid = spawn(
+            system,
+            data,
+            |state: &mut Data, _aid, _msg: &Arc<dyn Any + Send + Sync + 'static>| {
+                println!("-------> Got a Message! State now: {:?}", state);
+                Status::Processed
+            },
+        );
+        send(&aid, Arc::new(Operation::Inc));
+        match &aid.sender {
+            ActorSender::Local(sender) => {
+                println!("-------> Checking sent");
+                assert_eq!(1, sender.sent());
+                assert_eq!(1, sender.received());
+            }
+            _ => assert!(true),
+        }
+        send(&aid, Arc::new(Operation::Dec));
+        send(&aid, Arc::new(10 as i32));
 
         // TODO Assert states after messages.
     }
