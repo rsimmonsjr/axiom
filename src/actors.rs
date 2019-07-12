@@ -59,6 +59,32 @@ pub struct ActorId {
     system: Arc<ActorSystem>,
 }
 
+impl ActorId {
+    /// Returns the total number of messages that have been sent to the actor.
+    pub fn sent(&self) -> usize {
+        match &self.sender {
+            ActorSender::Local(sender) => sender.sent(),
+            _ => panic!("Only implemented for Local sender!"),
+        }
+    }
+
+    /// Returns the total number of messages that have been recieived and processed by the actor.
+    pub fn received(&self) -> usize {
+        match &self.sender {
+            ActorSender::Local(sender) => sender.received(),
+            _ => panic!("Only implemented for Local sender!"),
+        }
+    }
+
+    /// Returns the total number of messages that are pending to be received by the actor.
+    pub fn pending(&self) -> usize {
+        match &self.sender {
+            ActorSender::Local(sender) => sender.pending(),
+            _ => panic!("Only implemented for Local sender!"),
+        }
+    }
+}
+
 impl fmt::Debug for ActorId {
     fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -235,6 +261,7 @@ impl ActorSystem {
     /// The user should benchmark how many slots in the run channel and the number of threads
     /// they need in order to satisfy the requirements of the system they are creating.
     pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
+        println!("=====> Starting actor system");
         // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) = secc::create_with_arcs::<Arc<Actor>>(run_channel_size);
 
@@ -242,7 +269,7 @@ impl ActorSystem {
         let actors_by_aid = Arc::new(RwLock::new(HashMap::new()));
 
         // Allocate the thread pool of threads grabbing for work in the channel.
-        let thread_pool: Vec<JoinHandle<()>> = (1..thread_pool_size)
+        let thread_pool: Vec<JoinHandle<()>> = (0..thread_pool_size)
             .map(|_i| ActorSystem::start_dispatcher_thread(sender.clone(), receiver.clone()))
             .collect();
 
@@ -260,10 +287,12 @@ impl ActorSystem {
         sender: Arc<SeccSender<Arc<Actor>>>,
         receiver: Arc<SeccReceiver<Arc<Actor>>>,
     ) -> JoinHandle<()> {
+        println!("=====> Starting Scheduler Thread");
         thread::spawn(move || {
             match receiver.receive_await() {
                 Err(_) => println!("Error"), // FIXME turn this into logging instead.
                 Ok(actor) => {
+                    println!("=====> Handling a message.");
                     // FIXME Actor panic shouldnt take down the whole code
                     actor.receive();
                     if actor.receiver.receivable() > 0 {
@@ -303,6 +332,7 @@ impl ActorSystem {
         // from the send in order :qto allow internal optimization of the actor system.
         // FIXME Harden this against the actor being out of the map.
         let guard = aid.system.actors_by_aid.read().unwrap();
+        println!("=====> Got the Guard");
         // FIXME if the actor is not able to schedule, this will panic.
         (aid.system.sender.send(guard.get(&aid).unwrap().clone())).unwrap();
     }
@@ -329,6 +359,7 @@ pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) {
             let readable = sender.send_await(message).unwrap();
             // From 0 to 1 message readable triggers schedule.
             if readable == 1 {
+                println!("=====> Scheduling");
                 ActorSystem::schedule(aid.clone())
             }
         }
@@ -395,24 +426,34 @@ mod tests {
     #[test]
     fn test_spawn_with_closure() {
         let system = ActorSystem::create(10, 1);
-        let data = Data { count: 0, value: 0 };
+        let starting_state = Data { count: 0, value: 0 };
+        // Note we have to tediously define closure types because of a bug in rust compiler's
+        // type inferrence. They can be removed when that bug is fixed.
         let aid = spawn(
             system,
-            data,
-            |state: &mut Data, _aid, _msg: &Arc<dyn Any + Send + Sync + 'static>| {
+            starting_state,
+            |state: &mut Data, _aid, msg: &Arc<dyn Any + Send + Sync + 'static>| {
+                match msg.downcast_ref::<Operation>() {
+                    Some(operation) => match operation {
+                        Operation::Inc => state.value += 1,
+                        Operation::Dec => state.value -= 1,
+                    },
+                    None => match msg.downcast_ref::<i32>() {
+                        Some(value) => state.value += value,
+                        None => (),
+                    },
+                }
+                state.count += 1;
+
                 println!("-------> Got a Message! State now: {:?}", state);
                 Status::Processed
             },
         );
         send(&aid, Arc::new(Operation::Inc));
-        match &aid.sender {
-            ActorSender::Local(sender) => {
-                println!("-------> Checking sent");
-                assert_eq!(1, sender.sent());
-                assert_eq!(1, sender.received());
-            }
-            _ => assert!(true),
-        }
+        println!("-------> Checking sent");
+        assert_eq!(1, aid.sent());
+        //assert_eq!(0, aid.pending());
+        //assert_eq!(1, aid.received());
         send(&aid, Arc::new(Operation::Dec));
         send(&aid, Arc::new(10 as i32));
 
