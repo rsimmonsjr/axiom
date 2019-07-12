@@ -17,6 +17,7 @@
 //! when the channel is created.
 
 use std::cell::UnsafeCell;
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Condvar;
@@ -28,7 +29,7 @@ use std::time::Duration;
 const NIL_NODE: usize = 1 << 16 as usize;
 
 /// Errors potentially returned from channel operations.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub enum SeccErrors<T: Sync + Send> {
     /// Channel is full, no more messages can be sent, contains the last message attempted
     /// to be sent.
@@ -37,6 +38,15 @@ pub enum SeccErrors<T: Sync + Send> {
     /// is an active cursor and there are no messages to receive after the cursor even though
     /// there ar skipped messages.
     Empty,
+}
+
+impl<T: Sync + Send> fmt::Debug for SeccErrors<T> {
+    fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SeccErrors::Full(_) => write!(formatter, "SeccErrors::Full"),
+            SeccErrors::Empty => write!(formatter, "SeccErrors::Empty"),
+        }
+    }
 }
 
 /// A single node in the channel's ring buffer.
@@ -117,8 +127,9 @@ pub struct SeccCore<T: Sync + Send> {
     /// should ever be empty.
     capacity: usize,
     /// Node storage of the nodes. These nodes are never read directly except during
-    /// allocation and tests.
-    nodes: Box<[SeccNode<T>]>,
+    /// allocation and tests. Note this is an _ because although the nodes live here they
+    /// are never used directly once allocated.
+    _nodes: Box<[SeccNode<T>]>,
     /// Pointers to the nodes in the channel. It is critical that these pointers never change
     /// order during the operations of the channel because nodes refer to indexes in the
     /// array rather than the raw pointers.
@@ -526,7 +537,7 @@ pub fn create<T: Sync + Send>(capacity: u16) -> (SeccSender<T>, SeccReceiver<T>)
     // Create the channel structures
     let core = Arc::new(SeccCore {
         capacity: capacity as usize,
-        nodes: nodes.into_boxed_slice(),
+        _nodes: nodes.into_boxed_slice(),
         node_ptrs: UnsafeCell::new(node_ptrs),
         has_messages: Arc::new((Mutex::new(true), Condvar::new())),
         awaited_messages: AtomicUsize::new(0),
