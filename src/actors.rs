@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// This is a type used by the system for sending a message through a channel to the actor.
@@ -215,8 +217,9 @@ impl Actor {
     /// Receive as message off the channel and processes it with the actor.
     fn receive(&self) {
         match self.receiver.peek() {
-            Result::Err(_err) => {
+            Result::Err(err) => {
                 // TODO Log the error from the channel.
+                println!("Error Occurred {:?}", err); // TODO Log this
                 return;
             }
             Result::Ok(message) => {
@@ -253,7 +256,13 @@ pub struct ActorSystem {
     /// in the threadbool as they try to look up actors to process.
     actors_by_aid: Arc<RwLock<HashMap<Arc<ActorId>, Arc<Actor>>>>,
     /// Holds handles to the pool of threads processing the run queue.
-    thread_pool: Vec<JoinHandle<()>>,
+    thread_pool: Mutex<Vec<JoinHandle<()>>>,
+    /// A flag holding whether or not the system is currently shutting down.
+    shutdown_triggered: AtomicBool,
+    /// Duration for threads to wait for new messages before cycling and checking again. Defaults
+    /// to 10 milliseconds.
+    /// TODO Allow user to pass this as config.
+    thread_wait_time: Option<Duration>,
 }
 
 impl ActorSystem {
@@ -261,54 +270,67 @@ impl ActorSystem {
     /// The user should benchmark how many slots in the run channel and the number of threads
     /// they need in order to satisfy the requirements of the system they are creating.
     pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
-        println!("=====> Starting actor system");
         // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) = secc::create_with_arcs::<Arc<Actor>>(run_channel_size);
 
-        // The map is created with a mutex for interior mutability.
-        let actors_by_aid = Arc::new(RwLock::new(HashMap::new()));
-
-        // Allocate the thread pool of threads grabbing for work in the channel.
-        let thread_pool: Vec<JoinHandle<()>> = (0..thread_pool_size)
-            .map(|_i| ActorSystem::start_dispatcher_thread(sender.clone(), receiver.clone()))
-            .collect();
-
-        Arc::new(ActorSystem {
+        // Creates the actor system with the thread pools and actor map initialized.
+        let system = Arc::new(ActorSystem {
             node_id: Uuid::new_v4(),
             sender,
             receiver,
-            actors_by_aid,
-            thread_pool,
-        })
+            actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
+            thread_pool: Mutex::new(Vec::with_capacity(thread_pool_size as usize)),
+            shutdown_triggered: AtomicBool::new(false),
+            thread_wait_time: Some(Duration::from_millis(10)),
+        });
+
+        // We have the thread pool in a mutex to avoid a chicken - egg situation with the actor
+        // system not being created but needed by the thread.
+        {
+            let mut guard = system.thread_pool.lock().unwrap();
+
+            // Allocate the thread pool of threads grabbing for work in the channel.
+            for _ in 0..thread_pool_size {
+                let thread = ActorSystem::start_dispatcher_thread(system.clone());
+                guard.push(thread);
+            }
+        }
+
+        system
     }
 
     /// Starts a thread for the dispatcher that will process actor messages.
-    fn start_dispatcher_thread(
-        sender: Arc<SeccSender<Arc<Actor>>>,
-        receiver: Arc<SeccReceiver<Arc<Actor>>>,
-    ) -> JoinHandle<()> {
-        println!("=====> Starting Scheduler Thread");
+    fn start_dispatcher_thread(system: Arc<ActorSystem>) -> JoinHandle<()> {
+        let sender = system.sender.clone();
+        let receiver = system.receiver.clone();
+
         thread::spawn(move || {
-            match receiver.receive_await() {
-                Err(_) => println!("Error"), // FIXME turn this into logging instead.
-                Ok(actor) => {
-                    println!("=====> Handling a message.");
-                    // FIXME Actor panic shouldnt take down the whole code
-                    actor.receive();
-                    if actor.receiver.receivable() > 0 {
-                        // if there are additional messages pending in the actor,
-                        // re-enqueue the message at the back of the queue.
-                        // FIXME This will panic, make it handle errors more elegantly.
-                        sender.send_await(actor).unwrap();
+            while !system.shutdown_triggered.load(Ordering::Relaxed) {
+                match receiver.receive_await_timeout(system.thread_wait_time) {
+                    Err(_) => (),
+                    Ok(actor) => {
+                        // FIXME Actor panic shouldnt take down the whole code
+                        actor.receive();
+                        if actor.receiver.receivable() > 0 {
+                            // if there are additional messages pending in the actor,
+                            // re-enqueue the message at the back of the queue.
+                            // FIXME This will panic, make it handle errors more elegantly.
+                            sender.send_await(actor).unwrap();
+                        }
                     }
                 }
             }
         })
     }
 
-    /// Returns the total number of messages that have been sent to this actor.
-    pub fn thread_count(&self) -> usize {
-        self.thread_pool.len()
+    /// Triggers a shutdown of the system and returns only when all threads have joined.
+    pub fn shutdown(&self) {
+        self.shutdown_triggered.store(true, Ordering::Relaxed);
+        let mut guard = self.thread_pool.lock().unwrap();
+        let vec = std::mem::replace(&mut *guard, vec![]);
+        for handle in vec {
+            handle.join().unwrap();
+        }
     }
 
     /// Returns the total number of times actors have been sent to work channels.
@@ -332,7 +354,6 @@ impl ActorSystem {
         // from the send in order :qto allow internal optimization of the actor system.
         // FIXME Harden this against the actor being out of the map.
         let guard = aid.system.actors_by_aid.read().unwrap();
-        println!("=====> Got the Guard");
         // FIXME if the actor is not able to schedule, this will panic.
         (aid.system.sender.send(guard.get(&aid).unwrap().clone())).unwrap();
     }
@@ -359,7 +380,6 @@ pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) {
             let readable = sender.send_await(message).unwrap();
             // From 0 to 1 message readable triggers schedule.
             if readable == 1 {
-                println!("=====> Scheduling");
                 ActorSystem::schedule(aid.clone())
             }
         }
@@ -370,14 +390,14 @@ pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) {
 /// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
 /// that handler with the message. If the dispatch is successful it will return the result of the
 /// call to the caller, otherwise it will return None back to the caller.
-pub fn dispatch<T: 'static, S, R>(
-    aid: Arc<ActorId>,
+pub fn dispatch<T: 'static, S>(
     state: &mut S,
+    aid: Arc<ActorId>,
     message: Arc<Message>,
-    mut func: impl FnMut(Arc<ActorId>, &mut S, &T) -> R,
-) -> Option<R> {
+    mut func: impl FnMut(&mut S, Arc<ActorId>, &T) -> Status,
+) -> Option<Status> {
     match message.downcast_ref::<T>() {
-        Some(x) => Some(func(aid.clone(), state, x)),
+        Some(x) => Some(func(state, aid.clone(), x)),
         None => None,
     }
 }
@@ -388,6 +408,48 @@ pub fn dispatch<T: 'static, S, R>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_spawn_with_closure() {
+        let system = ActorSystem::create(10, 1);
+        let starting_state: usize = 0 as usize;
+        // Note we have to tediously define closure types because of a bug in rust compiler's
+        // type inferrence. They can be removed when that bug is fixed.
+        let closure = |message_count: &mut usize, aid: Arc<ActorId>, msg: &Arc<Message>| {
+            // Expected messages in the expected order.
+            let expected: Vec<i32> = vec![11, 13, 17];
+            // Attempt to downcast to expected message.
+            match msg.downcast_ref::<i32>() {
+                Some(value) => {
+                    assert_eq!(expected[*message_count], *value);
+                    assert_eq!(*message_count, aid.received());
+                    *message_count += 1;
+                    assert_eq!(aid.pending(), aid.sent() - aid.received());
+                }
+                None => assert!(false, "Unknown message type received."),
+            }
+            Status::Processed
+        };
+
+        let aid = spawn(system.clone(), starting_state, closure);
+
+        // We will send three messages and we have to wait on pending in order to make sure the
+        // test doesn't race the actor system.
+
+        send(&aid, Arc::new(11 as i32));
+        assert_eq!(1, aid.sent());
+        send(&aid, Arc::new(13 as i32));
+        assert_eq!(2, aid.sent());
+        send(&aid, Arc::new(17 as i32));
+        assert_eq!(3, aid.sent());
+
+        thread::sleep(Duration::from_millis(10));
+
+        assert_eq!(3, aid.received());
+        system.shutdown()
+    }
+
+    // ---------- Test an actor made from a Struct
+
     #[derive(Debug)]
     enum Operation {
         Inc,
@@ -395,68 +457,76 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct Data {
-        count: i32,
-        value: i32,
+    struct StructActor {
+        count: usize,
     }
 
-    /*
-     *    fn handle_op(aid: arc<actorid>, data: &mut data, msg: operation) -> status {
-     *        match msg {
-     *            operation::inc => data.count += 1,
-     *            operation::dec => data.count -= 1,
-     *        }
-     *        status::processed
-     *    }
-     *
-     *    fn handle_i32(aid: arc<actorid>, data: &mut data, msg: i32) -> status {
-     *        data.value += msg;
-     *        status::processed
-     *    }
-     */
+    impl StructActor {
+        fn handle_op(&mut self, aid: Arc<ActorId>, msg: &Operation) -> Status {
+            match msg {
+                Operation::Inc => {
+                    assert_eq!(0, aid.received());
+                    self.count += 1;
+                    assert_eq!(6 as usize, self.count);
+                }
+                Operation::Dec => {
+                    assert_eq!(1, aid.received());
+                    self.count -= 1;
+                    assert_eq!(5 as usize, self.count);
+                }
+            }
+            Status::Processed
+        }
 
-    /*
-     *fn handle(aid: Arc<ActorId>, data: &mut Data, msg: Arc<Message>) -> Status {
-     *    dispatch(aid, data, msg.clone(), handle_op)
-     *        .or_else(|| dispatch(aid, data, msg.clone(), handle_i32))
-     *        .unwrap()
-     *}
-     */
+        fn handle_i32(&mut self, aid: Arc<ActorId>, msg: &i32) -> Status {
+            assert_eq!(2, aid.received());
+            assert_eq!(17 as i32, *msg);
+            self.count += *msg as usize;
+            assert_eq!(22 as usize, self.count);
+            Status::Processed
+        }
+
+        fn handle(&mut self, aid: Arc<ActorId>, msg: &Arc<Message>) -> Status {
+            dispatch(self, aid.clone(), msg.clone(), &StructActor::handle_op)
+                .or_else(|| dispatch(self, aid.clone(), msg.clone(), &StructActor::handle_i32))
+                .or_else(|| {
+                    dispatch(
+                        self,
+                        aid.clone(),
+                        msg.clone(),
+                        move |state: &mut StructActor, aid: Arc<ActorId>, msg: &u8| -> Status {
+                            assert_eq!(3, aid.received());
+                            assert_eq!(7 as u8, *msg);
+                            state.count += *msg as usize;
+                            assert_eq!(29 as usize, state.count);
+                            Status::Processed
+                        },
+                    )
+                })
+                .unwrap()
+        }
+    }
 
     #[test]
-    fn test_spawn_with_closure() {
+    fn test_spawn_with_struct() {
         let system = ActorSystem::create(10, 1);
-        let starting_state = Data { count: 0, value: 0 };
-        // Note we have to tediously define closure types because of a bug in rust compiler's
-        // type inferrence. They can be removed when that bug is fixed.
-        let aid = spawn(
-            system,
-            starting_state,
-            |state: &mut Data, _aid, msg: &Arc<dyn Any + Send + Sync + 'static>| {
-                match msg.downcast_ref::<Operation>() {
-                    Some(operation) => match operation {
-                        Operation::Inc => state.value += 1,
-                        Operation::Dec => state.value -= 1,
-                    },
-                    None => match msg.downcast_ref::<i32>() {
-                        Some(value) => state.value += value,
-                        None => (),
-                    },
-                }
-                state.count += 1;
+        let starting_state: StructActor = StructActor { count: 5 as usize };
 
-                println!("-------> Got a Message! State now: {:?}", state);
-                Status::Processed
-            },
-        );
+        let aid = spawn(system.clone(), starting_state, StructActor::handle);
+
         send(&aid, Arc::new(Operation::Inc));
-        println!("-------> Checking sent");
         assert_eq!(1, aid.sent());
-        //assert_eq!(0, aid.pending());
-        //assert_eq!(1, aid.received());
         send(&aid, Arc::new(Operation::Dec));
-        send(&aid, Arc::new(10 as i32));
+        assert_eq!(2, aid.sent());
+        send(&aid, Arc::new(17 as i32));
+        assert_eq!(3, aid.sent());
+        send(&aid, Arc::new(7 as u8));
+        assert_eq!(4, aid.sent());
 
-        // TODO Assert states after messages.
+        thread::sleep(Duration::from_millis(10));
+
+        assert_eq!(4, aid.received());
+        system.shutdown()
     }
+
 }
