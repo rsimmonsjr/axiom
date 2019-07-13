@@ -193,9 +193,9 @@ impl<T: Sync + Send> SeccSender<T> {
             (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
 
             // Once we complete the write we have to adjust the channel statistics.
-            self.core.sent.fetch_add(1, Ordering::Relaxed);
-            self.core.pending.fetch_add(1, Ordering::Release);
-            let old_receivable = self.core.receivable.fetch_add(1, Ordering::Relaxed);
+            self.core.sent.fetch_add(1, Ordering::AcqRel);
+            self.core.pending.fetch_add(1, Ordering::AcqRel);
+            let old_receivable = self.core.receivable.fetch_add(1, Ordering::AcqRel);
 
             // If we sent a new message into an channel that had no receivable messages previously
             // so we notify waiters that there is content to read.
@@ -204,6 +204,7 @@ impl<T: Sync + Send> SeccSender<T> {
                 let _guard = mutex.lock().unwrap();
                 condvar.notify_all();
             }
+            println!("Add: {}", old_receivable);
             return Ok(old_receivable + 1);
         }
     }
@@ -228,10 +229,12 @@ impl<T: Sync + Send> SeccSender<T> {
                         continue;
                     }
                     // nope, still no capacity, wait.
-                    self.core.awaited_capacity.fetch_add(1, Ordering::Relaxed);
+                    self.core.awaited_capacity.fetch_add(1, Ordering::AcqRel);
                     match timeout {
                         Some(dur) => {
-                            let _condvar_guard = condvar.wait_timeout(guard, dur).unwrap();
+                            if condvar.wait_timeout(guard, dur).unwrap().1.timed_out() {
+                                return Err(SeccErrors::Full(value));
+                            }
                         }
                         None => {
                             let _condvar_guard = condvar.wait(guard).unwrap();
@@ -354,9 +357,10 @@ impl<T: Sync + Send> SeccReceiver<T> {
             (*read_ptr).next.store(NIL_NODE, Ordering::Release);
 
             // Once we complete the write we have to adjust the channel statistics.
-            self.core.received.fetch_add(1, Ordering::Relaxed);
-            self.core.receivable.fetch_sub(1, Ordering::Release);
-            let old_pending = self.core.pending.fetch_sub(1, Ordering::Release);
+            self.core.received.fetch_add(1, Ordering::AcqRel);
+            let old_sub = self.core.receivable.fetch_sub(1, Ordering::AcqRel);
+            println!("Sub: {}", old_sub);
+            let old_pending = self.core.pending.fetch_sub(1, Ordering::AcqRel);
             // If we received a message from a full buffer notify any waiters.
             if old_pending == self.core.capacity {
                 let (ref mutex, ref condvar) = &*self.core.has_capacity;
@@ -386,7 +390,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                         continue;
                     }
                     // nope, still no messages, wait.
-                    self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
+                    self.core.awaited_messages.fetch_add(1, Ordering::AcqRel);
                     match timeout {
                         Some(dur) => {
                             if condvar.wait_timeout(guard, dur).unwrap().1.timed_out() {
@@ -857,7 +861,7 @@ mod tests {
 
     #[test]
     fn test_multiple_producer_single_receiver() {
-        let message_count = 1000;
+        let message_count = 100000;
         let capacity = 100;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
 
