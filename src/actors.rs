@@ -1,5 +1,5 @@
-///
-/// Implements actors and the actor system.
+//! Implements actors and the actor system.
+
 use secc;
 use secc::*;
 use std::any::Any;
@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 /// This is a type used by the system for sending a message through a channel to the actor.
 /// All messages are sent as this type and it is up to the message handler to cast the message
-/// properly and deal with it. It is recommended that the user make use of the [`dispatch`]
-/// utility function to help in the casting and calling operation.
+/// properly and deal with it. For help in creating an effective dispatching strategy see the
+/// test cases.
 pub type Message = dyn Any + Sync + Send;
 
 /// Status of the message resulting from processing a message with an actor.
@@ -41,7 +41,11 @@ pub enum Status {
     ResetSkip,
 }
 
-/// An enum that holds a sender for an actor. This is usually wrapped in an actor id.
+/// An enum that holds a sender for an actor. An [ActorId] uses the sender to send messages to
+/// the destination actor. Messages that are sent locally with [ActorSender::Local] are sent by
+/// reference, sharing the memory. Those that are sent to a remote node wit [ActorSender::Remote]
+/// are sent via serializing the message to the remote system which will then use an internal
+/// [ActorSender::Local] to forward the message to the proper actor.
 pub enum ActorSender {
     /// A Sender used for sending messages to local actors.
     Local(SeccSender<Arc<Message>>),
@@ -49,7 +53,23 @@ pub enum ActorSender {
     Remote, // FIXME (Issue #9) not implemented.
 }
 
-/// Encapsulates an ID to an actor.
+impl fmt::Debug for ActorSender {
+    fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
+        write!(
+            formatter,
+            "{}",
+            match *self {
+                ActorSender::Local(_) => "ActorSender::Local",
+                ActorSender::Remote => "ActorSender::Remote",
+            }
+        )
+    }
+}
+/// Encapsulates an ID to an actor. This is a unique reference to the actor within the entire
+/// cluster and can be used to send messages to the actor regardless of location. The [ActorId]
+/// does the heavy lifting of deciding where the actor is and sending the message. However it is
+/// important that the user of the [ActorId] at least has some notion of where the actor is for
+/// developing an efficient actor architecture.
 pub struct ActorId {
     /// The unique id for this actor on this node.
     id: Uuid,
@@ -62,7 +82,8 @@ pub struct ActorId {
 }
 
 impl ActorId {
-    /// Returns the total number of messages that have been sent to the actor.
+    /// Returns the total number of messages that have been sent to the actor regardless of
+    /// whether or not they have been received or processed by the actor.
     pub fn sent(&self) -> usize {
         match &self.sender {
             ActorSender::Local(sender) => sender.sent(),
@@ -70,7 +91,9 @@ impl ActorId {
         }
     }
 
-    /// Returns the total number of messages that have been recieived and processed by the actor.
+    /// Returns the total number of messages that have been recieived by the actor. Note that
+    /// this doesn't mean that the actor did anything with the message, just that it was received
+    /// and handled.
     pub fn received(&self) -> usize {
         match &self.sender {
             ActorSender::Local(sender) => sender.received(),
@@ -78,7 +101,18 @@ impl ActorId {
         }
     }
 
-    /// Returns the total number of messages that are pending to be received by the actor.
+    /// Returns the number of messages that are receivable by the actor. This will not include
+    /// any messages that have been skipped until the skip is reset.
+    pub fn receivable(&self) -> usize {
+        match &self.sender {
+            ActorSender::Local(sender) => sender.receivable(),
+            _ => panic!("Only implemented for Local sender!"),
+        }
+    }
+
+    /// Returns the total number of messages that are pending to be received by the actor. This
+    /// should include messages that have been skipped by the actor as well as those that are
+    /// receivable.
     pub fn pending(&self) -> usize {
         match &self.sender {
             ActorSender::Local(sender) => sender.pending(),
@@ -91,9 +125,14 @@ impl fmt::Debug for ActorId {
     fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "ActorId{{ id: {}, node_id: {} }}",
+            "ActorId{{id: {}, node_id: {}, is_local: {}}}",
             self.id.to_string(),
-            self.node_id.to_string()
+            self.node_id.to_string(),
+            if let ActorSender::Local(_) = self.sender {
+                true
+            } else {
+                false
+            }
         )
     }
 }
@@ -115,11 +154,11 @@ impl Hash for ActorId {
 
 /// A type for a user function that processes messages for an actor. This will be passed to a
 /// spawn funtion to specify the handler used for managing the state of the actor based
-/// on the messages passed to the actor. The rewulting state passed will be used in the
+/// on the messages passed to the actor. The resulting state passed will be used in the
 /// next message call. The processor takes three arguments. First, the `state` is a mutable
 /// reference to the current state of the actor. Second, is the [`ActorId`] enclosed in
 /// an [`Arc`] to allow access to the actor system for spawning, sending to self and so on.
-/// Third is the current message to process in an [`Arc`].
+/// Third is the current message to process in a reference to an [`Arc`].
 pub trait Processor<State: Send + Sync>:
     (FnMut(&mut State, Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync
 {
@@ -133,9 +172,9 @@ where
 {
 }
 
-/// This is the type for the handler that will manage the state for the actor using
-/// the user-provided message processor.
-pub trait Handler: (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static {}
+/// This is the type for the handler that will manage the state for the actor using the
+/// user-provided message processor. This is an internal closure that wraps the mutable state.
+trait Handler: (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static {}
 
 impl<F> Handler for F where F: (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static
 {}
@@ -143,12 +182,12 @@ impl<F> Handler for F where F: (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + 
 /// An actual actor in the system. An actor is a worker that allows the asynchronous
 /// processing of messages. The actor will obey a certain set of rules, namely.
 /// 1. An actor can be interracted with only by means of messages.
-/// 2. An actor processes ONLY one message at a time.
+/// 2. An actor processes only one message at a time.
 /// 3. An actor will process a message only once.
-/// 4. An actor can send a message to any other actor without knowledge of that actor's internals
+/// 4. An actor can send a message to any other actor without knowledge of that actor's internals.
 /// 5. Actors send only immutable data as messages, though they may have mutable internal state.
 /// 6. Actors are location agnostic. An actor can be sent a message from anywhere in the cluster.
-pub struct Actor {
+struct Actor {
     /// Id of the associated actor.
     aid: Arc<ActorId>,
     /// Receiver for the actor channel.
@@ -199,25 +238,16 @@ impl Actor {
         Arc::new(actor)
     }
 
-    /// Returns the total number of messages that have been sent to this actor.
-    pub fn sent(&self) -> usize {
-        self.receiver.sent()
-    }
-
-    /// Returns the total number of messages that have been received by this actor.
-    pub fn received(&self) -> usize {
-        self.receiver.received()
-    }
-
-    /// Returns the total number of messages that are currently pending in the actor's channel.
-    pub fn pending(&self) -> usize {
-        self.receiver.pending()
-    }
-
-    /// Receive as message off the channel and processes it with the actor.
+    /// Receive a message from the channel and processes it with the actor. This function is the
+    /// core of the processing pipeline and what the thread pool will be calling to handle each
+    /// message.
     fn receive(&self) {
         match self.receiver.peek() {
             Result::Err(err) => {
+                // This happening should be very rare but it would mean that the thread pool
+                // tried to process a message for an actor and was beaten to it by another
+                // thread. In this case we will just ignore the error and write out a debug
+                // message for purposes of later optimization.
                 // TODO Log the error from the channel.
                 println!("Error Occurred {:?}", err); // TODO Log this
                 return;
@@ -232,16 +262,24 @@ impl Actor {
                 };
                 match queue_result {
                     Ok(_) => (),
-                    Err(e) => println!("Error Occurred {:?}", e), // TODO Log this
+                    Err(e) => {
+                        // This should be a completely rare circumstance. It would basically
+                        // mean that the actor's channel has been broken somehow. The error
+                        // should be logged and the actor killed.
+                        // TODO Log the error and kill the actor.
+                        println!("Error Occurred {:?}", e)
+                    }
                 };
             }
         }
     }
 }
 
-/// An actor system that contains and manages the actors spawned inside it. The actor system
-/// embodies principally two main components, a AID table that maps [ActorId]s to the actors
-/// and a run channel that the actors are sent to when they have pending messages.
+/// An actor system that contains and manages the actors spawned inside it. Note that the actors
+/// live inside the system and are managed by the actor system throughout their lives. Although
+/// it would be very unusual to have two actor systems on the same hardware and OS process, it
+/// would be possible. Nevertheless, each actor stystem has a unique node id that can be used
+/// by other actor systems to connect and send messages.
 pub struct ActorSystem {
     /// Id for this actor system and node.
     pub node_id: Uuid,
@@ -270,6 +308,7 @@ impl ActorSystem {
     /// The user should benchmark how many slots in the run channel and the number of threads
     /// they need in order to satisfy the requirements of the system they are creating.
     pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
+        // TODO Instead of two params we should pass a config struct.
         // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) = secc::create_with_arcs::<Arc<Actor>>(run_channel_size);
 
@@ -285,7 +324,8 @@ impl ActorSystem {
         });
 
         // We have the thread pool in a mutex to avoid a chicken - egg situation with the actor
-        // system not being created but needed by the thread.
+        // system not being created but needed by the thread. We put this in a block to get around
+        // rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.thread_pool.lock().unwrap();
 
@@ -299,8 +339,19 @@ impl ActorSystem {
         system
     }
 
-    /// Starts a thread for the dispatcher that will process actor messages.
+    /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
+    /// threads constantly grab at the work channel trying to get the next actor off the channel.
+    /// When they get an actor they will process the message using the actor and then check to
+    /// see if the actor has more receivable messages. If it does then the actor will be re-sent
+    /// to the work channel to process the next message. This process allows thousands of actors
+    /// to run and not take up resources if they have no messages to process but also prevents
+    /// one super busy actor from starving out actors of that get messages only occasionally.
     fn start_dispatcher_thread(system: Arc<ActorSystem>) -> JoinHandle<()> {
+        // FIXME Optimize this so that the actor system can be configured to process x messages
+        // at once without yelding.
+        // FIXME Add metrics to this to log warnings if the messages take to long to process.
+        // FIXME Add metrics to this to log a warning if messages or actors are spending too
+        // long in the channel.
         let sender = system.sender.clone();
         let receiver = system.receiver.clone();
 
@@ -312,8 +363,6 @@ impl ActorSystem {
                         // FIXME (Issue #5) Actor panic shouldnt take down the whole code
                         actor.receive();
                         if actor.receiver.receivable() > 0 {
-                            // if there are additional messages pending in the actor,
-                            // re-enqueue the message at the back of the queue.
                             sender.send_await(actor).unwrap();
                         }
                     }
@@ -322,7 +371,9 @@ impl ActorSystem {
         })
     }
 
-    /// Triggers a shutdown of the system and returns only when all threads have joined.
+    /// Triggers a shutdown of the system and returns only when all threads have joined. This
+    /// allows a graceful shutdown of the actor system but any messages pending in actor channels
+    /// will get discarded.
     pub fn shutdown(&self) {
         self.shutdown_triggered.store(true, Ordering::Relaxed);
         let mut guard = self.thread_pool.lock().unwrap();
@@ -332,12 +383,12 @@ impl ActorSystem {
         }
     }
 
-    /// Returns the total number of times actors have been sent to work channels.
+    /// Returns the total number of times actors have been sent to the work channel.
     pub fn sent(&self) -> usize {
         self.receiver.sent()
     }
 
-    /// Returns the total number of times actors have been processed from the work channels.
+    /// Returns the total number of times actors have been processed from the work channel.
     pub fn received(&self) -> usize {
         self.receiver.received()
     }
@@ -347,7 +398,11 @@ impl ActorSystem {
         self.receiver.pending()
     }
 
-    /// Schedules the `actor_id` for work on the given actor system.
+    /// Schedules the `actor_id` for work on the given actor system. Note that this is the only
+    /// time that we have to use the lookup table. It gets called when an actor goes from 0
+    /// receivable messages to 1 receivable messages. If the actor has more receivable messages
+    /// then this will not be needed to be called because the dispatcher threads will handle the
+    /// process of resending the actor to the work channel.
     fn schedule(aid: Arc<ActorId>) {
         // Note that this is implemented here rather than calling the sender directly
         // from the send in order :to allow internal optimization of the actor system.
@@ -359,7 +414,22 @@ impl ActorSystem {
 }
 
 /// Spawns a new actor on the actor `system` using the given `starting_state` for the actor and
-/// the given `processor` function that will be used to process actor messages.
+/// the given `processor` function that will be used to process actor messages. The returned
+/// [ActorId] can be used to send messages to the actor.
+///
+/// # Examples
+/// ```
+/// use actron::actors::*;
+/// use std::sync::Arc;
+///
+/// let system = ActorSystem::create(10, 1);
+///
+/// let aid = spawn(
+///     system.clone(),
+///     0 as usize,
+///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+/// );
+/// ```
 pub fn spawn<F, State>(system: Arc<ActorSystem>, state: State, processor: F) -> Arc<ActorId>
 where
     State: Send + Sync + 'static,
@@ -372,7 +442,25 @@ where
     aid
 }
 
-/// Sends the `message` to the actor identified by the `aid` passed.
+/// Sends the `message` to the actor identified by the `aid` passed. This is an entirely
+/// asynchronous process. To get a reply from another actor, the sending actor would have to
+/// wait for another actor to send it a message.
+///
+/// # Examples
+/// ```
+/// use actron::actors::*;
+/// use std::sync::Arc;
+///
+/// let system = ActorSystem::create(10, 1);
+///
+/// let aid = spawn(
+///     system.clone(),
+///     0 as usize,
+///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+///  );
+///
+/// send(&aid, Arc::new(11));
+/// ```
 pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) {
     match &aid.sender {
         ActorSender::Local(sender) => {
@@ -386,47 +474,95 @@ pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) {
     }
 }
 
-/// Attempts to downcast the Arc<Message> to the specific arc type of the handler and then call
-/// that handler with the message. If the dispatch is successful it will return the result of the
-/// call to the caller, otherwise it will return None back to the caller.
-pub fn dispatch<T: 'static, S>(
-    state: &mut S,
-    aid: Arc<ActorId>,
-    message: Arc<Message>,
-    mut func: impl FnMut(&mut S, Arc<ActorId>, &T) -> Status,
-) -> Option<Status> {
-    match message.downcast_ref::<T>() {
-        Some(x) => Some(func(state, aid.clone(), x)),
-        None => None,
-    }
-}
-
 // --------------------- Test Cases ---------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A utility helper to assert that a certain number of messages arrived in a certain time.
+    fn assert_await_received(aid: &Arc<ActorId>, count: u8, timeout_ms: u64) {
+        use std::time::Instant;
+        let start = Instant::now();
+        let duration = Duration::from_millis(timeout_ms);
+        while aid.received() < count as usize {
+            if Instant::elapsed(&start) > duration {
+                assert!(
+                    false,
+                    "Timed out! count: {} timeout_ms: {}",
+                    count, timeout_ms
+                )
+            }
+        }
+    }
+
     #[test]
-    fn test_spawn_with_closure() {
+    fn test_simplest_actor() {
+        // Create the Actor system and starting state.
+        let system = ActorSystem::create(10, 1);
+
+        // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
+        // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
+        // but when that bug goes away this will be even simpler.
+        let aid = spawn(
+            system.clone(),
+            0 as usize,
+            |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+        );
+
+        // Send a message to the actor.
+        send(&aid, Arc::new(11));
+
+        // Wait for the message to get there because test is asynch.
+        assert_await_received(&aid, 1, 10);
+        system.shutdown()
+    }
+
+    #[test]
+    fn test_simplest_struct_actor() {
+        // Create the Actor system and starting state.
+        let system = ActorSystem::create(10, 1);
+
+        // We create a basic struct that has a handle method that does basically nothing
+        // and then we will create that struct when we spawn the actor and that is all.
+        struct Data {}
+
+        impl Data {
+            fn handle(&mut self, _aid: Arc<ActorId>, _msg: &Arc<Message>) -> Status {
+                Status::Processed
+            }
+        }
+
+        let aid = spawn(system.clone(), Data {}, Data::handle);
+
+        // Send a message to the actor.
+        send(&aid, Arc::new(11));
+
+        // Wait for the message to get there because test is asynch.
+        assert_await_received(&aid, 1, 10);
+        system.shutdown()
+    }
+
+    #[test]
+    fn test_dispatching_with_closure() {
         let system = ActorSystem::create(10, 1);
         let starting_state: usize = 0 as usize;
         // Note we have to tediously define closure types because of a bug in rust compiler's
         // type inferrence. They can be removed when that bug is fixed.
-        let closure = |message_count: &mut usize, aid: Arc<ActorId>, msg: &Arc<Message>| {
+        let closure = |message_count: &mut usize, aid: Arc<ActorId>, message: &Arc<Message>| {
             // Expected messages in the expected order.
             let expected: Vec<i32> = vec![11, 13, 17];
             // Attempt to downcast to expected message.
-            match msg.downcast_ref::<i32>() {
-                Some(value) => {
-                    assert_eq!(expected[*message_count], *value);
-                    assert_eq!(*message_count, aid.received());
-                    *message_count += 1;
-                    assert_eq!(aid.pending(), aid.sent() - aid.received());
-                }
-                None => assert!(false, "Unknown message type received."),
+            if let Some(msg) = message.downcast_ref::<i32>() {
+                assert_eq!(expected[*message_count], *msg);
+                assert_eq!(*message_count, aid.received());
+                *message_count += 1;
+                assert_eq!(aid.pending(), aid.sent() - aid.received());
+                Status::Processed
+            } else {
+                assert!(false, "Failed to dispatch properly");
+                Status::Processed // assertion will fail but we still have to return.
             }
-            Status::Processed
         };
 
         let aid = spawn(system.clone(), starting_state, closure);
@@ -443,11 +579,50 @@ mod tests {
 
         thread::sleep(Duration::from_millis(10));
 
-        assert_eq!(3, aid.received());
+        assert_await_received(&aid, 3, 10);
         system.shutdown()
     }
 
-    // ---------- Test an actor made from a Struct
+    #[test]
+    fn test_if_let_dispatch() {
+        let system = ActorSystem::create(10, 1);
+
+        // Creates and tests an actor that uses `if let` syntax to handle message dispatching. In
+        // a real implementation a user could call type specific functions inside the handler
+        // to make the actor ergonomics feel better. There still is a bit of boilerplate code
+        // but this is unavoidable due to Rust downcasting.
+        let aid = spawn(
+            system.clone(),
+            0 as usize,
+            |message_count: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| {
+                if let Some(_msg) = message.downcast_ref::<i32>() {
+                    assert_eq!(0 as usize, *message_count);
+                    *message_count += 1;
+                    Status::Processed
+                } else if let Some(_m) = message.downcast_ref::<i8>() {
+                    assert_eq!(1 as usize, *message_count);
+                    *message_count += 1;
+                    Status::Processed
+                } else if let Some(_m) = message.downcast_ref::<u8>() {
+                    assert_eq!(2 as usize, *message_count);
+                    *message_count += 1;
+                    Status::Processed
+                } else {
+                    assert!(false, "Failed to dispatch properly");
+                    Status::Processed // assertion will fail but we still have to return.
+                }
+            },
+        );
+
+        // Send a message to the actor.
+        send(&aid, Arc::new(11 as i32));
+        send(&aid, Arc::new(11 as i8));
+        send(&aid, Arc::new(11 as u8));
+
+        // Wait for the message to get there because test is asynch.
+        assert_await_received(&aid, 3, 10);
+        system.shutdown()
+    }
 
     #[derive(Debug)]
     enum Operation {
@@ -485,29 +660,26 @@ mod tests {
             Status::Processed
         }
 
-        fn handle(&mut self, aid: Arc<ActorId>, msg: &Arc<Message>) -> Status {
-            dispatch(self, aid.clone(), msg.clone(), &StructActor::handle_op)
-                .or_else(|| dispatch(self, aid.clone(), msg.clone(), &StructActor::handle_i32))
-                .or_else(|| {
-                    dispatch(
-                        self,
-                        aid.clone(),
-                        msg.clone(),
-                        move |state: &mut StructActor, aid: Arc<ActorId>, msg: &u8| -> Status {
-                            assert_eq!(3, aid.received());
-                            assert_eq!(7 as u8, *msg);
-                            state.count += *msg as usize;
-                            assert_eq!(29 as usize, state.count);
-                            Status::Processed
-                        },
-                    )
-                })
-                .unwrap()
+        fn handle(&mut self, aid: Arc<ActorId>, message: &Arc<Message>) -> Status {
+            if let Some(msg) = message.downcast_ref::<i32>() {
+                self.handle_i32(aid, msg)
+            } else if let Some(msg) = message.downcast_ref::<Operation>() {
+                self.handle_op(aid, msg)
+            } else if let Some(msg) = message.downcast_ref::<u8>() {
+                assert_eq!(3, aid.received());
+                assert_eq!(7 as u8, *msg);
+                self.count += *msg as usize;
+                assert_eq!(29 as usize, self.count);
+                Status::Processed
+            } else {
+                assert!(false, "Failed to dispatch properly");
+                Status::Processed // assertion will fail but we still have to return.
+            }
         }
     }
 
     #[test]
-    fn test_spawn_with_struct() {
+    fn test_composite_dispatch() {
         let system = ActorSystem::create(10, 1);
         let starting_state: StructActor = StructActor { count: 5 as usize };
 
@@ -524,7 +696,7 @@ mod tests {
 
         thread::sleep(Duration::from_millis(10));
 
-        assert_eq!(4, aid.received());
+        assert_await_received(&aid, 4, 10);
         system.shutdown()
     }
 

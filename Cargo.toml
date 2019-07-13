@@ -1,11 +1,26 @@
 [package]
-name = "rlib_actors"
-version = "0.1.0"
-authors = ["Robert Simmons <kraythe@gmail.com>"]
+name = "actron"
+version = "0.0.1"
+authors = ["Robert Simmons Jr. MSc."]
 publish = false
+keywords = ["Actor", "Actor Model", "Concurrency"]
+license = "Apache-2.0"
+homepage = "https://github.com/rsimmonsjr/ramp"
+repository = "https://github.com/rsimmonsjr/ramp"
+exclude = [
+    "/.git",
+    "/.github",
+    "/.travis.yml",
+]
+
+[badges.is-it-maintained-issue-resolution]
+repository = "rsimmonsjr/ramp"
+
+[badges.is-it-maintained-open-issues]
+repository = "rsimmonsjr/ramp"
 
 [dependencies]
-uuid = "0.7.1"
+uuid = "0.7.4"
 
 [features]
 default = ["uuid/v4"]
