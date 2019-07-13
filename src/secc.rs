@@ -374,6 +374,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary.
+    /// FIXME create specific tests for this.
     pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, SeccErrors<T>> {
         loop {
             match self.receive() {
@@ -388,7 +389,9 @@ impl<T: Sync + Send> SeccReceiver<T> {
                     self.core.awaited_messages.fetch_add(1, Ordering::Relaxed);
                     match timeout {
                         Some(dur) => {
-                            let _condvar_guard = condvar.wait_timeout(guard, dur).unwrap();
+                            if condvar.wait_timeout(guard, dur).unwrap().1.timed_out() {
+                                return Err(SeccErrors::Empty);
+                            }
                         }
                         None => {
                             let _condvar_guard = condvar.wait(guard).unwrap();
@@ -634,9 +637,8 @@ mod tests {
         F,
     }
 
-    /// Tests the basics of the queue.
     #[test]
-    fn test_queue_dequeue() {
+    fn test_send_and_receive() {
         let channel = create::<Items>(5);
         let (sender, receiver) = channel;
 
