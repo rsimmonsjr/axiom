@@ -57,7 +57,7 @@ struct SeccNode<T: Sync + Send> {
     cell: UnsafeCell<Option<T>>,
     /// The pointer to the next node in the channel.
     next: AtomicUsize,
-    // FIXME Add tracking of time in channel by milliseconds.
+    // FIXME (Issue #12) Add tracking of time in channel by milliseconds.
 }
 
 impl<T: Sync + Send> SeccNode<T> {
@@ -374,7 +374,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary.
-    /// FIXME create specific tests for this.
+    /// FIXME (Issue #8) create specific tests for this.
     pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, SeccErrors<T>> {
         loop {
             match self.receive() {
@@ -414,8 +414,6 @@ impl<T: Sync + Send> SeccReceiver<T> {
     /// to_end then the skip mechanism will skip to the end of the channel inside a single
     /// lock. This function returns the total number of receivable messages or an error.
     fn skip_helper(&self, to_end: bool) -> Result<usize, SeccErrors<T>> {
-        // FIXME Need tests!
-        // FIXME Track Metrics.
         unsafe {
             let mut count = 0; // count the number skipped in this call
                                // Retrieve receive pointers and the encoded indexes inside them.
@@ -470,15 +468,12 @@ impl<T: Sync + Send> SeccReceiver<T> {
     /// to get to the end before new data is sent to the channel so the user should be aware that
     /// the channel may not completely be at the end of the channel.
     pub fn skip_to_end(&self) -> Result<usize, SeccErrors<T>> {
-        // FIXME Need tests!
         self.skip_helper(true)
     }
 
     /// Cancels skipping messages in the channel and resets the pointers of the channel back to
     /// the head returning the current number of messages receivable in the channel.
     pub fn reset_skip(&self) -> Result<usize, SeccErrors<T>> {
-        // FIXME Need tests!
-        // FIXME Track Metrics.
         // Retrieve receive pointers and the encoded indexes inside them.
         let mut receive_ptrs = self.queue_head_pool_tail_precursor_cursor.lock().unwrap();
         let (queue_head, pool_tail, _precursor, cursor) = *receive_ptrs;

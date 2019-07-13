@@ -46,7 +46,7 @@ pub enum ActorSender {
     /// A Sender used for sending messages to local actors.
     Local(SeccSender<Arc<Message>>),
     /// The remote sender.
-    Remote, // FIXME not implemented.
+    Remote, // FIXME (Issue #9) not implemented.
 }
 
 /// Encapsulates an ID to an actor.
@@ -309,12 +309,11 @@ impl ActorSystem {
                 match receiver.receive_await_timeout(system.thread_wait_time) {
                     Err(_) => (),
                     Ok(actor) => {
-                        // FIXME Actor panic shouldnt take down the whole code
+                        // FIXME (Issue #5) Actor panic shouldnt take down the whole code
                         actor.receive();
                         if actor.receiver.receivable() > 0 {
                             // if there are additional messages pending in the actor,
                             // re-enqueue the message at the back of the queue.
-                            // FIXME This will panic, make it handle errors more elegantly.
                             sender.send_await(actor).unwrap();
                         }
                     }
@@ -351,10 +350,10 @@ impl ActorSystem {
     /// Schedules the `actor_id` for work on the given actor system.
     fn schedule(aid: Arc<ActorId>) {
         // Note that this is implemented here rather than calling the sender directly
-        // from the send in order :qto allow internal optimization of the actor system.
-        // FIXME Harden this against the actor being out of the map.
+        // from the send in order :to allow internal optimization of the actor system.
+        // FIXME (Issue #10) Harden this against the actor being out of the map.
         let guard = aid.system.actors_by_aid.read().unwrap();
-        // FIXME if the actor is not able to schedule, this will panic.
+        // FIXME (Issue #11) if the actor is not able to schedule, this will panic.
         (aid.system.sender.send(guard.get(&aid).unwrap().clone())).unwrap();
     }
 }
