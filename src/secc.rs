@@ -204,7 +204,7 @@ impl<T: Sync + Send> SeccSender<T> {
                 let _guard = mutex.lock().unwrap();
                 condvar.notify_all();
             }
-            println!("Add: {}", old_receivable);
+            print!("S:{}, ", old_receivable);
             return Ok(old_receivable + 1);
         }
     }
@@ -359,7 +359,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
             // Once we complete the write we have to adjust the channel statistics.
             self.core.received.fetch_add(1, Ordering::AcqRel);
             let old_sub = self.core.receivable.fetch_sub(1, Ordering::AcqRel);
-            println!("Sub: {}", old_sub);
+            print!("R:{}, ", old_sub);
             let old_pending = self.core.pending.fetch_sub(1, Ordering::AcqRel);
             // If we received a message from a full buffer notify any waiters.
             if old_pending == self.core.capacity {
@@ -864,12 +864,13 @@ mod tests {
         let message_count = 100000;
         let capacity = 100;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
+        let timeout = Some(Duration::from_millis(200));
 
         let receiver1 = receiver.clone();
         let rx = thread::spawn(move || {
             let mut count = 0;
             while count < message_count {
-                match receiver1.receive_await() {
+                match receiver1.receive_await_timeout(timeout) {
                     Ok(_) => count += 1,
                     _ => (),
                 };
@@ -879,7 +880,7 @@ mod tests {
         let sender1 = sender.clone();
         let tx = thread::spawn(move || {
             for i in 0..(message_count / 3) {
-                match sender1.send_await(i) {
+                match sender1.send_await_timeout(i, timeout) {
                     Ok(_c) => (),
                     Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                 }
@@ -889,7 +890,7 @@ mod tests {
         let sender2 = sender.clone();
         let tx2 = thread::spawn(move || {
             for i in (message_count / 3)..((message_count / 3) * 2) {
-                match sender2.send_await(i) {
+                match sender2.send_await_timeout(i, timeout) {
                     Ok(_c) => (),
                     Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                 }
@@ -899,7 +900,7 @@ mod tests {
         let sender3 = sender.clone();
         let tx3 = thread::spawn(move || {
             for i in ((message_count / 3) * 2)..(message_count) {
-                match sender3.send_await(i) {
+                match sender3.send_await_timeout(i, timeout) {
                     Ok(_c) => (),
                     Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                 }
