@@ -181,6 +181,7 @@ impl<T: Sync + Send> SeccSender<T> {
                 return Err(SeccErrors::Full(value));
             }
 
+            // If we received a message from a full buffer notify any waiters.
             // Pool head moves to become the queue tail or else loop and try again!
             *send_ptrs = (pool_head, next_pool_head);
             let queue_tail_ptr = (*self.core().node_ptrs.get())[queue_tail];
@@ -192,10 +193,10 @@ impl<T: Sync + Send> SeccSender<T> {
             (*pool_head_ptr).next.store(NIL_NODE, Ordering::Release);
             (*queue_tail_ptr).next.store(pool_head, Ordering::Release);
 
-            // Once we complete the write we have to adjust the channel statistics.
+            // adjust metrics
             self.core.sent.fetch_add(1, Ordering::AcqRel);
-            self.core.pending.fetch_add(1, Ordering::AcqRel);
             let old_receivable = self.core.receivable.fetch_add(1, Ordering::AcqRel);
+            self.core.pending.fetch_add(1, Ordering::AcqRel);
 
             // If we sent a new message into an channel that had no receivable messages previously
             // so we notify waiters that there is content to read.
@@ -204,8 +205,8 @@ impl<T: Sync + Send> SeccSender<T> {
                 let _guard = mutex.lock().unwrap();
                 condvar.notify_all();
             }
-            print!("S:{}, ", old_receivable);
-            return Ok(old_receivable + 1);
+            // Note that we have to fetch the atomic again before sending it to caller!
+            return Ok(self.core.receivable.load(Ordering::Relaxed));
         }
     }
 
@@ -224,7 +225,7 @@ impl<T: Sync + Send> SeccSender<T> {
                     value = v;
                     let (ref mutex, ref condvar) = &*self.core.has_capacity;
                     let guard = mutex.lock().unwrap();
-                    if self.core.receivable.load(Ordering::Acquire) < self.core.capacity {
+                    if self.core.receivable.load(Ordering::Relaxed) < self.core.capacity {
                         // race occurred, there is space to send now, loop and try again.
                         continue;
                     }
@@ -356,11 +357,10 @@ impl<T: Sync + Send> SeccReceiver<T> {
             }
             (*read_ptr).next.store(NIL_NODE, Ordering::Release);
 
-            // Once we complete the write we have to adjust the channel statistics.
             self.core.received.fetch_add(1, Ordering::AcqRel);
-            let old_sub = self.core.receivable.fetch_sub(1, Ordering::AcqRel);
-            print!("R:{}, ", old_sub);
+            self.core.receivable.fetch_sub(1, Ordering::AcqRel);
             let old_pending = self.core.pending.fetch_sub(1, Ordering::AcqRel);
+
             // If we received a message from a full buffer notify any waiters.
             if old_pending == self.core.capacity {
                 let (ref mutex, ref condvar) = &*self.core.has_capacity;
@@ -385,7 +385,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 Err(SeccErrors::Empty) => {
                     let (ref mutex, ref condvar) = &*self.core.has_messages;
                     let guard = mutex.lock().unwrap();
-                    if self.core.receivable.load(Ordering::Acquire) > 0 {
+                    if self.core.receivable.load(Ordering::Relaxed) > 0 {
                         // there was some race and now data is available so we just loop and try again.
                         continue;
                     }
@@ -437,7 +437,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                     if count == 0 {
                         return Err(SeccErrors::Empty);
                     } else {
-                        return Ok(self.core.receivable.load(Ordering::Relaxed));
+                        return Ok(self.core.receivable.load(Ordering::AcqRel));
                     }
                 }
                 if cursor == NIL_NODE {
@@ -447,10 +447,10 @@ impl<T: Sync + Send> SeccReceiver<T> {
                     // There is a cursor already so make sure we increment cursor and precursor.
                     *receive_ptrs = (queue_head, pool_tail, cursor, next_read_pos);
                 }
-                let old_receivable = self.core.receivable.fetch_sub(1, Ordering::Relaxed);
+                let old_receivable = self.core.receivable.fetch_sub(1, Ordering::AcqRel);
                 count += 1;
                 if !to_end {
-                    return Ok(old_receivable + 1);
+                    return Ok(old_receivable - 1);
                 }
                 // otherwise we will loop around
             }
@@ -860,11 +860,90 @@ mod tests {
     }
 
     #[test]
+    fn test_receive_before_send() {
+        let (sender, receiver) = create_with_arcs::<u32>(5);
+        let timeout = Some(Duration::from_millis(2000));
+        let receiver2 = receiver.clone();
+        let rx = thread::spawn(move || {
+            match receiver2.receive_await_timeout(timeout) {
+                Ok(_) => assert!(true),
+                e => assert!(false, "Error {:?} when receive.", e),
+            };
+        });
+        let tx = thread::spawn(move || {
+            match sender.send(1 as u32) {
+                Ok(_) => assert!(true),
+                e => assert!(false, "Error {:?} when receive.", e),
+            };
+        });
+
+        tx.join().unwrap();
+        rx.join().unwrap();
+
+        assert_eq!(1, receiver.sent());
+        assert_eq!(1, receiver.received());
+        assert_eq!(0, receiver.pending());
+        assert_eq!(0, receiver.receivable());
+    }
+
+    #[test]
+    fn test_receive_concurrent_send() {
+        // Attempts to trigger send and receive as close to at the same time as possible in
+        // order to try to test potential races.
+        let (sender, receiver) = create_with_arcs::<u32>(5);
+        let timeout = Some(Duration::from_millis(2000));
+        let receiver2 = receiver.clone();
+        let pair = Arc::new((Mutex::new((false, false)), Condvar::new()));
+        let rx_pair = pair.clone();
+        let tx_pair = pair.clone();
+
+        let rx = thread::spawn(move || {
+            let mut guard = rx_pair.0.lock().unwrap();
+            guard.0 = true;
+            let c_guard = rx_pair.1.wait(guard).unwrap();
+            drop(c_guard);
+            match receiver2.receive_await_timeout(timeout) {
+                Ok(_) => assert!(true),
+                e => assert!(false, "Error {:?} when receive.", e),
+            };
+        });
+        let tx = thread::spawn(move || {
+            let mut guard = tx_pair.0.lock().unwrap();
+            guard.1 = true;
+            let c_guard = tx_pair.1.wait(guard).unwrap();
+            drop(c_guard);
+            match sender.send(1 as u32) {
+                Ok(_) => assert!(true),
+                e => assert!(false, "Error {:?} when receive.", e),
+            };
+        });
+
+        loop {
+            let guard = pair.0.lock().unwrap();
+            if guard.0 && guard.1 {
+                break;
+            }
+        }
+
+        let guard = pair.0.lock().unwrap();
+        pair.1.notify_all();
+        drop(guard);
+
+        tx.join().unwrap();
+        rx.join().unwrap();
+
+        assert_eq!(1, receiver.sent());
+        assert_eq!(1, receiver.received());
+        assert_eq!(0, receiver.pending());
+        assert_eq!(0, receiver.receivable());
+    }
+
+    #[test]
     fn test_multiple_producer_single_receiver() {
         let message_count = 100000;
         let capacity = 100;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
-        let timeout = Some(Duration::from_millis(200));
+        let timeout = Some(Duration::from_millis(2000));
 
         let receiver1 = receiver.clone();
         let rx = thread::spawn(move || {

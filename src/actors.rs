@@ -514,7 +514,7 @@ mod tests {
         send(&aid, Arc::new(11));
 
         // Wait for the message to get there because test is asynch.
-        assert_await_received(&aid, 1, 10);
+        assert_await_received(&aid, 1, 1000);
         system.shutdown()
     }
 
@@ -539,7 +539,7 @@ mod tests {
         send(&aid, Arc::new(11));
 
         // Wait for the message to get there because test is asynch.
-        assert_await_received(&aid, 1, 10);
+        assert_await_received(&aid, 1, 1000);
         system.shutdown()
     }
 
@@ -579,7 +579,7 @@ mod tests {
 
         thread::sleep(Duration::from_millis(10));
 
-        assert_await_received(&aid, 3, 10);
+        assert_await_received(&aid, 3, 1000);
         system.shutdown()
     }
 
@@ -620,7 +620,7 @@ mod tests {
         send(&aid, Arc::new(11 as u8));
 
         // Wait for the message to get there because test is asynch.
-        assert_await_received(&aid, 3, 10);
+        assert_await_received(&aid, 3, 1000);
         system.shutdown()
     }
 
