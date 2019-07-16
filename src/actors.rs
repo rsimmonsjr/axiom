@@ -122,14 +122,14 @@ impl ActorId {
     ///
     /// let system = ActorSystem::create(10, 1);
     ///
-    /// let aid = system.spawn(
+    /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
     ///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
     ///  );
     ///
-    /// aid.clone().send(Arc::new(11));
+    /// ActorId::send(&aid, Arc::new(11));
     /// ```
-    pub fn send(aid: Arc<ActorId>, message: Arc<Message>) -> Result<(), ActorError> {
+    pub fn send(aid: &Arc<ActorId>, message: Arc<Message>) -> Result<(), ActorError> {
         if aid.is_stopped.load(Ordering::Relaxed) {
             Err(ActorError::ActorStopped)
         } else {
@@ -496,18 +496,18 @@ impl ActorSystem {
     ///
     /// let system = ActorSystem::create(10, 1);
     ///
-    /// let aid = system.spawn(
+    /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
     ///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
     /// );
     /// ```
-    fn spawn<F, State>(self: Arc<Self>, state: State, processor: F) -> Arc<ActorId>
+    fn spawn<F, State>(system: &Arc<Self>, state: State, processor: F) -> Arc<ActorId>
     where
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        let mut guard = self.actors_by_aid.write().unwrap();
-        let actor = Actor::new(self.clone(), self.node_id, state, processor);
+        let mut guard = system.actors_by_aid.write().unwrap();
+        let actor = Actor::new(system.clone(), system.node_id, state, processor);
         let aid = actor.aid.clone();
         guard.insert(aid.clone(), actor);
         aid
@@ -568,13 +568,14 @@ mod tests {
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
-        let aid = system.clone().spawn(
+        let aid = ActorSystem::spawn(
+            &system,
             0 as usize,
             |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
         );
 
         // Send a message to the actor.
-        aid.clone().send(Arc::new(11)).unwrap();
+        ActorId::send(&aid, Arc::new(11));
 
         // Wait for the message to get there because test is asynch.
         assert_await_received(&aid, 1, 1000);
@@ -596,10 +597,10 @@ mod tests {
             }
         }
 
-        let aid = system.clone().spawn(Data {}, Data::handle);
+        let aid = ActorSystem::spawn(&system, Data {}, Data::handle);
 
         // Send a message to the actor.
-        aid.clone().send(Arc::new(11))?;
+        ActorId::send(&aid, Arc::new(11))?;
         ActorId::send(aid.clone(), Arc::new(11))?;
 
         // Wait for the message to get there because test is asynch.
@@ -629,16 +630,16 @@ mod tests {
             }
         };
 
-        let aid = system.clone().spawn(starting_state, closure);
+        let aid = ActorSystem::spawn(&system, starting_state, closure);
 
         // We will send three messages and we have to wait on pending in order to make sure the
         // test doesn't race the actor system.
 
-        aid.clone().send(Arc::new(11 as i32));
+        ActorId::send(&aid, Arc::new(11 as i32));
         assert_eq!(1, aid.sent());
-        aid.clone().send(Arc::new(13 as i32));
+        ActorId::send(&aid, Arc::new(13 as i32));
         assert_eq!(2, aid.sent());
-        aid.clone().send(Arc::new(17 as i32));
+        ActorId::send(&aid, Arc::new(17 as i32));
         assert_eq!(3, aid.sent());
 
         thread::sleep(Duration::from_millis(10));
@@ -655,7 +656,8 @@ mod tests {
         // a real implementation a user could call type specific functions inside the handler
         // to make the actor ergonomics feel better. There still is a bit of boilerplate code
         // but this is unavoidable due to Rust downcasting.
-        let aid = system.clone().spawn(
+        let aid = ActorSystem::spawn(
+            &system,
             0 as usize,
             |message_count: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| {
                 if let Some(_msg) = message.downcast_ref::<i32>() {
@@ -678,9 +680,9 @@ mod tests {
         );
 
         // Send a message to the actor.
-        aid.clone().send(Arc::new(11 as i32));
-        aid.clone().send(Arc::new(11 as i8));
-        aid.clone().send(Arc::new(11 as u8));
+        ActorId::send(&aid, Arc::new(11 as i32));
+        ActorId::send(&aid, Arc::new(11 as i8));
+        ActorId::send(&aid, Arc::new(11 as u8));
 
         // Wait for the message to get there because test is asynch.
         assert_await_received(&aid, 3, 1000);
@@ -746,15 +748,15 @@ mod tests {
         let system = ActorSystem::create(10, 1);
         let starting_state: StructActor = StructActor { count: 5 as usize };
 
-        let aid = system.clone().spawn(starting_state, StructActor::handle);
+        let aid = ActorSystem::spawn(&system, starting_state, StructActor::handle);
 
-        aid.clone().send(Arc::new(Operation::Inc));
+        ActorId::send(&aid, Arc::new(Operation::Inc));
         assert_eq!(1, aid.sent());
-        aid.clone().send(Arc::new(Operation::Dec));
+        ActorId::send(&aid, Arc::new(Operation::Dec));
         assert_eq!(2, aid.sent());
-        aid.clone().send(Arc::new(17 as i32));
+        ActorId::send(&aid, Arc::new(17 as i32));
         assert_eq!(3, aid.sent());
-        aid.clone().send(Arc::new(7 as u8));
+        ActorId::send(&aid, Arc::new(7 as u8));
         assert_eq!(4, aid.sent());
 
         thread::sleep(Duration::from_millis(10));
