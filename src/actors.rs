@@ -52,8 +52,8 @@ pub enum SystemMsg {
     /// This is a message that instructs an actor to shut down. The actor receiving this message
     /// should shut down all open file handles and any other resources and return a [Status::Stop]
     /// as a result from the call. This is an attempt for the caller to shut down the actor
-    /// nicely rather than just calling [ActorSystem::kill].
-    Shutdown,
+    /// nicely rather than just calling [ActorSystem::stop].
+    Stop,
 }
 
 /// Errors returned from actors and other parts of the actor system.
@@ -124,7 +124,7 @@ impl ActorId {
     ///
     /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+    ///     |_state: &mut usize, _aid: Arc<ActorId>, _message: &Arc<Message>| Status::Processed,
     ///  );
     ///
     /// ActorId::send(&aid, Arc::new(11));
@@ -150,7 +150,7 @@ impl ActorId {
     ///
     /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+    ///     |_state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| Status::Processed,
     ///  );
     ///
     /// match ActorId::try_send(&aid, Arc::new(11)) {
@@ -212,6 +212,11 @@ impl ActorId {
             ActorSender::Local(sender) => sender.pending(),
             _ => panic!("Only implemented for Local sender!"),
         }
+    }
+
+    /// Checks to see if the actor referenced by this [ActorId] is actually stopped already.
+    pub fn is_stopped(&self) -> bool {
+        self.is_stopped.load(Ordering::AcqRel)
     }
 
     /// Marks the actor referenced by the [ActorId] as stopped and puts mechanisms in place to
@@ -384,7 +389,19 @@ impl Actor {
                             self.aid.system.stop(self.aid.clone())
                         }
                     },
-                    Status::Stop => self.aid.system.stop(self.aid.clone()),
+                    Status::Stop => {
+                        self.aid.system.stop(self.aid.clone());
+                        // Even though the actor is stopping we want to pop the message to make
+                        // sure that the metrics on the actor's channel are correct. Then we will
+                        // stop the actor in the actor system.
+                        match self.receiver.pop() {
+                            Ok(_) => (),
+                            Err(e) => {
+                                println!("Error on Work Channel pop(): {:?}.", e);
+                                self.aid.system.stop(self.aid.clone())
+                            }
+                        }
+                    }
                 };
             }
         }
@@ -527,7 +544,7 @@ impl ActorSystem {
     ///
     /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+    ///     |_state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| Status::Processed,
     /// );
     /// ```
     pub fn spawn<F, State>(system: &Arc<Self>, state: State, processor: F) -> Arc<ActorId>
@@ -565,6 +582,12 @@ impl ActorSystem {
         guard.remove(&aid);
         aid.stop();
     }
+
+    /// Checks to see if the actor with the given [ActorId] is alive within this actor system.
+    pub fn is_alive(&self, aid: &Arc<ActorId>) -> bool {
+        let guard = self.actors_by_aid.write().unwrap();
+        guard.contains_key(aid)
+    }
 }
 
 // --------------------- Test Cases ---------------------
@@ -573,7 +596,7 @@ impl ActorSystem {
 mod tests {
     use super::*;
 
-    /// A utility helper to assert that a certain number of messages arrived in a certain time.
+    /// A test helper to assert that a certain number of messages arrived in a certain time.
     fn assert_await_received(aid: &Arc<ActorId>, count: u8, timeout_ms: u64) {
         use std::time::Instant;
         let start = Instant::now();
@@ -601,7 +624,7 @@ mod tests {
         let aid = ActorSystem::spawn(
             &system,
             0 as usize,
-            |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
+            |_state: &mut usize, _aid: Arc<ActorId>, _message: &Arc<Message>| Status::Processed,
         );
 
         // Send a message to the actor.
@@ -623,7 +646,7 @@ mod tests {
         struct Data {}
 
         impl Data {
-            fn handle(&mut self, _aid: Arc<ActorId>, _msg: &Arc<Message>) -> Status {
+            fn handle(&mut self, _aid: Arc<ActorId>, _message: &Arc<Message>) -> Status {
                 Status::Processed
             }
         }
@@ -702,11 +725,11 @@ mod tests {
                     assert_eq!(0 as usize, *state);
                     *state += 1;
                     Status::Processed
-                } else if let Some(_m) = message.downcast_ref::<i8>() {
+                } else if let Some(_msg) = message.downcast_ref::<i8>() {
                     assert_eq!(1 as usize, *state);
                     *state += 1;
                     Status::Processed
-                } else if let Some(_m) = message.downcast_ref::<u8>() {
+                } else if let Some(_msg) = message.downcast_ref::<u8>() {
                     assert_eq!(2 as usize, *state);
                     *state += 1;
                     Status::Processed
@@ -728,6 +751,56 @@ mod tests {
         assert_await_received(&aid, 3, 1000);
         ActorSystem::shutdown(system)
     }
+
+    #[test]
+    fn test_actor_stop() {
+        let system = ActorSystem::create(10, 1);
+
+        // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
+        // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
+        // but when that bug goes away this will be even simpler.
+        let aid = ActorSystem::spawn(
+            &system,
+            0 as usize,
+            |state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| {
+                if let Some(_msg) = message.downcast_ref::<i32>() {
+                    assert_eq!(0 as usize, *state);
+                    *state += 1;
+                    Status::Processed
+                } else if let Some(msg) = message.downcast_ref::<SystemMsg>() {
+                    assert_eq!(1 as usize, *state);
+                    *state += 1;
+                    match msg {
+                        SystemMsg::Stop => Status::Stop,
+                    }
+                } else {
+                    assert!(false, "Failed to dispatch properly");
+                    Status::Processed // assertion will fail but we still have to return.
+                }
+            },
+        );
+
+        // Send a message to the actor.
+        ActorId::send(&aid, Arc::new(11 as i32));
+        ActorId::send(&aid, Arc::new(SystemMsg::Stop));
+
+        // Wait for the message to get there because test is asynch.
+        assert_await_received(&aid, 2, 1000);
+
+        // Make sure that the actor is actually stopped and cant get more messages.
+        assert!(true, aid.is_stopped());
+        match ActorId::try_send(&aid, Arc::new(42 as i32)) {
+            Err(ActorError::ActorStopped) => assert!(true), // all ok!
+            Ok(_) => assert!(false, "Expected the actor to be shut down!"),
+            Err(e) => assert!(false, "Unexpected error: {:?}", e),
+        }
+        assert_eq!(false, system.is_alive(&aid));
+
+        // Shut down the system and clean up test.
+        ActorSystem::shutdown(system);
+    }
+
+    // ---------- Complete Example ----------
 
     #[derive(Debug)]
     enum Operation {
@@ -784,7 +857,9 @@ mod tests {
     }
 
     #[test]
-    fn test_composite_dispatch() {
+    fn test_full_example() {
+        // This test uses the actor struct declared above to demonstrate and test most of the
+        // capabilities of actors. This is a fairly complete example.
         let system = ActorSystem::create(10, 1);
         let starting_state: StructActor = StructActor { count: 5 as usize };
 
@@ -799,30 +874,9 @@ mod tests {
         ActorId::send(&aid, Arc::new(7 as u8));
         assert_eq!(4, aid.sent());
 
-        thread::sleep(Duration::from_millis(10));
-
-        assert_await_received(&aid, 4, 10);
-        ActorSystem::shutdown(system)
-    }
-
-    #[test]
-    fn test_actor_stop() {
-        let system = ActorSystem::create(10, 1);
-
-        // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
-        // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
-        // but when that bug goes away this will be even simpler.
-        let aid = ActorSystem::spawn(
-            &system,
-            0 as usize,
-            |_state: &mut usize, _aid: Arc<ActorId>, _msg: &Arc<Message>| Status::Processed,
-        );
-
-        // Send a message to the actor.
-        ActorId::send(&aid, Arc::new(11));
-
         // Wait for the message to get there because test is asynch.
-        assert_await_received(&aid, 1, 1000);
+        assert_await_received(&aid, 4, 1000);
         ActorSystem::shutdown(system)
     }
+
 }
