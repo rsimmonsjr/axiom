@@ -1,11 +1,9 @@
-# RAMP 
+# Axiom 
 
- **R**ust **A**ctor **M**odel **P**roject 
- 
-This library has the goal of bringing a highly scalable actor model to the Rust language based 
-on the many lessons learned over years of Actor model implementations in Akka and Erlang. This 
-library is, however, not a direct re-implementation of either of the two aforementioned actor 
-models but rather a new implementation deriving inspiration from the good parts of those models. 
+Axion brings a highly scalable actor model to the Rust language based on the many lessons learned 
+over years of Actor model implementations in Akka and Erlang. This library is, however, not a 
+direct re-implementation of either of the two aforementioned actor models but rather a new 
+implementation deriving inspiration from the good parts of those models.
 
 ### What is an Actor Model 
 
