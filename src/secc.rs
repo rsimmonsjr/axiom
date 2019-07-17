@@ -580,6 +580,8 @@ pub fn create_with_arcs<T: Sync + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::*;
+    use log::info;
     use std::thread;
     use std::time::Duration;
 
@@ -638,6 +640,8 @@ mod tests {
 
     #[test]
     fn test_send_and_receive() {
+        init_test_log();
+
         let channel = create::<Items>(5);
         let (sender, receiver) = channel;
 
@@ -834,6 +838,8 @@ mod tests {
 
     #[test]
     fn test_single_producer_single_receiver() {
+        init_test_log();
+
         let message_count = 200;
         let capacity = 32;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
@@ -861,6 +867,8 @@ mod tests {
 
     #[test]
     fn test_receive_before_send() {
+        init_test_log();
+
         let (sender, receiver) = create_with_arcs::<u32>(5);
         let timeout = Some(Duration::from_millis(2000));
         let receiver2 = receiver.clone();
@@ -890,6 +898,8 @@ mod tests {
     fn test_receive_concurrent_send() {
         // Attempts to trigger send and receive as close to at the same time as possible in
         // order to try to test potential races.
+        init_test_log();
+
         let (sender, receiver) = create_with_arcs::<u32>(5);
         let timeout = Some(Duration::from_millis(2000));
         let receiver2 = receiver.clone();
@@ -940,6 +950,8 @@ mod tests {
 
     #[test]
     fn test_multiple_producer_single_receiver() {
+        init_test_log();
+
         let message_count = 100000;
         let capacity = 100;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
@@ -991,7 +1003,7 @@ mod tests {
         tx3.join().unwrap();
         rx.join().unwrap();
 
-        println!(
+        info!(
             "All messages complete: awaited_messages: {}, awaited_capacity: {}",
             receiver.awaited_messages(),
             sender.awaited_capacity()

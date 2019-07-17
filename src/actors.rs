@@ -1,7 +1,8 @@
 //! Implements actors and the actor system.
 
-use secc;
-use secc::*;
+use crate::secc;
+use crate::secc::*;
+use log::error;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -117,7 +118,7 @@ impl ActorId {
     ///
     /// # Examples
     /// ```
-    /// use actron::actors::*;
+    /// use axiom::actors::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(10, 1);
@@ -143,7 +144,7 @@ impl ActorId {
     ///
     /// # Examples
     /// ```
-    /// use actron::actors::*;
+    /// use axiom::actors::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(10, 1);
@@ -356,8 +357,7 @@ impl Actor {
                 // tried to process a message for an actor and was beaten to it by another
                 // thread. In this case we will just ignore the error and write out a debug
                 // message for purposes of later optimization.
-                // FIXME (Issue #6) Needs to integrate logging.
-                println!("Error Occurred {:?}", err); // TODO Log this
+                error!("Error Occurred {:?}", err);
                 ()
             }
             Result::Ok(message) => {
@@ -371,21 +371,21 @@ impl Actor {
                     Status::Processed => match self.receiver.pop() {
                         Ok(_) => (),
                         Err(e) => {
-                            println!("Error on Work Channel pop(): {:?}.", e);
+                            error!("Error on Work Channel pop(): {:?}.", e);
                             self.aid.system.stop(self.aid.clone())
                         }
                     },
                     Status::Skipped => match self.receiver.skip() {
                         Ok(_) => (),
                         Err(e) => {
-                            println!("Error on Work Channel skip(): {:?}.", e);
+                            error!("Error on Work Channel skip(): {:?}.", e);
                             self.aid.system.stop(self.aid.clone())
                         }
                     },
                     Status::ResetSkip => match self.receiver.reset_skip() {
                         Ok(_) => (),
                         Err(e) => {
-                            println!("Error on Work Channel reset_skip(): {:?}.", e);
+                            error!("Error on Work Channel reset_skip(): {:?}.", e);
                             self.aid.system.stop(self.aid.clone())
                         }
                     },
@@ -397,7 +397,7 @@ impl Actor {
                         match self.receiver.pop() {
                             Ok(_) => (),
                             Err(e) => {
-                                println!("Error on Work Channel pop(): {:?}.", e);
+                                error!("Error on Work Channel pop(): {:?}.", e);
                                 self.aid.system.stop(self.aid.clone())
                             }
                         }
@@ -537,7 +537,7 @@ impl ActorSystem {
     ///
     /// # Examples
     /// ```
-    /// use actron::actors::*;
+    /// use axiom::actors::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(10, 1);
@@ -595,6 +595,7 @@ impl ActorSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::*;
 
     /// A test helper to assert that a certain number of messages arrived in a certain time.
     fn assert_await_received(aid: &Arc<ActorId>, count: u8, timeout_ms: u64) {
@@ -614,6 +615,8 @@ mod tests {
 
     #[test]
     fn test_simplest_actor() {
+        init_test_log();
+
         // This test shows how the simplest actor can be built and used. This actor uses a closure
         // that simply returns that the message is processed.
         let system = ActorSystem::create(10, 1);
@@ -637,6 +640,8 @@ mod tests {
 
     #[test]
     fn test_simplest_struct_actor() {
+        init_test_log();
+
         // This test shows how the simplest struct-based actor can be built and used. This actor
         // merely returns that the message was processed.
         let system = ActorSystem::create(10, 1);
@@ -663,6 +668,8 @@ mod tests {
 
     #[test]
     fn test_dispatching_with_closure() {
+        init_test_log();
+
         // This test shows how a closure-based actor can be used and process different kinds of
         // messages and mutate its state based upon the messages passed. Note that the state of
         // the actor is not available outside the actor itself. There is no way to get access to
@@ -708,6 +715,8 @@ mod tests {
 
     #[test]
     fn test_dispatching_with_struct() {
+        init_test_log();
+
         // This test shows how a struct-based actor can be used and process different kinds of
         // messages and mutate its state based upon the messages passed. Note that the state of
         // the actor is not available outside the actor itself. There is no way to get access to
@@ -754,6 +763,8 @@ mod tests {
 
     #[test]
     fn test_actor_stop() {
+        init_test_log();
+
         let system = ActorSystem::create(10, 1);
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
@@ -858,6 +869,8 @@ mod tests {
 
     #[test]
     fn test_full_example() {
+        init_test_log();
+
         // This test uses the actor struct declared above to demonstrate and test most of the
         // capabilities of actors. This is a fairly complete example.
         let system = ActorSystem::create(10, 1);
