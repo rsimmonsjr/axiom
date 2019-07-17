@@ -1,6 +1,6 @@
 # Axiom 
 
-Axion brings a highly-scalable actor model to the Rust language based on the many lessons learned 
+Axiom brings a highly-scalable actor model to the Rust language based on the many lessons learned 
 over years of Actor model implementations in Akka and Erlang. This library is, however, not a 
 direct re-implementation of either of the two aforementioned actor models but rather a new 
 implementation deriving inspiration from the good parts of those models.
