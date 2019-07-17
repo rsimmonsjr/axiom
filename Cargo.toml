@@ -18,11 +18,11 @@ exclude = [
     "/.travis.yml",
 ]
 
-[badges.is-it-maintained-issue-resolution]
-repository = "rsimmonsjr/ramp"
-
-[badges.is-it-maintained-open-issues]
-repository = "rsimmonsjr/ramp"
+[badges]
+travis_ci = {repository = "rsimmonsjr/axiom" }
+is-it-maintained-issue-resolution = {repository = "rsimmonsjr/axiom" }
+is-it-maintained-open-issues  = {repository = "rsimmonsjr/axiom" }
+maintenance = { status = "actively-developed" }
 
 [dev-dependencies]
 env_logger = "0.6.2"

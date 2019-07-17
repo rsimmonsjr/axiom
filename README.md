@@ -1,3 +1,6 @@
+[![Build Status](https://api.travis-ci.org/rsimmonsjr/axiom.svg?branch=master)](https://travis-ci.org/rsimmonsjr/axiom)
+[![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/rsimmonsjr/axiom.svg)](https://isitmaintained.com/project/rsimmonsjr/axiom "Average time to resolve an issue")
+
 # Axiom 
 
 Axiom brings a highly-scalable actor model to the Rust language based on the many lessons learned 

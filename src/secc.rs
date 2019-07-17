@@ -955,7 +955,7 @@ mod tests {
         let message_count = 100000;
         let capacity = 100;
         let (sender, receiver) = create_with_arcs::<u32>(capacity);
-        let timeout = Some(Duration::from_millis(2000));
+        let timeout = Some(Duration::from_millis(5000));
 
         let receiver1 = receiver.clone();
         let rx = thread::spawn(move || {
