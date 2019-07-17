@@ -1,18 +1,21 @@
 language: rust
-rust:
-  - stable
-  - beta
-  - nightly
 matrix:
   allow_failures:
     - rust: nightly
   fast_finish: true
-
-script:
-  - rustup component add rustfmt --toolchain stable-x86_64-unknown-linux-gnu
-  - cargo fmt -- --check --edition 2018
-  - cargo build 
-  - cargo test
+  include:
+    - rust: nightly
+      script: 
+        - cargo test
+    - rust: beta
+      script: 
+        - cargo test
+    - rust: stable
+      install:
+        - rustup component add rustfmt --toolchain stable-x86_64-unknown-linux-gnu
+      script: 
+        - cargo fmt -- --check --edition 2018
+        - cargo test
 
 notifications:
   email:
