@@ -1,5 +1,5 @@
 [package]
-name = "actron"
+name = "axiom"
 version = "0.0.1"
 authors = ["Robert Simmons Jr. MSc."]
 publish = false
@@ -7,6 +7,7 @@ keywords = ["Actor", "Actor Model", "Concurrency"]
 license = "Apache-2.0"
 homepage = "https://github.com/rsimmonsjr/ramp"
 repository = "https://github.com/rsimmonsjr/ramp"
+edition = "2018"
 exclude = [
     "/.git",
     "/.github",
@@ -19,8 +20,12 @@ repository = "rsimmonsjr/ramp"
 [badges.is-it-maintained-open-issues]
 repository = "rsimmonsjr/ramp"
 
+[dev-dependencies]
+env_logger = "0.6.2"
+
 [dependencies]
 uuid = "0.7.4"
+log ="0.4"
 
 [features]
 default = ["uuid/v4"]
