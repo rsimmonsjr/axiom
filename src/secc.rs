@@ -202,39 +202,39 @@ impl<T: Sync + Send> SeccSender<T> {
             let pool_head_ptr = (*self.core.node_ptrs.get())[send_ptrs.pool_head];
             let next_pool_head = (*pool_head_ptr).next.load(Ordering::SeqCst);
             if NIL_NODE == next_pool_head {
-                return Err(SeccErrors::Full(value));
+                Err(SeccErrors::Full(value))
+            } else {
+                // We get the queue tail because the node from the pool will move here.
+                let queue_tail_ptr = (*self.core.node_ptrs.get())[send_ptrs.queue_tail];
+
+                // Add the value to the node, transferring ownership.
+                (*(*queue_tail_ptr).cell.get()) = Some(value);
+
+                // Manipulate the next pointers on the enqueued node.
+                (*pool_head_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                (*queue_tail_ptr)
+                    .next
+                    .store(send_ptrs.pool_head, Ordering::SeqCst);
+
+                // Update the pointers in the mutex.
+                send_ptrs.queue_tail = send_ptrs.pool_head;
+                send_ptrs.pool_head = next_pool_head;
+
+                // Adjust channel metrics
+                self.core.sent.fetch_add(1, Ordering::SeqCst);
+                println!(
+                    "{}: {}",
+                    next_pool_head,
+                    self.core.receivable.fetch_add(1, Ordering::SeqCst)
+                );
+                self.core.pending.fetch_add(1, Ordering::SeqCst);
+
+                // Notify anyone that was waiting on the condvar.
+                condvar.notify_all();
+
+                // Note that we have to fetch the atomic again before sending it to caller!
+                Ok(())
             }
-
-            // We get the queue tail because the node from the pool will move here.
-            let queue_tail_ptr = (*self.core.node_ptrs.get())[send_ptrs.queue_tail];
-
-            // Add the value to the node, transferring ownership.
-            (*(*queue_tail_ptr).cell.get()) = Some(value);
-
-            // Manipulate the next pointers on the enqueued node.
-            (*pool_head_ptr).next.store(NIL_NODE, Ordering::SeqCst);
-            (*queue_tail_ptr)
-                .next
-                .store(send_ptrs.pool_head, Ordering::SeqCst);
-
-            // Update the pointers in the mutex.
-            send_ptrs.queue_tail = send_ptrs.pool_head;
-            send_ptrs.pool_head = next_pool_head;
-
-            // Adjust channel metrics
-            self.core.sent.fetch_add(1, Ordering::SeqCst);
-            println!(
-                "{}: {}",
-                next_pool_head,
-                self.core.receivable.fetch_add(1, Ordering::SeqCst)
-            );
-            self.core.pending.fetch_add(1, Ordering::SeqCst);
-
-            // Notify anyone that was waiting on the condvar.
-            condvar.notify_all();
-
-            // Note that we have to fetch the atomic again before sending it to caller!
-            return Ok(());
         }
     }
 
@@ -360,50 +360,50 @@ impl<T: Sync + Send> SeccReceiver<T> {
             };
             let next_read_pos = (*read_ptr).next.load(Ordering::SeqCst);
             if NIL_NODE == next_read_pos {
-                return Err(SeccErrors::Empty);
-            }
-
-            // We can read something so we will pull the item out of the read pointer.
-            let value: T = (*(*read_ptr).cell.get()).take().unwrap();
-
-            // Now we have to manage either pulling a node out of the middle if there was a
-            // cursor, or from the queue head if there was no cursor. Then we have to place the
-            // released node on the pool tail.
-            let pool_tail_ptr = (*self.core.node_ptrs.get())[receive_ptrs.pool_tail];
-            if receive_ptrs.cursor == NIL_NODE {
-                // If we aren't using a cursor then the queue_head moves to become the pool tail
-                (*pool_tail_ptr)
-                    .next
-                    .store(receive_ptrs.queue_head, Ordering::SeqCst);
-                (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
-                receive_ptrs.pool_tail = receive_ptrs.queue_head;
-                receive_ptrs.queue_head = next_read_pos;
+                Err(SeccErrors::Empty)
             } else {
-                // If the cursor is set we have to dequeue in the middle of the list and fix
-                // the node chain and then move the node that the cursor was point to to the
-                // pool tail. Note that the precursor will never be [`NIL_NODE`] when the cursor
-                // is set because that would mean that there is no skip going on. Precursor is
-                // only ever set to a skipped node that could be read.
-                let skipped_ptr = (*self.core.node_ptrs.get())[receive_ptrs.skipped];
-                ((*skipped_ptr).next).store(next_read_pos, Ordering::SeqCst);
-                (*pool_tail_ptr)
-                    .next
-                    .store(receive_ptrs.cursor, Ordering::SeqCst);
-                (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
-                receive_ptrs.pool_tail = receive_ptrs.cursor;
-                receive_ptrs.cursor = next_read_pos;
+                // We can read something so we will pull the item out of the read pointer.
+                let value: T = (*(*read_ptr).cell.get()).take().unwrap();
+
+                // Now we have to manage either pulling a node out of the middle if there was a
+                // cursor, or from the queue head if there was no cursor. Then we have to place
+                // the released node on the pool tail.
+                let pool_tail_ptr = (*self.core.node_ptrs.get())[receive_ptrs.pool_tail];
+                if receive_ptrs.cursor == NIL_NODE {
+                    // If we aren't using a cursor then the queue_head moves to become the pool tail
+                    (*pool_tail_ptr)
+                        .next
+                        .store(receive_ptrs.queue_head, Ordering::SeqCst);
+                    (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                    receive_ptrs.pool_tail = receive_ptrs.queue_head;
+                    receive_ptrs.queue_head = next_read_pos;
+                } else {
+                    // If the cursor is set we have to dequeue in the middle of the list and fix
+                    // the node chain and then move the node that the cursor was point to to the
+                    // pool tail. Note that the precursor will never be [`NIL_NODE`] when the
+                    // cursor is set because that would mean that there is no skip going on.
+                    // Precursor is only ever set to a skipped node that could be read.
+                    let skipped_ptr = (*self.core.node_ptrs.get())[receive_ptrs.skipped];
+                    ((*skipped_ptr).next).store(next_read_pos, Ordering::SeqCst);
+                    (*pool_tail_ptr)
+                        .next
+                        .store(receive_ptrs.cursor, Ordering::SeqCst);
+                    (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                    receive_ptrs.pool_tail = receive_ptrs.cursor;
+                    receive_ptrs.cursor = next_read_pos;
+                }
+
+                // Update the channel metrics.
+                self.core.received.fetch_add(1, Ordering::SeqCst);
+                self.core.receivable.fetch_sub(1, Ordering::SeqCst);
+                self.core.pending.fetch_sub(1, Ordering::SeqCst);
+
+                // Notify anyone waiting on messages to be available.
+                condvar.notify_all();
+
+                // Return the value associated.
+                Ok(value)
             }
-
-            // Update the channel metrics.
-            self.core.received.fetch_add(1, Ordering::SeqCst);
-            self.core.receivable.fetch_sub(1, Ordering::SeqCst);
-            self.core.pending.fetch_sub(1, Ordering::SeqCst);
-
-            // Notify anyone waiting on messages to be available.
-            condvar.notify_all();
-
-            // Return the value associated.
-            Ok(value)
         }
     }
 
