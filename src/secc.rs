@@ -1,9 +1,10 @@
 //! An Skip Enabled Concurrent Channel (SECC) is a channel that allows users to send and receive
-//! data from multiple threads and allows the user to skip reading messages if they choose and
-//! then reset the skip later to read the messages. In the purest sense the channel is FIFO
-//! unless the user intends to skip one or more messages in which case a message could be read
-//! in a different order. The channel does guarantee that the messages will remain in the same
-//! order as inserted and unless skipped will be processed in order.
+//! data from multiple threads and allows the user to temporarily skip reading messages.
+//!
+//! In the purest sense the channel is FIFO unless the user intends to skip one or more messages
+//! in which case a message could be read in a different order. The channel does guarantee that
+//! the messages will remain in the same order as inserted and unless skipped will be processed
+//! in order.
 //!
 //! The module is implemented using two linked lists where one list acts as a pool and the
 //! other list acts as the queue holding the messages. This allows us to move data in and out
@@ -19,7 +20,7 @@
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// Value used to indicate that a position index points to no other node note that this value
@@ -32,9 +33,11 @@ pub enum SeccErrors<T: Sync + Send> {
     /// Channel is full, no more messages can be sent, contains the last message attempted
     /// to be sent.
     Full(T),
-    /// Channel is empty so no more messages can be received. This can also be returned if there
-    /// is an active cursor and there are no messages to receive after the cursor even though
-    /// there ar skipped messages.
+
+    /// Channel is empty so no more messages can be received.
+    ///
+    /// This can also be returned if there is an active cursor and there are no messages to
+    /// receive after the cursor even though there ar skipped messages.
     Empty,
 }
 
@@ -47,11 +50,12 @@ impl<T: Sync + Send> fmt::Debug for SeccErrors<T> {
     }
 }
 
-/// A single node in the channel's ring buffer.
+/// A single node in the channel's buffer.
 struct SeccNode<T: Sync + Send> {
-    /// Contains a value set in the node in a Some or a None if empty. Note that this is unsafe
-    /// in order to get around Rust mutability locks so that this data structure can be passed
-    /// around immutably but also still be able to send and receive.
+    /// Contains a value set in the node in a Some or a None if empty.
+    ///
+    /// Note that this is unsafe in order to get around Rust mutability locks so that this data
+    /// structure can be passed around immutably but also still be able to send and receive.
     cell: UnsafeCell<Option<T>>,
     /// The pointer to the next node in the channel.
     next: AtomicUsize,
@@ -100,8 +104,10 @@ pub trait SeccCoreOps<T: Sync + Send> {
         self.core().pending.load(Ordering::Relaxed)
     }
 
-    /// Number of values in the channel that are available for read. This will normally be the
-    /// pending unless there is a skip cursor active then it may be smaller than pending or even 0.
+    /// Number of values in the channel that are available for read.
+    ///
+    /// This will normally be the pending unless there is a skip cursor active then it may be
+    /// smaller than pending or even 0.
     fn receivable(&self) -> usize {
         self.core().receivable.load(Ordering::Relaxed)
     }
@@ -123,6 +129,7 @@ struct SeccSendPtrs {
     /// The tail of the queue which holds messages currently in the channel.
     queue_tail: usize,
     /// The head of the pool of available nodes to be used when sending messages to the channel.
+    ///
     /// Note that if there is only one node in the pool then the channel is full.
     pool_head: usize,
 }
@@ -130,15 +137,16 @@ struct SeccSendPtrs {
 /// A structure containing pointers used when receiving messages from the channel.
 #[derive(Debug)]
 struct SeccReceivePtrs {
-    /// The head of the queue which holds messages currently in the channel. Note that if there is
-    /// only one node in the queue then the channel is empty.
+    /// The head of the queue which holds messages currently in the channel.
+    ///
+    /// Note that if there is only one node in the queue then the channel is empty.
     queue_head: usize,
     /// The tail of the pool of available nodes to be used when sending messages to the channel.
     pool_tail: usize,
-    /// Either [`NIL_NODE`] when there is no current skip cursor or a pointer to the the last
+    /// Either [NIL_NODE] when there is no current skip cursor or a pointer to the the last
     /// element skipped.
     skipped: usize,
-    /// Either [`NIL_NODE`] when there is no current skip cursor or a pointer to the next element
+    /// Either [NIL_NODE] when there is no current skip cursor or a pointer to the next element
     /// that can be recieived from the channel.
     cursor: usize,
 }
@@ -147,25 +155,32 @@ struct SeccReceivePtrs {
 /// and data storage.
 pub struct SeccCore<T: Sync + Send> {
     /// Capacity of the channel, which is the total number of items that can be stored.
+    ///
     /// Note that there are 2 more nodes than the capacity because neither the queue nor pool
     /// should ever be empty.
     capacity: usize,
-    /// Node storage of the nodes. These nodes are never read directly except during
-    /// allocation and tests. Note this is an _ because although the nodes live here they
-    /// are never used directly once allocated.
+    /// Node storage of the nodes.
+    ///
+    /// These nodes are never read directly except during allocation and tests. Note this field
+    /// is preceded with an underscore because although the nodes live here they are never used
+    /// directly once allocated.
     _nodes: Box<[SeccNode<T>]>,
-    /// Pointers to the nodes in the channel. It is critical that these pointers never change
-    /// order during the operations of the channel because nodes refer to indexes in the
-    /// array rather than the raw pointers.
+    /// Pointers to the nodes in the channel.
+    ///
+    /// It is critical that these pointers never change order during the operations of the channel
+    /// because nodes refer to indexes in the array rather than the raw pointers.
     node_ptrs: UnsafeCell<Vec<*mut SeccNode<T>>>,
-    /// Indexes in the node_ptrs used for sending elements to the channel. These pointers are
-    /// paired together with a cond var that allows receivers awaiting messages to be notified
-    /// that messages are available but this mutex should only be used by receivers with a condvar
-    /// to prevent deadlocking the channel.
+    /// Indexes in the node_ptrs used for sending elements to the channel.
+    ///
+    /// These pointers are paired together with a cond var that allows receivers awaiting messages
+    /// to be notified that messages are available but this mutex should only be used by receivers
+    /// with a condvar to prevent deadlocking the channel.
     send_ptrs: Arc<(Mutex<SeccSendPtrs>, Condvar)>,
-    /// Indexes in the node_ptrs used for receiving elements from the channel. These pointers are
-    /// combined with a condvar that can be used by senders awaiting capacity but the mutex should
-    /// only be used by the senders with a condvar to avoid deadlocking the channel.
+    /// Indexes in the node_ptrs used for receiving elements from the channel.
+    ///
+    /// These pointers are combined with a condvar that can be used by senders awaiting capacity
+    /// but the mutex should only be used by the senders with a condvar to avoid deadlocking the
+    /// channel.
     receive_ptrs: Arc<(Mutex<SeccReceivePtrs>, Condvar)>,
     /// Count of the number of times receivers of this channel called awaiting messages.
     awaited_messages: AtomicUsize,
@@ -190,8 +205,10 @@ pub struct SeccSender<T: Sync + Send> {
 
 impl<T: Sync + Send> SeccSender<T> {
     /// Sends a value into the channel, the value will be moved into the mailbox and it will take
-    /// ownership of the value. This function will either return the count of receivable messages
-    /// in an [`Ok`] or an [`Err`] if something went wrong.
+    /// ownership of the value.
+    ///
+    /// This function will either return the count of receivable messages in an [Ok] or an [Err]
+    /// if something went wrong.
     pub fn send(&self, value: T) -> Result<(), SeccErrors<T>> {
         unsafe {
             // Retrieve send pointers and the encoded indexes inside them and their condvar.
@@ -237,9 +254,10 @@ impl<T: Sync + Send> SeccSender<T> {
         }
     }
 
-    /// Send to the channel, awaiting capacity if necessary with an optional timeout. This
-    /// function will either return the count of receivable messages /// in an [`Ok`] or an
-    /// [`Err`] if something went wrong. This function is semantically identical to [`send`] but
+    /// Send to the channel, awaiting capacity if necessary with an optional timeout.
+    ///
+    /// This function will either return the count of receivable messages /// in an [Ok] or an
+    /// [Err] if something went wrong. This function is semantically identical to [send] but
     /// simply waits for there to be space in the channel to send before sending.
     pub fn send_await_timeout(
         &self,
@@ -287,9 +305,10 @@ impl<T: Sync + Send> SeccSender<T> {
         }
     }
 
-    /// Helper to call [`send_await_with_timeout`] using a None for the timeout. This function
-    /// will either return the count of receivable messages in an [`Ok`] or an [`Err`] if
-    /// something went wrong.
+    /// Helper to call [send_await_with_timeout] using a None for the timeout.
+    ///
+    /// This function will either return the count of receivable messages in an [Ok] or an [Err]
+    /// if something went wrong.
     pub fn send_await(&self, value: T) -> Result<(), SeccErrors<T>> {
         self.send_await_timeout(value, None)
     }
@@ -340,11 +359,12 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// Receives the next message that is receivable. This will either be the head of the channel
-    /// in the case that there is a skip operation ongoing the next recievable message will be
-    /// at the skip cursor. This can mean that receive will return an [`SeccErrors::Empty`] when
-    /// there are actually messages in the channel because there will be none readable until the
-    /// skip is reset.
+    /// Receives the next message that is receivable.
+    ///
+    /// This will either be the head of the channel in the case that there is a skip operation
+    /// ongoing the next recievable message will be at the skip cursor. This can mean that receive
+    /// will return an [SeccErrors::Empty] when there are actually messages in the channel because
+    /// there will be none readable until the skip is reset.
     pub fn receive(&self) -> Result<T, SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
@@ -379,7 +399,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 } else {
                     // If the cursor is set we have to dequeue in the middle of the list and fix
                     // the node chain and then move the node that the cursor was point to to the
-                    // pool tail. Note that the precursor will never be [`NIL_NODE`] when the
+                    // pool tail. Note that the precursor will never be [NIL_NODE] when the
                     // cursor is set because that would mean that there is no skip going on.
                     // Precursor is only ever set to a skipped node that could be read.
                     let skipped_ptr = (*self.core.node_ptrs.get())[receive_ptrs.skipped];
@@ -453,16 +473,17 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// A helper to call [`receive_await_timeout`] with [`None`] for a timeout.
+    /// A helper to call [receive_await_timeout] with [None] for a timeout.
     pub fn receive_await(&self) -> Result<T, SeccErrors<T>> {
         self.receive_await_timeout(None)
     }
 
     /// Skips the next message to be read in the channel and either returns the number of total
-    /// receivable messages in the channel or an error if the skip fails. If the skip succeeds than
-    /// the number of receivable messages will drop by one because message is skipped. To read the
-    /// message again the user will need to call [`reset_skip`] in order to reset the skip pointer
-    /// back to the head of the channel.
+    /// receivable messages in the channel or an error if the skip fails.
+    ///
+    /// If the skip succeeds than the number of receivable messages will drop by one because
+    /// message is skipped. To read the message again the user will need to call [reset_skip] in
+    /// order to reset the skip pointer back to the head of the channel.
     pub fn skip(&self) -> Result<(), SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
@@ -604,7 +625,7 @@ pub fn create<T: Sync + Send>(capacity: u16) -> (SeccSender<T>, SeccReceiver<T>)
 }
 
 /// Creates the sender and receiver sides of the channel for multiple producers and
-/// multiple consumers by returning sender and receiver each wrapped in [`Arc`] instances.
+/// multiple consumers by returning sender and receiver each wrapped in [Arc] instances.
 pub fn create_with_arcs<T: Sync + Send>(
     capacity: u16,
 ) -> (Arc<SeccSender<T>>, Arc<SeccReceiver<T>>) {
@@ -619,6 +640,7 @@ mod tests {
     use super::*;
     use crate::tests::*;
     use log::info;
+    use std::sync::MutexGuard;
     use std::thread;
     use std::time::Duration;
 

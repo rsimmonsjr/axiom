@@ -13,9 +13,14 @@ matrix:
     - rust: stable
       install:
         - rustup component add rustfmt --toolchain stable-x86_64-unknown-linux-gnu
+      env:
+        - RUSTFLAGS="-D warnings"
       script:
         - cargo fmt -- --check
         - cargo test
+        - cargo build
+        - cargo doc
+        - cargo package
 
 notifications:
   email:
