@@ -2,7 +2,6 @@
 name = "axiom"
 version = "0.0.1"
 authors = ["Robert Simmons Jr. MSc."]
-publish = false
 keywords = ["Actor", "Actor Model", "Concurrency"]
 license = "Apache-2.0"
 homepage = "https://github.com/rsimmonsjr/axiom"
