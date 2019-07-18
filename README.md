@@ -1,5 +1,7 @@
+[![Latest version](https://img.shields.io/crates/v/axiom.svg)](https://crates.io/crates/axiom)
 [![Build Status](https://api.travis-ci.org/rsimmonsjr/axiom.svg?branch=master)](https://travis-ci.org/rsimmonsjr/axiom)
-[![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/rsimmonsjr/axiom.svg)](https://isitmaintained.com/project/rsimmonsjr/axiom "Average time to resolve an issue")
+[![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/rsimmonsjr/axiom.svg)](https://isitmaintained.com/project/rsimmonsjr/axiom)
+[![License](https://img.shields.io/crates/l/axiom.svg)](https://github.com/rsimmonsjr/axiom#license)
 
 # Axiom 
 
@@ -28,7 +30,7 @@ What is important to understand is that these rules combined together makes each
 like a microservice in the memory space of the program using them. Since actor messages are 
 immutable, actors can trade information safely and easily without copying large data structures.
 
-### Design Principals of RAMP
+### Design Principals of Axiom
 
 Based on previous experience with other actor models I wanted to design this library around some
 core principles: 

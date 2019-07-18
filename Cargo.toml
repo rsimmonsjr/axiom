@@ -13,6 +13,7 @@ best of Erlang / Elixir and Akka.
 """
 edition = "2018"
 exclude = [
+    "/.gitignore",
     "/.git",
     "/.github",
     "/.travis.yml",
