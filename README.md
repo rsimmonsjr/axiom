@@ -12,9 +12,9 @@ implementation deriving inspiration from the good parts of those models.
 
 ## What is an Actor Model 
 
-An actor model is an architectural asynchrounous programming paradigm characterized by the use 
+An actor model is an architectural asynchronous programming paradigm characterized by the use 
 of actors for all processing activities. Actors have the following characteristics:
-1. An actor can be interracted with only by means of messages.
+1. An actor can be interacted with only by means of messages.
 2. An actor processes only one message at a time.
 3. An actor will process a message only once.
 4. An actor can send a message to any other actor without knowledge of that actor's internals.
@@ -27,7 +27,7 @@ rule cannot be violated because of the structure of the language but that leads 
 as well because Erlang and Elixir actors cannot hold internal mutable state.
 
 What is important to understand is that these rules combined together makes each actor operate 
-like a microservice in the memory space of the program using them. Since actor messages are 
+like a micro-service in the memory space of the program using them. Since actor messages are 
 immutable, actors can trade information safely and easily without copying large data structures.
 
 ## Design Principals of Axiom
@@ -45,7 +45,7 @@ core principles:
    This separation makes implementing certain kinds of applications cumbersome. This library, by 
    contrast, borrows from the Akka approach allowing any actor to supervise other actors and act
    as routers to those child actors. 
-3. **Actors can be a Finite State Machine (FSM).** Actors recieve and process messages nominally
+3. **Actors can be a Finite State Machine (FSM).** Actors receive and process messages nominally
    in the order received. However, there are certain circumstances where an actor has to change
    to another state and process other messages, skipping certain messages to be processed later. 
    For example, consider an e-commerce application where a user can get their balance or make a 
@@ -65,7 +65,7 @@ core principles:
    software architects implementing actor-based software. 
 6. **This library should be kept as small as possible.** This library is the core of the actor
    model and should not be expanded to include everything possible for actors. That should be the 
-   job of libraries that extend this library. The library itself shoult be an example of _quantum
+   job of libraries that extend this library. The library itself should be an example of _quantum
    programming_.
 7. **The tests are the best place for examples.** The tests of this library will be extensive and
    well maintained and should be a resource for those wanting to use the library. They should not
