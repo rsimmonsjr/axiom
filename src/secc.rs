@@ -377,8 +377,9 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 let new_pool_tail = if receive_ptrs.cursor == NIL_NODE {
                     // If we aren't using a cursor then the queue_head becomes the pool tail
                     receive_ptrs.pool_tail = receive_ptrs.queue_head;
+                    let old_queue_head = receive_ptrs.queue_head;
                     receive_ptrs.queue_head = next_read_pos;
-                    receive_ptrs.queue_head
+                    old_queue_head
                 } else {
                     // If the cursor is set we have to dequeue in the middle of the list and fix
                     // the node chain and then move the node that the cursor was point to to the
@@ -389,8 +390,9 @@ impl<T: Sync + Send> SeccReceiver<T> {
                     ((*skipped_ptr).next).store(next_read_pos, Ordering::SeqCst);
                     (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
                     receive_ptrs.pool_tail = receive_ptrs.cursor;
+                    let old_cursor = receive_ptrs.cursor;
                     receive_ptrs.cursor = next_read_pos;
-                    receive_ptrs.cursor
+                    old_cursor
                 };
 
                 // Update the channel metrics.
