@@ -10,7 +10,7 @@ over years of Actor model implementations in Akka and Erlang. This library is, h
 direct re-implementation of either of the two aforementioned actor models but rather a new 
 implementation deriving inspiration from the good parts of those models.
 
-### What is an Actor Model 
+## What is an Actor Model 
 
 An actor model is an architectural asynchrounous programming paradigm characterized by the use 
 of actors for all processing activities. Actors have the following characteristics:
@@ -30,7 +30,7 @@ What is important to understand is that these rules combined together makes each
 like a microservice in the memory space of the program using them. Since actor messages are 
 immutable, actors can trade information safely and easily without copying large data structures.
 
-### Design Principals of Axiom
+## Design Principals of Axiom
 
 Based on previous experience with other actor models I wanted to design this library around some
 core principles: 
