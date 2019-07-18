@@ -210,13 +210,8 @@ impl<T: Sync + Send> SeccSender<T> {
                 // Add the value to the node, transferring ownership.
                 (*(*queue_tail_ptr).cell.get()) = Some(value);
 
-                // Manipulate the next pointers on the enqueued node.
-                (*pool_head_ptr).next.store(NIL_NODE, Ordering::SeqCst);
-                (*queue_tail_ptr)
-                    .next
-                    .store(send_ptrs.pool_head, Ordering::SeqCst);
-
                 // Update the pointers in the mutex.
+                let old_pool_head = send_ptrs.pool_head;
                 send_ptrs.queue_tail = send_ptrs.pool_head;
                 send_ptrs.pool_head = next_pool_head;
 
@@ -228,6 +223,14 @@ impl<T: Sync + Send> SeccSender<T> {
                     self.core.receivable.fetch_add(1, Ordering::SeqCst)
                 );
                 self.core.pending.fetch_add(1, Ordering::SeqCst);
+
+                // The now filled node will get moved to the queue.
+                (*pool_head_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                // We MUST set this LAST or we will get into a race with the reciever that will
+                // think this node is ready to go when it isn't until just now.
+                (*queue_tail_ptr)
+                    .next
+                    .store(old_pool_head, Ordering::SeqCst);
 
                 // Notify anyone that was waiting on the condvar.
                 condvar.notify_all();
@@ -369,14 +372,13 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 // cursor, or from the queue head if there was no cursor. Then we have to place
                 // the released node on the pool tail.
                 let pool_tail_ptr = (*self.core.node_ptrs.get())[receive_ptrs.pool_tail];
-                if receive_ptrs.cursor == NIL_NODE {
-                    // If we aren't using a cursor then the queue_head moves to become the pool tail
-                    (*pool_tail_ptr)
-                        .next
-                        .store(receive_ptrs.queue_head, Ordering::SeqCst);
-                    (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+
+                let new_pool_tail = if receive_ptrs.cursor == NIL_NODE {
+                    // If we aren't using a cursor then the queue_head becomes the pool tail
                     receive_ptrs.pool_tail = receive_ptrs.queue_head;
                     receive_ptrs.queue_head = next_read_pos;
+                    receive_ptrs.queue_head
                 } else {
                     // If the cursor is set we have to dequeue in the middle of the list and fix
                     // the node chain and then move the node that the cursor was point to to the
@@ -385,18 +387,21 @@ impl<T: Sync + Send> SeccReceiver<T> {
                     // Precursor is only ever set to a skipped node that could be read.
                     let skipped_ptr = (*self.core.node_ptrs.get())[receive_ptrs.skipped];
                     ((*skipped_ptr).next).store(next_read_pos, Ordering::SeqCst);
-                    (*pool_tail_ptr)
-                        .next
-                        .store(receive_ptrs.cursor, Ordering::SeqCst);
                     (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
                     receive_ptrs.pool_tail = receive_ptrs.cursor;
                     receive_ptrs.cursor = next_read_pos;
-                }
+                    receive_ptrs.cursor
+                };
 
                 // Update the channel metrics.
                 self.core.received.fetch_add(1, Ordering::SeqCst);
                 self.core.receivable.fetch_sub(1, Ordering::SeqCst);
                 self.core.pending.fetch_sub(1, Ordering::SeqCst);
+
+                // Finally add the new pool tail to be used. We MUST set this LAST or we get into
+                // a race with the sender that thinks the node is available when it actually is
+                // not until just now.
+                (*pool_tail_ptr).next.store(new_pool_tail, Ordering::SeqCst);
 
                 // Notify anyone waiting on messages to be available.
                 condvar.notify_all();
