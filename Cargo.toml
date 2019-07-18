@@ -19,7 +19,7 @@ exclude = [
 ]
 
 [badges]
-travis_ci = {repository = "rsimmonsjr/axiom" }
+travis-ci = {repository = "rsimmonsjr/axiom" }
 is-it-maintained-issue-resolution = {repository = "rsimmonsjr/axiom" }
 is-it-maintained-open-issues  = {repository = "rsimmonsjr/axiom" }
 maintenance = { status = "actively-developed" }
