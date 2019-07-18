@@ -217,11 +217,7 @@ impl<T: Sync + Send> SeccSender<T> {
 
                 // Adjust channel metrics
                 self.core.sent.fetch_add(1, Ordering::SeqCst);
-                println!(
-                    "{}: {}",
-                    next_pool_head,
-                    self.core.receivable.fetch_add(1, Ordering::SeqCst)
-                );
+                self.core.receivable.fetch_add(1, Ordering::SeqCst);
                 self.core.pending.fetch_add(1, Ordering::SeqCst);
 
                 // The now filled node will get moved to the queue.
@@ -1159,7 +1155,6 @@ mod tests {
                         _ => (),
                     };
                 }
-                println!("Receiver Done");
             })
             .unwrap();
 
@@ -1176,7 +1171,6 @@ mod tests {
                         Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                     }
                 }
-                println!("Sender 1 Done");
             })
             .unwrap();
 
@@ -1193,7 +1187,6 @@ mod tests {
                         Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                     }
                 }
-                println!("Sender 2 Done");
             })
             .unwrap();
 
@@ -1210,7 +1203,6 @@ mod tests {
                         Err(e) => assert!(false, "----> Error while sending: {}:{:?}", i, e),
                     }
                 }
-                println!("Sender 3 Done");
             })
             .unwrap();
 
