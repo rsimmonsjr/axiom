@@ -1,6 +1,6 @@
 [package]
 name = "axiom"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Robert Simmons Jr. MSc."]
 keywords = ["Actor", "Actors", "Akka", "Erlang", "Elixir"]
 license = "Apache-2.0"
