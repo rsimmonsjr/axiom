@@ -765,42 +765,53 @@ mod tests {
         // the actor is not available outside the actor itself. There is no way to get access to
         let system = ActorSystem::create(10, 1);
 
-        // Creates and tests an actor that uses `if let` syntax to handle message dispatching. In
-        // a real implementation a user could call type specific functions inside the handler
-        // to make the actor ergonomics feel better. There still is a bit of boilerplate code
-        // but this is unavoidable due to Rust downcasting.
-        let aid = ActorSystem::spawn(
-            &system,
-            0 as usize,
-            |state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| {
-                if let Some(_msg) = message.downcast_ref::<i32>() {
-                    assert_eq!(0 as usize, *state);
-                    *state += 1;
-                    Status::Processed
-                } else if let Some(_msg) = message.downcast_ref::<i8>() {
-                    assert_eq!(1 as usize, *state);
-                    *state += 1;
-                    Status::Processed
-                } else if let Some(_msg) = message.downcast_ref::<u8>() {
-                    assert_eq!(2 as usize, *state);
-                    *state += 1;
-                    Status::Processed
+        // We create a basic struct with a handler and use that handler to dispatch to other
+        // inherent methods in the struct. Note that we dont have to implement any traits here
+        // and there is nothing forcing the handler to be an inherent method if it doesn't want
+        // to. It could be any method, even one not on the struct.
+        struct Data {
+            value: i32,
+        }
+
+        impl Data {
+            fn handle_bool(&mut self, _aid: Arc<ActorId>, message: &bool) -> Status {
+                if *message {
+                    self.value += 1;
+                } else {
+                    self.value -= 1;
+                }
+                Status::Processed // assertion will fail but we still have to return.
+            }
+
+            fn handle_i32(&mut self, _aid: Arc<ActorId>, message: &i32) -> Status {
+                self.value += *message;
+                Status::Processed // assertion will fail but we still have to return.
+            }
+
+            fn handle(&mut self, aid: Arc<ActorId>, message: &Arc<Message>) -> Status {
+                if let Some(msg) = message.downcast_ref::<bool>() {
+                    self.handle_bool(aid, msg)
+                } else if let Some(msg) = message.downcast_ref::<i32>() {
+                    self.handle_i32(aid, msg)
                 } else {
                     assert!(false, "Failed to dispatch properly");
-                    Status::Processed // assertion will fail but we still have to return.
+                    Status::Stop // assertion will fail but we still have to return.
                 }
-            },
-        );
+            }
+        }
 
-        // Send some messages to the actor in the order required in the test. In a real actor
-        // its unlikely any order restriction would be needed. However this test makes sure that
-        // the messages are processed correctly.
-        ActorId::send(&aid, Arc::new(11 as i32));
-        ActorId::send(&aid, Arc::new(11 as i8));
-        ActorId::send(&aid, Arc::new(11 as u8));
+        let data = Data { value: 0 };
+
+        let aid = ActorSystem::spawn(&system, data, Data::handle);
+
+        // Send some messages to the actor.
+        ActorId::send(&aid, Arc::new(11));
+        ActorId::send(&aid, Arc::new(true));
+        ActorId::send(&aid, Arc::new(true));
+        ActorId::send(&aid, Arc::new(false));
 
         // Wait for all of the messages to get there because this test is asynch.
-        assert_await_received(&aid, 3, 1000);
+        assert_await_received(&aid, 4, 1000);
         ActorSystem::shutdown(system)
     }
 
