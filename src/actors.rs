@@ -1,4 +1,10 @@
 //! Implements actors and the actor system.
+//!
+//! These are the core components that make up the features of Axiom. The actor model is designed
+//! to allow the user maximum flexibility. It makes use of [axiom::secc] as a channel for messages
+//! to the actor as well as for the work queue for the threads processing the messages to the
+//! actors. The user should refer to test cases for examples and "how-to" guides for using the
+//! actor system.
 
 use crate::secc;
 use crate::secc::*;
@@ -400,7 +406,6 @@ impl Actor {
                 // In this case there is a message in the channel that we have to process through
                 // the actor.
                 let mut guard = actor.handler.lock().unwrap();
-                // FIXME (Issue #5) An actor panic shouldn't kill the whole system.
                 let result = (&mut *guard)(actor.aid.clone(), message);
                 match result {
                     Status::Processed => match actor.receiver.pop() {

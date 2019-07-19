@@ -103,9 +103,9 @@
 //! you could use it in an actor as state by declaring your own handler function and making the
 //! calls to the 3rd party structure.
 //!
-//! **It's important to keep in mind that the starting state is moved into the actor and you
+//! *It's important to keep in mind that the starting state is moved into the actor and you
 //! will not have external access to it afterwards.* This is by design and although you could
-//! conceivably use an [std::sync::Arc] to a structure as state, that would definitely be a bad
+//! conceivably use a `std::sync::Arc` to a structure as state, that would definitely be a bad
 //! idea as it would break the rules for actors.
 //!
 //! There is a lot more to learn and explore and your best resource is the test code for Axiom.
