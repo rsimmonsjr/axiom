@@ -11,8 +11,8 @@ direct re-implementation of either of the two aforementioned actor models but ra
 implementation deriving inspiration from the good parts of those models.
 
 ## What's New
-### 0.0.4
-Additional documentation, resolving a lot of bugs.
+- 0.0.4
+..- Additional documentation, resolving a lot of bugs.
 
 # Getting Started
 
@@ -27,8 +27,8 @@ Actors have the following characteristics:
 5. Actors send only immutable data as messages, though they may have mutable internal state.
 6. Actors are location agnostic; they can be sent a message from anywhere in the cluster.
 
-Note that within the language of Rust, rule five cannot be enforced by this library but is
-important for developers creating actors based on this library. In Erlang and Elixir rule
+Note that within the language of Rust, rule five cannot be enforced by Axiom but is
+important for developers creating actors based on Axiom. In Erlang and Elixir rule
 five cannot be violated because of the structure of the language but this also leads to
 performance limitations. It's better to allow internal mutable state and encourage the good
 practice of not sending mutable state as messages.
@@ -125,7 +125,7 @@ act as a set of examples for users of the library.
 
 ## Design Principals of Axiom
 
-Based on previous experience with other actor models I wanted to design this library around some
+Based on previous experience with other actor models I wanted to design Axiom around some
 core principles: 
 1. **At its core an actor is just an function that processes messages.** The simplest actor is a 
    function that takes a message and simply ignores it. The benefit to the functional approach 
@@ -134,36 +134,27 @@ core principles:
    components. Software based on the actor model can get complicated; keeping it simple at the 
    core is fundamental to solid architecture.
 2. **An actor can supervise other actors.** In the Erlang model there is a strong separation 
-   between the actor, known as a process, and a supervisor which manages other Erlang processes. 
+   between the actor, known as a _process_, and a supervisor which manages other Erlang processes. 
    This separation makes implementing certain kinds of applications cumbersome. This library, by 
    contrast, borrows from the Akka approach allowing any actor to supervise other actors and act
    as routers to those child actors. 
 3. **Actors can be a Finite State Machine (FSM).** Actors receive and process messages nominally
    in the order received. However, there are certain circumstances where an actor has to change
    to another state and process other messages, skipping certain messages to be processed later. 
-   For example, consider an e-commerce application where a user can get their balance or make a 
-   purchase. When making a purchase the `UserActor` may need information from the `InventoryActor` 
-   actor to finish the transaction. While the `UserActor` waits for information from the 
-   `InventoryActor` the `UserActor` will skip any purchase messages waiting for the information
-   from the `InventoryActor` to arrive in its channel. Upon completion of the purchase, the 
-   skip is reset and processing goes on normally.
 4. **When skipping messages, the messages must not move.** Akka allows the skipping of messages
-   by "stashing" the message in another data structure and then restoring this stash later. This
-   process has many inherent flaws. Instead this library allows an actor to skip messages in its
+   by _stashing_ the message in another data structure and then restoring this stash later. This
+   process has many inherent flaws. Instead Axiom allows an actor to skip messages in its
    channel but leave them where they are, increasing performance and avoiding many problems.
-5. **Actors use a bounded channel capacity.** In this library the channel capacity for the actor's
-   channel is bounded but can be set by the user creating the actor. Avoiding allowing resizing
-   the channel makes the channel simpler and forces the user to optimize how many messages are 
-   sitting in the channel at any one time. Optimizing message flow is one of the core jobs of
-   software architects implementing actor-based software. 
-6. **This library should be kept as small as possible.** This library is the core of the actor
-   model and should not be expanded to include everything possible for actors. That should be the 
-   job of libraries that extend this library. The library itself should be an example of _quantum
+5. **Actors use a bounded capacity channel.** In Axiom the message capacity for the actor's 
+   channel is bounded, resulting in greater simplicity and an emphasis on good actor design.
+6. **Axiom should be kept as small as possible.** Axiom is the core of the actor model and 
+   should not be expanded to include everything possible for actors. That should be the 
+   job of libraries that extend Axiom. The library itself should be an example of _quantum
    programming_.
-7. **The tests are the best place for examples.** The tests of this library will be extensive and
-   well maintained and should be a resource for those wanting to use the library. They should not
-   be a dumping ground for copy-paste and throwaway code. The tests should be engineered as 
-   software, not just thrown together. The best tests will look like architected code.  
+7. **The tests are the best place for examples.** The tests of Axiom will be extensive and
+   well maintained and should be a resource for those wanting to use Axiom. They should not
+   be a dumping ground for copy-paste or throwaway code. The best tests will look like 
+   architected code.  
 
 
 
