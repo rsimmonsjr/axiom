@@ -1,16 +1,18 @@
 [package]
 name = "axiom"
-version = "0.0.3"
+version = "0.0.4"
 authors = ["Robert Simmons Jr. MSc."]
 keywords = ["Actor", "Actors", "Akka", "Erlang", "Elixir"]
 license = "Apache-2.0"
 homepage = "https://github.com/rsimmonsjr/axiom"
 repository = "https://github.com/rsimmonsjr/axiom"
+documentation = "https://docs.rs/axiom"
 description = """
 Implements a highly-scalable and ergonomic actor system for Rust based on the 
 best of Erlang / Elixir and Akka.
 """
 edition = "2018"
+license = "Apache-2.0"
 exclude = [
     "/.gitignore",
     "/.git",
