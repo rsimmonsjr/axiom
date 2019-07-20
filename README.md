@@ -10,10 +10,6 @@ over years of Actor model implementations in Akka and Erlang. Axiom is, however,
 re-implementation of either of the two aforementioned actor models but rather a new 
 implementation deriving inspiration from the good parts of those models.
 
-## What's New
-- 0.0.4
-  - Additional documentation, resolving a lot of bugs.
-
 # Getting Started
 
 *An actor model is an architectural asynchronous programming paradigm characterized by the use
