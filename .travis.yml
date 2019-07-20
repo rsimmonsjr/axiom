@@ -6,8 +6,6 @@ notifications:
 
 # Build only master and tagged releases
 branches:
-  except:
-    - /.*/
   only:
     - master
     - ^\d+\.\d+\.\d+(-[\w]*)?$
