@@ -8,6 +8,7 @@ license = "Apache-2.0"
 homepage = "https://github.com/rsimmonsjr/axiom"
 repository = "https://github.com/rsimmonsjr/axiom"
 documentation = "https://docs.rs/axiom"
+readme = "README.md"
 description = """
 Implements a highly-scalable and ergonomic actor system for Rust based on the 
 best of Erlang / Elixir and Akka.
