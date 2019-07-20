@@ -1,31 +1,36 @@
 language: rust
 matrix:
   allow_failures:
-    - rust: nightly
+  - rust: nightly
   fast_finish: true
   include:
-    - rust: nightly
-      script:
-        - cargo test
-    - rust: beta
-      script:
-        - cargo test
-    - rust: stable
-      install:
-        - rustup component add rustfmt --toolchain stable-x86_64-unknown-linux-gnu
-      env:
-        - RUSTFLAGS="-D warnings"
-      script:
-        - cargo fmt -- --check
-        - cargo test
-        - cargo build
-        - cargo doc
-        - cargo package
-
+  - rust: nightly
+    script:
+    - cargo test
+  - rust: beta
+    script:
+    - cargo test
+  - rust: stable
+    install:
+    - rustup component add rustfmt --toolchain stable-x86_64-unknown-linux-gnu
+    env:
+    - RUSTFLAGS="-D warnings"
+    script:
+    - cargo fmt -- --check
+    - cargo test
+    - cargo build
+    - cargo doc
+    - cargo package
 notifications:
   email:
     on_success: never
-
 branches:
   only:
-  - master
+  - master    
+deploy:
+  provider: cargo
+  on: 
+    branch: master
+    tags: true
+  token:
+    secure: YYk39OlzmFzYUF7A0GpHV6DkC3ji7gqMa21O37hkE8s6pwa9eE8x9oGnzYYy5iPwJtEFNNICXcktc4yaeWHWxWRMORvQtO4hwxTu05lIa3BJBtS8ZyGT8jMFrVzRG07qU7lfFunANPPJwwhio9IhyyERiRct0yPsYtVIwJKNfhyYrjQ287AlSwGt6ZgNtvw353VsKf4brVh3L6QwzTt+G6lT4qlMXyNUz1ocUvwdfbWwFDQXKOKSiJDEpzf0g/bzM1Atpc0JNQat9VTPn22s/82C/+Gap2IiMQQkym2zX7ys/ct0R9PRP+6FF1R0apG897BXVdVZ9Zjtpuz+50KrHHueWueajbx8az2a1qsbJgRW5vQ75T5GShbZPEifZRK3ahiuLknv+8zv9IaqBPfowtCLEtyCBgxf+pVgH4y9ESab21cO9mm/6pEyKSt4lasqtPFHuxGWHxZ8vo6smZHOOyyqLptDXsdMnLjObOwEXoSSoHjpeOis0gDSuvJXV9agKEd1v7RknS+FDS7G2nzqFKly9BcIKUG6Yz7p6+WbiiJO/wg0FlldqcG2OSa9MqpMFGFN2AWCf1m0HHZ4wv6G7spKAIEdRHuVk3BxiH7z7aS4rrZ38guS9CCM12ytBVdyWMG3IqzP+uG5nRy5JSRDWiMVHdybcbHcY/luQVgQPQU=

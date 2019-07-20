@@ -1,4 +1,18 @@
-//! Implements actors and the actor system.
+//! Implements actors and the actor system which are the core of Axiom.
+//!
+//! These are the core components that make up the features of Axiom. The actor model is designed
+//! to allow the user maximum flexibility. It makes use of [`axiom::secc`] as a channel for
+//! messages to the actor as well as for the work queue for the worker threads. The actors
+//! can skip messages if they choose, enabling them to work as a *finite state machine* without
+//! having to move messages around as would be necessary with Akka's `stash` implementation.
+//! When the actor system starts up, a number of worker threads will be spawned that will
+//! constantly try to pull work from the work channel and process messages with the actor. The
+//! actor will then be re-sent to the work channel if there are more messages for that actor to
+//! process. This continues constantly until the actor system is shutdown and all actors are
+//! stopped.
+//!
+//! The user should refer to test cases for examples and "how-to" guides for using the
+//! actor system.
 
 use crate::secc;
 use crate::secc::*;
@@ -15,85 +29,88 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// A type used by the system for sending a message through a channel to the actor.
+/// A type used by Axiom actors for sending a message through a channel to an actor.
 ///
 /// All messages are sent as this type and it is up to the message handler to cast the message
-/// properly and deal with it. For help in creating an effective dispatching strategy see the
-/// test cases.
+/// properly and deal with it. The message is required to be both [`std::marker::Sync`] and
+/// [`std::marker::Send`] because there is no way to predict what worker thread will be
+/// processing the message.
 pub type Message = dyn Any + Sync + Send;
 
-/// Status of the message resulting from processing a message with an actor.
+/// Status of the message and potentially the actor as a resulting from processing a message
+/// with the actor.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Status {
-    /// The message was processed and can be removed from the channel.
-    ///
-    /// Note that this doesn't necessarily mean that anything was done with the message, just
-    /// that it can be removed.  It is up to the mctor's essage processor to decide what if
-    /// anything to do with the message.
+    /// The message was processed and can be removed from the channel. Note that this doesn't
+    /// necessarily mean that anything was done with the message, just that it can be removed.  
+    /// It is up to the actor to decide what, if anything, to do with the message.
     Processed,
 
-    /// The message was skipped and should remain in the queue.
-    ///
-    /// Once a message is skipped then a skip tail will be created in the channel that will act
-    /// as the actual tail until the [ResetSkip] status is returned from an actor's processor.
-    /// This enables an actor to skip messages while working on a process and then clear the skip
-    /// buffer and resume normal processing. This functionality is critical for actors that act
-    /// as a finite state machine and thus might temporarily change the implementation of the
-    /// processor and then switch back to a state where the previously sent messages are delivered.
+    /// The message was skipped and should remain in the queue. Once a message is skipped then
+    /// a skip cursor will be created in the actor's message channel that will act as the actual
+    /// head of the channel until an [`axiom::actors::Status::ResetSkip`] is returned from an
+    /// actor's processor. This enables an actor to skip messages while working on a process and
+    /// then clear the skip buffer and resume normal processing. This functionality is critical
+    /// for actors that act as a finite state machine and thus might temporarily change the
+    /// implementation of the processor and then switch back to a state where the previously
+    /// sent messages are delivered.
     Skipped,
 
-    /// Clears the skip tail on the channel.
-    ///
-    /// A skip tail is present when a message has been skipped by returning [Skipped] If no
-    /// skip tail is set than this result is semantically the same as [Processed].
+    /// Clears the skip tail on the channel. A skip cursor is present when a message has been
+    /// skipped by an actor returning [`axiom::actors::Status::Skipped`] from a processor call.
+    /// If no skip cursor is set than this status is semantically the same as
+    /// [`axiom::actors::Status::Processed`].
     ResetSkip,
 
-    /// Returned from an actor when the actor wants the system to stop the actor.
-    ///
-    /// When this is returned the actor's [ActorId] will no longer send any messages and the
-    /// actor instance itself will be removed from the actors table in the [ActorSystem]. The
-    /// user is advised to do any cleanup needed before returning [Status::Stop].
+    /// Returned from an actor when the actor wants the system to stop the actor. When this
+    /// status is returned the actor's [`axiom:actors::ActorId`] will no longer send any
+    /// messages and the actor instance itself will be removed from the actors table in the
+    /// [`axiom::actors::ActorSystem`]. The user is advised to do any cleanup needed before
+    /// returning [`axiom::actors::Status::Stop`].
     Stop,
 }
 
-/// An enum containing messages that are sent to actors by the actor system itself and other
-/// messages that have special content and are universal to all actors.
+/// An enum containing messages that are sent to actors by the actor system itself and are
+/// universal to all actors.
 pub enum SystemMsg {
-    /// A message that instructs an actor to shut down.
-    ///
-    /// The actor receiving this message should shut down all open file handles and any other
-    /// resources and return a [Status::Stop] as a result from the call. This is an attempt for
-    /// the caller to shut down the actor nicely rather than just calling [ActorSystem::stop].
+    /// A message that instructs an actor to shut down. The actor receiving this message
+    /// should shut down all open file handles and any other resources and return a
+    /// [`axiom::actors::Status::Stop`] from the process call. This is an attempt for the
+    /// caller to shut down the actor nicely rather than just calling
+    /// [`axiom::actors::ActorSystem::stop`] which would force a brutal stop.
     Stop,
 }
 
 /// Errors returned from actors and other parts of the actor system.
 #[derive(Debug)]
 pub enum ActorError {
-    /// Message sent when attempting to send to an actor that has already been stopped.
-    ///
-    /// A stopped actor cannot accept any more messages and is shut down. The holder of an
-    /// [ActorId] to a stopped actor should throw away the [ActorId] as the actor can never
-    /// be startd again.
+    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
+    /// actor cannot accept any more messages and is shut down. The holder of an
+    /// [`axiom::actors::ActorId`] to a stopped actor should throw away the
+    /// [`axiom::actors::ActorId`] as the actor can never be started again.
     ActorStopped,
 
-    /// Error Used for when an attempt is made to send a message to a remote actor. *This
-    /// error will be removed when remote actors are implemented.*
+    /// Error Used for when an attempt is made to send a message to a remote actor. **This
+    /// error will be removed when remote actors are implemented.**
     RemoteNotImplemented,
 }
 
 /// An enum that holds a sender for an actor.
 ///
-/// An [ActorId] uses the sender to send messages to the destination actor. Messages that are
-/// sent locally with [ActorSender::Local] are sent by reference, sharing the memory. Those
-/// that are sent to a node with [ActorSender::Remote] are sent via serializing the message to
-/// the remote system which will then use an internal [ActorSender::Local] to forward the
-/// message to the proper actor.
+/// An [`axiom::actors::ActorId`] uses the sender to send messages to the destination actor.
+/// Messages that are sent locally  are sent by reference, sharing the memory. Those that are
+/// sent to another node are sent via serializing the message to the remote system which will
+/// then use an internal local sender to relay the message to the other node. Note that for
+/// the purposes of Axiom, any actor system in another process is considered remote even if they
+/// share the same hardware or even operating system. For example, if you start two instances of
+/// an Axiom system on the same machine, the two instances are considered remote.
+///
+/// FIXME Made public to shut up warnings, make private when remote actors are implemented.
 pub enum ActorSender {
-    /// A Sender used for sending messages to local actors.
+    /// A sender used for sending messages to local actors.
     Local(SeccSender<Arc<Message>>),
-    /// The remote sender.
-    Remote, // FIXME (Issue #9) not implemented.
+    // FIXME (Issue #9) Implement remote actors.
+    Remote,
 }
 
 impl fmt::Debug for ActorSender {
@@ -108,21 +125,24 @@ impl fmt::Debug for ActorSender {
         )
     }
 }
-/// Encapsulates an ID to an actor.
+/// Encapsulates an ID to an actor and is often referred to as an `aid`.
 ///
 /// This is a unique reference to the actor within the entire cluster and can be used to send
-/// messages to the actor regardless of location. The [ActorId] does the heavy lifting of
-/// deciding where the actor is and sending the message. However it is important that the user
-/// of the [ActorId] at least has some notion of where the actor is for developing an efficient
-/// actor architecture.
+/// messages to the actor regardless of location. The [`axiom::actors::ActorId`] does the heavy
+/// lifting of deciding where the actor is and sending the message. However it is important that
+/// the user at least has some notion of where the actor is for developing an efficient actor
+/// architecture. This id can also be serialized to a remote system transparently, enabling one
+/// actor to send an id to another actor easily.
 pub struct ActorId {
-    /// The unique id for this actor on this node.
-    id: Uuid,
-    /// The id for the node that this actor is on.
-    node_id: Uuid,
+    /// The unique id for this actor within the entire cluster.
+    pub id: Uuid,
+    /// The id for the node that this actor is on locally. This is where the actor actually
+    /// lives but the user shouldn't need to worry about this under most circumstances because
+    /// messages can be sent transparently across remote boundaries.
+    pub node_id: Uuid,
     /// The handle to the sender side for the actor's message channel.
     sender: ActorSender,
-    /// Holds a reference to the local actor system that the [ActorId] lives at.
+    /// Holds a reference to the local actor system that the actor id lives at.
     system: Arc<ActorSystem>,
     /// Holds a boolean to indicate if the actor is stopped. A stopped actor will no longer
     /// accept further messages to be sent.
@@ -130,9 +150,10 @@ pub struct ActorId {
 }
 
 impl ActorId {
-    /// A helper to invoke [ActorId::try_send] and simply panic if an error occurrs.
+    /// A helper to invoke [`axiom::actors::ActorId::try_send`] and simply panic if an error
+    /// occurs.
     ///
-    /// This should be used where the user doesnt expect an error to happen.
+    /// This should be used where the user doesn't expect an error to happen.
     ///
     /// # Examples
     /// ```
@@ -155,9 +176,9 @@ impl ActorId {
         }
     }
 
-    /// Attempts to send a message to the actor with the given [Arc<ActorId>] and returns
-    /// [Result::Ok] when the send was successful or an [Result::Err<ActorError>] error if
-    /// something went wrong with the send.
+    /// Attempts to send a message to the actor with the given [`axiom::actors::Arc<ActorId>`]
+    /// and returns [`std::Result::Ok`] when the send was successful or
+    /// [`std::Result::Err<ActorError>`] error if something went wrong with the send.
     ///
     /// This is useful when the user wants to send and feels that there is a possibility of an
     /// error and that possibility has to be handled gracefully.
@@ -189,7 +210,7 @@ impl ActorId {
                     sender.send_await(message).unwrap();
                     // The worst that happens here is the actor gets sent to the work channel
                     // more than once if several callers record receivable as 0 and then
-                    // send the actor id. This is preferable to missiing a message.
+                    // send the actor id. This is preferable to missing a message.
                     if receivable == 0 {
                         ActorSystem::schedule(aid.clone())
                     };
@@ -210,10 +231,9 @@ impl ActorId {
         }
     }
 
-    /// Returns the total number of messages that have been recieived by the actor.
-    ///
-    /// Note that this doesn't mean that the actor did anything with the message, just that it
-    /// was received and handled.
+    /// Returns the total number of messages that have been received by the actor. Note that
+    /// this doesn't mean that the actor did anything with the message, just that it was
+    /// received and handled.
     pub fn received(&self) -> usize {
         match &self.sender {
             ActorSender::Local(sender) => sender.received(),
@@ -221,9 +241,8 @@ impl ActorId {
         }
     }
 
-    /// Returns the number of messages that are receivable by the actor.
-    ///
-    /// This will not include any messages that have been skipped until the skip is reset.
+    /// Returns the number of messages that are receivable by the actor. This will not include
+    /// any messages that have been skipped until the skip is reset.
     pub fn receivable(&self) -> usize {
         match &self.sender {
             ActorSender::Local(sender) => sender.receivable(),
@@ -231,10 +250,9 @@ impl ActorId {
         }
     }
 
-    /// Returns the total number of messages that are pending to be received by the actor.
-    ///
-    /// This should include messages that have been skipped by the actor as well as those that are
-    /// receivable.
+    /// Returns the total number of messages that are pending to be received by the actor. This
+    /// should include messages that have been skipped by the actor as well as those that
+    /// are receivable.
     pub fn pending(&self) -> usize {
         match &self.sender {
             ActorSender::Local(sender) => sender.pending(),
@@ -242,15 +260,15 @@ impl ActorId {
         }
     }
 
-    /// Checks to see if the actor referenced by this [ActorId] is actually stopped already.
+    /// Checks to see if the actor referenced by this [`axiom::actors::ActorId`] is actually
+    /// stopped already.
     pub fn is_stopped(&self) -> bool {
         self.is_stopped.load(Ordering::AcqRel)
     }
 
-    /// Marks the actor referenced by the [ActorId] as stopped and puts mechanisms in place to
-    /// cause no more messages to be sent to the actor.
-    ///
-    /// Note that once stopped, the [ActorId] can never be started again.
+    /// Marks the actor referenced by the [`axiom::actors::ActorId`] as stopped and puts
+    /// mechanisms in place to cause no more messages to be sent to the actor. Note that once
+    /// stopped, an actor id can never be started again.
     fn stop(&self) {
         self.is_stopped.fetch_or(true, Ordering::AcqRel);
     }
@@ -263,6 +281,7 @@ impl fmt::Debug for ActorId {
             "ActorId{{id: {}, node_id: {}, is_local: {}}}",
             self.id.to_string(),
             self.node_id.to_string(),
+            // FIXME Fix when remote actors are introduced.
             if let ActorSender::Local(_) = self.sender {
                 true
             } else {
@@ -289,12 +308,14 @@ impl Hash for ActorId {
 
 /// A type for a user function that processes messages for an actor.
 ///
-/// This will be passed to a spawn funtion to specify the handler used for managing the state of
-/// the actor based on the messages passed to the actor. The resulting state passed will be used
-/// in the next message call. The processor takes three arguments. First, the `state` is a mutable
-/// reference to the current state of the actor. Second, is the [ActorId] enclosed in an [Arc] to
-/// allow access to the actor system for spawning, sending to self and so on.  Third is the
-/// current message to process in a reference to an [Arc].
+/// This will be passed to a spawn function to specify the handler used for managing the state of
+/// the actor based on the messages passed to the actor. The processor takes three arguments:
+/// * `state`   - A mutable reference to the current state of the actor.
+/// * `aid`     - The [`axiom::actors::ActorId`] for this actor enclosed in an [`std::sync::Arc`]
+///               to allow access to the actor system for spawning, sending to self and so on.  
+/// * `message` - The current message to process in a reference to an [`std::sync::Arc`]. Note
+///               that messages are often shared amongst actors (sent to several actors at once)
+///               but their contents must be immutable to comply with the rules of an actor system.
 pub trait Processor<State: Send + Sync>:
     (FnMut(&mut State, Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync
 {
@@ -308,42 +329,31 @@ where
 {
 }
 
-/// This is the type for the handler that will manage the state for the actor using the
+/// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
-///
-/// This is an internal closure that wraps the mutable state.
 trait Handler: (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static {}
 
 impl<F> Handler for F where F: (FnMut(Arc<ActorId>, &Arc<Message>) -> Status) + Send + Sync + 'static
 {}
 
-/// An actual actor in the system. An actor is a worker that allows the asynchronous
-/// processing of messages.
-///
-///
-/// The actor will obey a certain set of rules, namely.
-/// 1. An actor can be interracted with only by means of messages.
-/// 2. An actor processes only one message at a time.
-/// 3. An actor will process a message only once.
-/// 4. An actor can send a message to any other actor without knowledge of that actor's internals.
-/// 5. Actors send only immutable data as messages, though they may have mutable internal state.
-/// 6. Actors are location agnostic. An actor can be sent a message from anywhere in the cluster.
+/// An actual actor in the system. Please see overview and library documentation for more detail.
 struct Actor {
     /// Id of the associated actor.
     aid: Arc<ActorId>,
     /// Receiver for the actor channel.
     receiver: SeccReceiver<Arc<Message>>,
-    /// Function processes messages sent to the actor wrapped in a closure to erase the
-    /// state type that the actor is maanaging.
+    /// The function that processes messages that are sent to the actor wrapped in a closure to
+    /// erase the state type that the actor is managing. Note that this is in a mutex because
+    /// the handler itself is `FnMut` and we also don't want there to be any possibility of two
+    /// threads calling the handler concurrently as that would break the actor model rules.
     handler: Mutex<Box<dyn Handler>>,
 }
 
 impl Actor {
-    /// Creates a new actor context with the given actor id.
-    ///
-    /// The user will pass the initial state of the actor as well as the processor that will be
+    /// Creates a new actor on the given actor system with the given processor function. The
+    /// user will pass the initial state of the actor as well as the processor that will be
     /// used to process messages sent to the actor. The system and node id are passed separately
-    /// because of restrictions on mutex guards not being re-entrant in rust.
+    /// because of restrictions on mutex guards not being re-entrant in Rust.
     pub fn new<F, State>(
         system: Arc<ActorSystem>,
         node_id: Uuid,
@@ -372,7 +382,8 @@ impl Actor {
             move |aid: Arc<ActorId>, message: &Arc<Message>| processor(&mut state, aid, message)
         });
 
-        // The actor context will be the holder of the actual actor.
+        // This is the receiving side of the actor which holds the processor wrapped in the
+        // handler type.
         let actor = Actor {
             aid: Arc::new(aid),
             receiver,
@@ -382,10 +393,9 @@ impl Actor {
         Arc::new(actor)
     }
 
-    /// Receive a message from the channel and processes it with the actor.
-    ///
-    /// This function is the core of the processing pipeline and what the thread pool will be
-    /// calling to handle each message.
+    /// Receive a message from the channel and processes it with the actor.  This function is
+    /// the core of the processing pipeline and what the thread pool will be calling to handle
+    /// each message.
     fn receive(actor: Arc<Actor>) {
         match actor.receiver.peek() {
             Result::Err(err) => {
@@ -400,30 +410,45 @@ impl Actor {
                 // In this case there is a message in the channel that we have to process through
                 // the actor.
                 let mut guard = actor.handler.lock().unwrap();
-                // FIXME (Issue #5) An actor panic shouldn't kill the whole system.
                 let result = (&mut *guard)(actor.aid.clone(), message);
                 match result {
-                    Status::Processed => match actor.receiver.pop() {
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!("Error on Work Channel pop(): {:?}.", e);
-                            actor.aid.system.stop(actor.aid.clone())
+                    Status::Processed => {
+                        match actor.receiver.pop() {
+                            Ok(_) => (),
+                            Err(e) => {
+                                error!("Error on Work Channel pop(): {:?}.", e);
+                                actor.aid.system.stop(actor.aid.clone())
+                            }
                         }
-                    },
-                    Status::Skipped => match actor.receiver.skip() {
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!("Error on Work Channel skip(): {:?}.", e);
-                            actor.aid.system.stop(actor.aid.clone())
+                        if actor.receiver.receivable() > 0 {
+                            actor.aid.system.sender.send_await(actor.clone()).unwrap();
                         }
-                    },
-                    Status::ResetSkip => match actor.receiver.reset_skip() {
-                        Ok(_) => (),
-                        Err(e) => {
-                            error!("Error on Work Channel reset_skip(): {:?}.", e);
-                            actor.aid.system.stop(actor.aid.clone())
+                    }
+                    Status::Skipped => {
+                        match actor.receiver.skip() {
+                            Ok(_) => (),
+                            Err(e) => {
+                                error!("Error on Work Channel skip(): {:?}.", e);
+                                actor.aid.system.stop(actor.aid.clone())
+                            }
                         }
-                    },
+
+                        if actor.receiver.receivable() > 0 {
+                            actor.aid.system.sender.send_await(actor.clone()).unwrap();
+                        }
+                    }
+                    Status::ResetSkip => {
+                        match actor.receiver.reset_skip() {
+                            Ok(_) => (),
+                            Err(e) => {
+                                error!("Error on Work Channel reset_skip(): {:?}.", e);
+                                actor.aid.system.stop(actor.aid.clone())
+                            }
+                        }
+                        if actor.receiver.receivable() > 0 {
+                            actor.aid.system.sender.send_await(actor.clone()).unwrap();
+                        }
+                    }
                     Status::Stop => {
                         actor.aid.system.stop(actor.aid.clone());
                         // Even though the actor is stopping we want to pop the message to make
@@ -438,11 +463,6 @@ impl Actor {
                         }
                     }
                 };
-                // If the actor still has receivable messages we will send it to the work queue
-                // again to process the other messages, otherwise we just drop it.
-                if actor.receiver.receivable() > 0 {
-                    actor.aid.system.sender.send_await(actor.clone()).unwrap();
-                }
             }
         }
     }
@@ -450,43 +470,42 @@ impl Actor {
 
 /// An actor system that contains and manages the actors spawned inside it.
 ///
-/// Note that the actors live inside the system and are managed by the actor system throughout
+/// The actors live inside the actor system and are managed by the actor system throughout
 /// their lives. Although it would be very unusual to have two actor systems on the same hardware
-/// and OS process, it would be possible. Nevertheless, each actor stystem has a unique node id
+/// and OS process, it would be possible. Nevertheless, each actor system has a unique node id
 /// that can be used by other actor systems to connect and send messages.
 pub struct ActorSystem {
     /// Id for this actor system and node.
     pub node_id: Uuid,
-    /// Sender side of the work channel.
-    ///
-    /// When an actor gets a message and its pending count goes from 0 to 1 it will put itself
-    /// in the channel via the sender.
+    /// Sender side of the work channel. When an actor gets a message and its pending count
+    /// goes from 0 to 1 it will put itself in the channel via the sender. The actor will be
+    /// resent to the channel by a thread if it has more messages to process after handling a
+    /// message.
     sender: Arc<SeccSender<Arc<Actor>>>,
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
     receiver: Arc<SeccReceiver<Arc<Actor>>>,
-    /// Holds the [Actor] objects keyed by the [ActorId].
-    ///
-    /// The [RwLock] will be locked for write only when a new actor is spawned but otherwise will
-    /// be locked for read by the threads in the threadbool as they try to look up actors to process.
+    /// Holds the [`axiom::actors::Actor`] objects keyed by the [`axiom::actors::ActorId`]. The
+    /// [`std::sync::RwLock`] will be locked for write only when a new actor is spawned but
+    /// otherwise will be locked for read by the [`axiom::actors::ActorId`] instances when they
+    /// attempt to send an actor to the work channel for processing.
     actors_by_aid: Arc<RwLock<HashMap<Arc<ActorId>, Arc<Actor>>>>,
-    /// Holds handles to the pool of threads processing the run queue.
+    /// Holds handles to the pool of threads processing the work channel.
     thread_pool: Mutex<Vec<JoinHandle<()>>>,
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: AtomicBool,
     /// Duration for threads to wait for new messages before cycling and checking again. Defaults
     /// to 10 milliseconds.
-    /// TODO Allow user to pass this as config.
+    /// TODO Allow user to pass this as configuration.
     thread_wait_time: Option<Duration>,
 }
 
 impl ActorSystem {
-    /// Creates an actor system with the given size for the dispatcher channel and thread pool.
-    ///
-    /// The user should benchmark how many slots in the run channel and the number of threads
+    /// Creates an actor system with the given size for the dispatcher channel and thread pool.  
+    /// The user should benchmark how many slots in the work channel and the number of threads
     /// they need in order to satisfy the requirements of the system they are creating.
     pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
-        // TODO Instead of two params we should pass a config struct.
+        // TODO Instead of two parameters we should pass a configuration struct.
         // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) = secc::create_with_arcs::<Arc<Actor>>(run_channel_size);
 
@@ -501,13 +520,11 @@ impl ActorSystem {
             thread_wait_time: Some(Duration::from_millis(10)),
         });
 
-        // We have the thread pool in a mutex to avoid a chicken - egg situation with the actor
-        // system not being created but needed by the thread. We put this in a block to get around
-        // rust borrow constraints without unnecessarily copying things.
+        // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
+        // system not being created but needed by the thread. We put this in a block to get
+        // around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.thread_pool.lock().unwrap();
-
-            // Allocate the thread pool of threads grabbing for work in the channel.
             for _ in 0..thread_pool_size {
                 let thread = ActorSystem::start_dispatcher_thread(system.clone());
                 guard.push(thread);
@@ -517,15 +534,13 @@ impl ActorSystem {
         system
     }
 
-    /// Starts a thread for the dispatcher that will process actor messages.
-    ///
-    /// The dispatcher threads constantly grab at the work channel trying to get the next actor
-    /// off the channel.  When they get an actor they will process the message using the actor
-    /// and then check to see if the actor has more receivable messages. If it does then the actor
-    /// will be re-sent to the work channel to process the next message. This process allows
-    /// thousands of actors to run and not take up resources if they have no messages to process
-    /// but also prevents one super busy actor from starving out actors of that get messages only
-    /// occasionally.
+    /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
+    /// threads constantly grab at the work channel trying to get the next actor off the channel.
+    /// When they get an actor they will process the message using the actor and then check to
+    /// see if the actor has more receivable messages. If it does then the actor will be re-sent
+    /// to the work channel to process the next message. This process allows thousands of actors
+    /// to run and not take up resources if they have no messages to process but also prevents
+    /// one super busy actor from starving out actors of that get messages only occasionally.
     fn start_dispatcher_thread(system: Arc<ActorSystem>) -> JoinHandle<()> {
         // FIXME Add metrics to this to log warnings if the messages take to long to process.
         // FIXME Add metrics to this to log a warning if messages or actors are spending too
@@ -542,10 +557,9 @@ impl ActorSystem {
         })
     }
 
-    /// Triggers a shutdown of the system and returns only when all threads have joined.
-    ///
-    /// This allows a graceful shutdown of the actor system but any messages pending in actor
-    /// channels will get discarded.
+    /// Triggers a shutdown of the system and returns only when all threads have joined. This
+    /// allows a graceful shutdown of the actor system but any messages pending in actor channels
+    /// will get discarded.
     pub fn shutdown(system: Arc<ActorSystem>) {
         system.shutdown_triggered.store(true, Ordering::Relaxed);
         let mut guard = system.thread_pool.lock().unwrap();
@@ -573,7 +587,7 @@ impl ActorSystem {
     /// Spawns a new actor on the actor `system` using the given `starting_state` for the actors
     /// and the given `processor` function that will be used to process actor messages.
     ///
-    /// The returned [ActorId] can be used to send messages to the actor.
+    /// The returned [`ActorId`] can be used to send messages to the actor.
     ///
     /// # Examples
     /// ```
@@ -599,15 +613,14 @@ impl ActorSystem {
         aid
     }
 
-    /// Schedules the `actor_id` for work on the given actor system. Note that this is the only
-    /// time that we have to use the lookup table.
-    ///
-    /// It gets called when an actor goes from 0 receivable messages to 1 receivable messages. If
-    /// the actor has more receivable messages then this will not be needed to be called because
-    /// the dispatcher threads will handle the process of resending the actor to the work channel.
+    /// Schedules the `aid` for work on the given actor system. Note that this is the only time
+    /// that we have to use the lookup table. This function gets called when an actor goes from
+    /// 0 receivable messages to 1 receivable message. If the actor has more receivable messages
+    /// then this will not be needed to be called because the dispatcher threads will handle
+    /// the process of resending the actor to the work channel.
     fn schedule(aid: Arc<ActorId>) {
         // Note that this is implemented here rather than calling the sender directly
-        // from the send in order :to allow internal optimization of the actor system.
+        // from the send in order to allow internal optimization of the actor system.
         // FIXME (Issue #10) Harden this against the actor being out of the map.
         let guard = aid.system.actors_by_aid.read().unwrap();
         // FIXME (Issue #11) if the actor is not able to schedule, this will panic.
@@ -619,14 +632,16 @@ impl ActorSystem {
     /// actor is gone.
     ///
     /// This is something that should rarely be called from the outside as it is much better to
-    /// send the actor a [SystemMsg::Shutdown] message.
-    fn stop(&self, aid: Arc<ActorId>) {
+    /// send the actor a [`axiom::actors::SystemMsg::Shutdown`] message and allow it to shutdown
+    /// gracefully.
+    pub fn stop(&self, aid: Arc<ActorId>) {
         let mut guard = self.actors_by_aid.write().unwrap();
         guard.remove(&aid);
         aid.stop();
     }
 
-    /// Checks to see if the actor with the given [ActorId] is alive within this actor system.
+    /// Checks to see if the actor with the given [`axiom::actors::ActorId`] is alive within
+    /// this actor system.
     pub fn is_alive(&self, aid: &Arc<ActorId>) -> bool {
         let guard = self.actors_by_aid.write().unwrap();
         guard.contains_key(aid)
@@ -665,7 +680,7 @@ mod tests {
         let system = ActorSystem::create(10, 1);
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
-        // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
+        // as of 2019-07-12 regarding type inference we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
         let aid = ActorSystem::spawn(
             &system,
@@ -676,7 +691,7 @@ mod tests {
         // Send a message to the actor.
         ActorId::send(&aid, Arc::new(11));
 
-        // Wait for the message to get there because test is asynch.
+        // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
         ActorSystem::shutdown(system)
     }
@@ -689,8 +704,9 @@ mod tests {
         // merely returns that the message was processed.
         let system = ActorSystem::create(10, 1);
 
-        // We create a basic struct that has a handle method that does basically nothing
-        // and then we will create that struct when we spawn the actor and that is all.
+        // We declare a basic struct that has a handle method that does basically nothing.
+        // Subsequently we will create that struct when we spawn the actor and then send the
+        // actor a message.
         struct Data {}
 
         impl Data {
@@ -704,7 +720,7 @@ mod tests {
         // Send a message to the actor.
         ActorId::send(&aid, Arc::new(11));
 
-        // Wait for the message to get there because test is asynch.
+        // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
         ActorSystem::shutdown(system)
     }
@@ -720,7 +736,7 @@ mod tests {
         let system = ActorSystem::create(10, 1);
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
-        // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
+        // as of 2019-07-12 regarding type inference we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
         let starting_state: usize = 0 as usize;
         let closure = |state: &mut usize, aid: Arc<ActorId>, message: &Arc<Message>| {
@@ -735,7 +751,7 @@ mod tests {
                 Status::Processed
             } else {
                 assert!(false, "Failed to dispatch properly");
-                Status::Processed // assertion will fail but we still have to return.
+                Status::Processed // This assertion will fail but we still have to return.
             }
         };
 
@@ -751,7 +767,7 @@ mod tests {
         ActorId::send(&aid, Arc::new(17 as i32));
         assert_eq!(3, aid.sent());
 
-        // Wait for all of the messages to get there because this test is asynch.
+        // Wait for all of the messages to get there because test is asynchronous.
         assert_await_received(&aid, 3, 1000);
         ActorSystem::shutdown(system)
     }
@@ -762,45 +778,55 @@ mod tests {
 
         // This test shows how a struct-based actor can be used and process different kinds of
         // messages and mutate its state based upon the messages passed. Note that the state of
-        // the actor is not available outside the actor itself. There is no way to get access to
+        // the actor is not available outside the actor itself.
         let system = ActorSystem::create(10, 1);
 
-        // Creates and tests an actor that uses `if let` syntax to handle message dispatching. In
-        // a real implementation a user could call type specific functions inside the handler
-        // to make the actor ergonomics feel better. There still is a bit of boilerplate code
-        // but this is unavoidable due to Rust downcasting.
-        let aid = ActorSystem::spawn(
-            &system,
-            0 as usize,
-            |state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| {
-                if let Some(_msg) = message.downcast_ref::<i32>() {
-                    assert_eq!(0 as usize, *state);
-                    *state += 1;
-                    Status::Processed
-                } else if let Some(_msg) = message.downcast_ref::<i8>() {
-                    assert_eq!(1 as usize, *state);
-                    *state += 1;
-                    Status::Processed
-                } else if let Some(_msg) = message.downcast_ref::<u8>() {
-                    assert_eq!(2 as usize, *state);
-                    *state += 1;
-                    Status::Processed
+        // We create a basic struct with a handler and use that handler to dispatch to other
+        // inherent methods in the struct. Note that we don't have to implement any traits here
+        // and there is nothing forcing the handler to be an inherent method.
+        struct Data {
+            value: i32,
+        }
+
+        impl Data {
+            fn handle_bool(&mut self, _aid: Arc<ActorId>, message: &bool) -> Status {
+                if *message {
+                    self.value += 1;
+                } else {
+                    self.value -= 1;
+                }
+                Status::Processed // This assertion will fail but we still have to return.
+            }
+
+            fn handle_i32(&mut self, _aid: Arc<ActorId>, message: &i32) -> Status {
+                self.value += *message;
+                Status::Processed // This assertion will fail but we still have to return.
+            }
+
+            fn handle(&mut self, aid: Arc<ActorId>, message: &Arc<Message>) -> Status {
+                if let Some(msg) = message.downcast_ref::<bool>() {
+                    self.handle_bool(aid, msg)
+                } else if let Some(msg) = message.downcast_ref::<i32>() {
+                    self.handle_i32(aid, msg)
                 } else {
                     assert!(false, "Failed to dispatch properly");
-                    Status::Processed // assertion will fail but we still have to return.
+                    Status::Stop // This assertion will fail but we still have to return.
                 }
-            },
-        );
+            }
+        }
 
-        // Send some messages to the actor in the order required in the test. In a real actor
-        // its unlikely any order restriction would be needed. However this test makes sure that
-        // the messages are processed correctly.
-        ActorId::send(&aid, Arc::new(11 as i32));
-        ActorId::send(&aid, Arc::new(11 as i8));
-        ActorId::send(&aid, Arc::new(11 as u8));
+        let data = Data { value: 0 };
 
-        // Wait for all of the messages to get there because this test is asynch.
-        assert_await_received(&aid, 3, 1000);
+        let aid = ActorSystem::spawn(&system, data, Data::handle);
+
+        // Send some messages to the actor.
+        ActorId::send(&aid, Arc::new(11));
+        ActorId::send(&aid, Arc::new(true));
+        ActorId::send(&aid, Arc::new(true));
+        ActorId::send(&aid, Arc::new(false));
+
+        // Wait for all of the messages to get there because this test is asynchronous.
+        assert_await_received(&aid, 4, 1000);
         ActorSystem::shutdown(system)
     }
 
@@ -811,8 +837,8 @@ mod tests {
         let system = ActorSystem::create(10, 1);
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
-        // as of 2019-07-12 regarding type inferrence we have to specify all of the types manually
-        // but when that bug goes away this will be even simpler.
+        // as of 2019-07-12 regarding type inference we have to specify all of the types
+        // manually but when that bug goes away this will be even simpler.
         let aid = ActorSystem::spawn(
             &system,
             0 as usize,
@@ -829,7 +855,7 @@ mod tests {
                     }
                 } else {
                     assert!(false, "Failed to dispatch properly");
-                    Status::Processed // assertion will fail but we still have to return.
+                    Status::Processed // The assertion will fail but we still have to return.
                 }
             },
         );
@@ -838,7 +864,7 @@ mod tests {
         ActorId::send(&aid, Arc::new(11 as i32));
         ActorId::send(&aid, Arc::new(SystemMsg::Stop));
 
-        // Wait for the message to get there because test is asynch.
+        // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 2, 1000);
 
         // Make sure that the actor is actually stopped and cant get more messages.
@@ -905,7 +931,7 @@ mod tests {
                 Status::Processed
             } else {
                 assert!(false, "Failed to dispatch properly");
-                Status::Processed // assertion will fail but we still have to return.
+                Status::Processed // This assertion will fail but we still have to return.
             }
         }
     }
