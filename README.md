@@ -12,7 +12,7 @@ implementation deriving inspiration from the good parts of those models.
 
 ## What's New
 - 0.0.4
-..- Additional documentation, resolving a lot of bugs.
+  - Additional documentation, resolving a lot of bugs.
 
 # Getting Started
 
