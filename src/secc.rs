@@ -1079,7 +1079,7 @@ mod tests {
             };
         });
         let tx = thread::spawn(move || {
-            match sender.send(1 as u32) {
+            match sender.send_await_timeout(1 as u32, timeout) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
             };
@@ -1122,7 +1122,7 @@ mod tests {
             guard.1 = true;
             let c_guard = tx_pair.1.wait(guard).unwrap();
             drop(c_guard);
-            match sender.send(1 as u32) {
+            match sender.send_await_timeout(1 as u32, timeout) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
             };
