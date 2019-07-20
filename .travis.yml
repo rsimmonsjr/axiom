@@ -8,7 +8,7 @@ notifications:
 branches:
   only:
     - master
-    - ^\d+\.\d+\.\d+(-[\w]*)?$
+    - /^\d+\.\d+\.\d+(-\w*)?$/
 
 matrix:
   allow_failures:
