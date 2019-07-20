@@ -2,13 +2,9 @@
 //! # Axiom
 //!
 //! Axiom brings a highly-scalable actor model to the Rust language based on the many lessons
-//! learned over years of Actor model implementations in Akka and Erlang. This library is,
-//! however, not a direct re-implementation of either of the two aforementioned actor models but
+//! learned over years of Actor model implementations in Akka and Erlang. Axiom is, however,
+//! not a direct re-implementation of either of the two aforementioned actor models but
 //! rather a new implementation deriving inspiration from the good parts of those models.
-//!
-//! # What's New
-//! ### 0.0.4
-//! Additional documentation, resolving a lot of bugs.
 //!
 //! # Getting Started
 //!
@@ -23,11 +19,11 @@
 //! 5. Actors send only immutable data as messages, though they may have mutable internal state.
 //! 6. Actors are location agnostic; they can be sent a message from anywhere in the cluster.
 //!
-//! Note that within the language of Rust, rule five cannot be enforced by this library but is
-//! important for developers creating actors based on this library. In Erlang and Elixir rule
-//! five cannot be violated because of the structure of the language but this also leads to
-//! performance limitations. It's better to allow internal mutable state and encourage the good
-//! practice of not sending mutable state as messages.
+//! Note that within the language of Rust, rule five cannot be enforced by Rust but is a best
+//! practice which is important for developers creating actors based on Axiom. In Erlang and
+//! Elixir rule five cannot be violated because of the structure of the language but this also
+//! leads to performance limitations. It's better to allow internal mutable state and encourage
+//! the good practice of not sending mutable state as messages.
 //!
 //! What is important to understand is that these rules combined together makes each actor operate
 //! like a micro-service in the memory space of the program using them. Since actor messages are
@@ -116,7 +112,7 @@
 //!
 //! There is a lot more to learn and explore and your best resource is the test code for Axiom.
 //! The developers have a belief that test code should be well architected and well commented to
-//! act as a set of examples for users of the library.
+//! act as a set of examples for users of Axiom.
 //!
 
 pub mod actors;

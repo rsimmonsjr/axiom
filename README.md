@@ -6,8 +6,8 @@
 # Axiom 
 
 Axiom brings a highly-scalable actor model to the Rust language based on the many lessons learned 
-over years of Actor model implementations in Akka and Erlang. This library is, however, not a 
-direct re-implementation of either of the two aforementioned actor models but rather a new 
+over years of Actor model implementations in Akka and Erlang. Axiom is, however, not a direct 
+re-implementation of either of the two aforementioned actor models but rather a new 
 implementation deriving inspiration from the good parts of those models.
 
 ## What's New
@@ -27,8 +27,8 @@ Actors have the following characteristics:
 5. Actors send only immutable data as messages, though they may have mutable internal state.
 6. Actors are location agnostic; they can be sent a message from anywhere in the cluster.
 
-Note that within the language of Rust, rule five cannot be enforced by Axiom but is
-important for developers creating actors based on Axiom. In Erlang and Elixir rule
+Note that within the language of Rust, rule five can't be enforced by Rust but is a best practice
+which is important for developers creating actors based on Axiom. In Erlang and Elixir rule
 five cannot be violated because of the structure of the language but this also leads to
 performance limitations. It's better to allow internal mutable state and encourage the good
 practice of not sending mutable state as messages.
@@ -120,7 +120,7 @@ idea as it would break the rules we laid out for actors.
 
 There is a lot more to learn and explore and your best resource is the test code for Axiom.
 The developers have a belief that test code should be well architected and well commented to
-act as a set of examples for users of the library.
+act as a set of examples for users of Axiom.
 
 
 ## Design Principals of Axiom
@@ -135,7 +135,7 @@ core principles:
    core is fundamental to solid architecture.
 2. **An actor can supervise other actors.** In the Erlang model there is a strong separation 
    between the actor, known as a _process_, and a supervisor which manages other Erlang processes. 
-   This separation makes implementing certain kinds of applications cumbersome. This library, by 
+   This separation makes implementing certain kinds of applications cumbersome. Axiom, by 
    contrast, borrows from the Akka approach allowing any actor to supervise other actors and act
    as routers to those child actors. 
 3. **Actors can be a Finite State Machine (FSM).** Actors receive and process messages nominally
@@ -149,7 +149,7 @@ core principles:
    channel is bounded, resulting in greater simplicity and an emphasis on good actor design.
 6. **Axiom should be kept as small as possible.** Axiom is the core of the actor model and 
    should not be expanded to include everything possible for actors. That should be the 
-   job of libraries that extend Axiom. The library itself should be an example of _quantum
+   job of libraries that extend Axiom. Axiom itself should be an example of _quantum
    programming_.
 7. **The tests are the best place for examples.** The tests of Axiom will be extensive and
    well maintained and should be a resource for those wanting to use Axiom. They should not
