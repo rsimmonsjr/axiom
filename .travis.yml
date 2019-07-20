@@ -1,11 +1,17 @@
 language: rust
+
 notifications:
   email:
     on_success: never
+
+# Build only master and tagged releases
 branches:
+  except:
+    - /.*/
   only:
     - master
-    - /^\d+.\d+(.\d+)?(-\S*)?$/
+    - ^\d+\.\d+\.\d+(-[\w]*)?$
+
 matrix:
   allow_failures:
     - rust: nightly
