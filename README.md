@@ -10,8 +10,8 @@ over years of Actor model implementations in Akka and Erlang. This library is, h
 direct re-implementation of either of the two aforementioned actor models but rather a new 
 implementation deriving inspiration from the good parts of those models.
 
-# What's New
-## 0.0.4
+## What's New
+### 0.0.4
 Additional documentation, resolving a lot of bugs.
 
 # Getting Started
