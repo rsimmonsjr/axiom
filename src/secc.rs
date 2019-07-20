@@ -155,6 +155,8 @@ pub struct SeccCore<T: Sync + Send> {
     /// there will be 2 additional nodes allocated because neither the queue nor pool should ever
     /// be empty.
     capacity: usize,
+    /// The timeout used for polling the channel when waiting forever to send or recieve.
+    poll_ms: u16,
     /// Node storage of the nodes. These nodes are never read directly except during allocation
     /// and tests. Note this field is preceded with an underscore because although the nodes
     /// live here they are never used directly once allocated.
@@ -247,15 +249,12 @@ impl<T: Sync + Send> SeccSender<T> {
     /// function is semantically identical to [`axiom::secc::SeccSender::send`] but simply waits
     /// for there to be space in the channel before sending. If the timeout is not provided this
     /// function will wait forever for capacity.
-    pub fn send_await_timeout(
-        &self,
-        mut message: T,
-        timeout: Option<Duration>,
-    ) -> Result<(), SeccErrors<T>> {
+    pub fn send_await_timeout(&self, mut message: T, timeout_ms: u16) -> Result<(), SeccErrors<T>> {
         loop {
             match self.send(message) {
                 Err(SeccErrors::Full(v)) => {
                     message = v;
+                    let dur = Duration::from_millis(timeout_ms as u64);
                     // We will put a condvar to be notified if space opens up.
                     let (ref mutex, ref condvar) = &*self.core.receive_ptrs;
                     let receive_ptrs = mutex.lock().unwrap();
@@ -272,20 +271,12 @@ impl<T: Sync + Send> SeccSender<T> {
                         (*read_ptr).next.load(Ordering::SeqCst)
                     };
                     if NIL_NODE != next_read_pos {
-                        match timeout {
-                            Some(dur) => {
-                                // Wait for the specified time.
-                                let result = condvar.wait_timeout(receive_ptrs, dur).unwrap();
-                                if result.1.timed_out() {
-                                    return Err(SeccErrors::Full(message));
-                                }
-                            }
-                            None => {
-                                // Wait forever
-                                let _guard = condvar.wait(receive_ptrs).unwrap();
-                            }
-                        };
+                        let result = condvar.wait_timeout(receive_ptrs, dur).unwrap();
                         self.core.awaited_capacity.fetch_add(1, Ordering::SeqCst);
+                        if result.1.timed_out() {
+                            // try one more time to send.
+                            return self.send(message);
+                        }
                     }
                 }
                 v => return v,
@@ -293,10 +284,18 @@ impl<T: Sync + Send> SeccSender<T> {
         }
     }
 
-    /// Helper to call [`axiom::secc::SeccSender::send_await_with_timeout`] using a
-    /// [`std:Option::None`] for the timeout.
-    pub fn send_await(&self, message: T) -> Result<(), SeccErrors<T>> {
-        self.send_await_timeout(message, None)
+    // Waits basically forever to send to the channel polling for capacity based on the polling
+    // milliseconds passed when creating the channel.
+    pub fn send_await(&self, mut message: T) -> Result<(), SeccErrors<T>> {
+        loop {
+            match self.send_await_timeout(message, self.core.poll_ms) {
+                Err(SeccErrors::Full(v)) => {
+                    message = v;
+                    ()
+                }
+                other => return other,
+            }
+        }
     }
 }
 
@@ -422,12 +421,12 @@ impl<T: Sync + Send> SeccReceiver<T> {
     }
 
     /// A helper to call [`axiom::secc::SeccReceiver::receive`] and await receivable messages
-    /// until a specified optional timeout has expired. If the timeout is [`std::Option::None`]
-    /// then this function will wait forever for new messages.
-    pub fn receive_await_timeout(&self, timeout: Option<Duration>) -> Result<T, SeccErrors<T>> {
+    /// until a specified optional timeout has expired.
+    pub fn receive_await_timeout(&self, timeout_ms: u16) -> Result<T, SeccErrors<T>> {
         loop {
             match self.receive() {
                 Err(SeccErrors::Empty) => {
+                    let dur = Duration::from_millis(timeout_ms as u64);
                     let (ref mutex, ref condvar) = &*self.core.send_ptrs;
                     let send_ptrs = mutex.lock().unwrap();
 
@@ -441,18 +440,12 @@ impl<T: Sync + Send> SeccReceiver<T> {
                     if NIL_NODE != next_pool_head {
                         // In this case there is still nothing to read so we set up a Condvar
                         // and wait for the sender to notify us of new available messages.
-                        match timeout {
-                            Some(dur) => {
-                                let result = condvar.wait_timeout(send_ptrs, dur).unwrap();
-                                if result.1.timed_out() {
-                                    return Err(SeccErrors::Empty);
-                                }
-                            }
-                            None => {
-                                let _condvar_guard = condvar.wait(send_ptrs).unwrap();
-                            }
-                        };
+                        let result = condvar.wait_timeout(send_ptrs, dur).unwrap();
                         self.core.awaited_messages.fetch_add(1, Ordering::SeqCst);
+                        if result.1.timed_out() {
+                            // Try one more time at the end of the timeout.
+                            return self.receive();
+                        }
                     }
                 }
                 v => return v,
@@ -460,10 +453,16 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// A helper to call [`axiom::secc::SeccReceiver::receive_await_timeout`] with [`None`]
-    /// for a timeout.
+    // Calls receive and waits for there to be data in the channel essentially forever. The
+    // re-polling interval for the wait is set on creating the channel and this function will
+    // keep polling until it has a result.
     pub fn receive_await(&self) -> Result<T, SeccErrors<T>> {
-        self.receive_await_timeout(None)
+        loop {
+            match self.receive_await_timeout(10) {
+                Err(SeccErrors::Empty) => (),
+                other => return other,
+            }
+        }
     }
 
     /// Skips the next message to be received from the channel. If the skip succeeds than the number
@@ -547,8 +546,9 @@ unsafe impl<T: Send + Sync> Send for SeccReceiver<T> {}
 unsafe impl<T: Send + Sync> Sync for SeccReceiver<T> {}
 
 /// Creates the sender and receiver sides of this channel and returns them separately as
-/// a tuple.
-pub fn create<T: Sync + Send>(capacity: u16) -> (SeccSender<T>, SeccReceiver<T>) {
+/// a tuple. The user can pass both a channel `capacity` and a `poll_ms` which governs how long
+/// operations that wait on the channel will poll for new messages or capacity.
+pub fn create<T: Sync + Send>(capacity: u16, poll_ms: u16) -> (SeccSender<T>, SeccReceiver<T>) {
     if capacity < 1 {
         panic!("capacity cannot be smaller than 1");
     }
@@ -595,6 +595,7 @@ pub fn create<T: Sync + Send>(capacity: u16) -> (SeccSender<T>, SeccReceiver<T>)
     // Create the channel structures
     let core = Arc::new(SeccCore {
         capacity: capacity as usize,
+        poll_ms,
         _nodes: nodes.into_boxed_slice(),
         node_ptrs: UnsafeCell::new(node_ptrs),
         send_ptrs: Arc::new((Mutex::new(send_ptrs), Condvar::new())),
@@ -615,11 +616,13 @@ pub fn create<T: Sync + Send>(capacity: u16) -> (SeccSender<T>, SeccReceiver<T>)
 }
 
 /// Creates the sender and receiver sides of the channel for multiple producers and
-/// multiple consumers by returning sender and receiver each wrapped in [`Arc`] instances.
+/// multiple consumers by returning sender and receiver each wrapped in [`Arc`] instances. See
+/// the `create` function for more details about the arguments.
 pub fn create_with_arcs<T: Sync + Send>(
     capacity: u16,
+    poll_ms: u16,
 ) -> (Arc<SeccSender<T>>, Arc<SeccReceiver<T>>) {
-    let (sender, receiver) = create(capacity);
+    let (sender, receiver) = create(capacity, poll_ms);
     (Arc::new(sender), Arc::new(receiver))
 }
 
@@ -769,7 +772,7 @@ mod tests {
 
         // This test checks the basic functionality of sending and receiving messages from the
         // channel in a single thread. This is used to verify basic functionality.
-        let channel = create::<Items>(5);
+        let channel = create::<Items>(5, 10);
         let (sender, receiver) = channel;
 
         // fetch the pointers for easy checking of the nodes.
@@ -1039,13 +1042,12 @@ mod tests {
         // receivers on different threads.
         let message_count = 200;
         let capacity = 32;
-        let (sender, receiver) = create_with_arcs::<u32>(capacity);
-        let timeout = Some(Duration::from_millis(20));
+        let (sender, receiver) = create_with_arcs::<u32>(capacity, 20);
 
         let rx = thread::spawn(move || {
             let mut count = 0;
             while count < message_count {
-                match receiver.receive_await_timeout(timeout) {
+                match receiver.receive_await_timeout(20) {
                     Ok(_v) => count += 1,
                     _ => (),
                 };
@@ -1054,7 +1056,7 @@ mod tests {
 
         let tx = thread::spawn(move || {
             for i in 0..message_count {
-                sender.send_await_timeout(i, timeout).unwrap();
+                sender.send_await_timeout(i, 20).unwrap();
                 thread::sleep(Duration::from_millis(1));
             }
         });
@@ -1069,17 +1071,33 @@ mod tests {
 
         // Test that if a user attempts to receive before a message is sent, he will be forced
         // to wait for the message.
-        let (sender, receiver) = create_with_arcs::<u32>(5);
-        let timeout = Some(Duration::from_millis(20));
+        let (sender, receiver) = create_with_arcs::<u32>(5, 20);
         let receiver2 = receiver.clone();
+        let mutex = Arc::new(Mutex::new(false));
+        let rx_mutex = mutex.clone();
+
         let rx = thread::spawn(move || {
-            match receiver2.receive_await_timeout(timeout) {
+            let mut guard = rx_mutex.lock().unwrap();
+            *guard = true;
+            drop(guard);
+            println!("Receive Ready");
+            match receiver2.receive_await_timeout(20) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
             };
         });
+
+        // Keep trying to lock until the mutex is true meaning receive is ready.
+        loop {
+            let guard = mutex.lock().unwrap();
+            if *guard == true {
+                break;
+            }
+        }
+
         let tx = thread::spawn(move || {
-            match sender.send_await_timeout(1 as u32, timeout) {
+            println!("Send Ready");
+            match sender.send_await_timeout(1, 20) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
             };
@@ -1100,8 +1118,7 @@ mod tests {
 
         // Tests that triggering send and receive as close to at the same time as possible does
         // not cause any race conditions.  order to try to test potential races.
-        let (sender, receiver) = create_with_arcs::<u32>(5);
-        let timeout = Some(Duration::from_millis(20));
+        let (sender, receiver) = create_with_arcs::<u32>(5, 20);
         let receiver2 = receiver.clone();
         let pair = Arc::new((Mutex::new((false, false)), Condvar::new()));
         let rx_pair = pair.clone();
@@ -1112,7 +1129,7 @@ mod tests {
             guard.0 = true;
             let c_guard = rx_pair.1.wait(guard).unwrap();
             drop(c_guard);
-            match receiver2.receive_await_timeout(timeout) {
+            match receiver2.receive_await_timeout(20) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
             };
@@ -1122,12 +1139,13 @@ mod tests {
             guard.1 = true;
             let c_guard = tx_pair.1.wait(guard).unwrap();
             drop(c_guard);
-            match sender.send_await_timeout(1 as u32, timeout) {
+            match sender.send_await_timeout(1 as u32, 20) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
             };
         });
 
+        // Wait until both threads are ready and waiting.
         loop {
             let guard = pair.0.lock().unwrap();
             if guard.0 && guard.1 {
@@ -1157,8 +1175,7 @@ mod tests {
         // The channel size is intentionally small to force wait conditions.
         let message_count = 10000;
         let capacity = 10;
-        let (sender, receiver) = create_with_arcs::<u32>(capacity);
-        let timeout = Some(Duration::from_millis(20));
+        let (sender, receiver) = create_with_arcs::<u32>(capacity, 20);
 
         let debug_if_needed = |core: Arc<SeccCore<u32>>| {
             if core.receivable.load(Ordering::Relaxed) > core.capacity {
@@ -1172,7 +1189,7 @@ mod tests {
             .spawn(move || {
                 let mut count = 0;
                 while count < message_count {
-                    match receiver1.receive_await_timeout(timeout) {
+                    match receiver1.receive_await_timeout(20) {
                         Ok(_) => {
                             debug_if_needed(receiver1.core.clone());
                             count += 1;
@@ -1188,7 +1205,7 @@ mod tests {
             .name("S1".into())
             .spawn(move || {
                 for i in 0..(message_count / 3) {
-                    match sender1.send_await_timeout(i, timeout) {
+                    match sender1.send_await_timeout(i, 20) {
                         Ok(_c) => {
                             debug_if_needed(sender1.core.clone());
                             ()
@@ -1204,7 +1221,7 @@ mod tests {
             .name("S2".into())
             .spawn(move || {
                 for i in (message_count / 3)..((message_count / 3) * 2) {
-                    match sender2.send_await_timeout(i, timeout) {
+                    match sender2.send_await_timeout(i, 20) {
                         Ok(_c) => {
                             debug_if_needed(sender2.core.clone());
                             ()
@@ -1220,7 +1237,7 @@ mod tests {
             .name("S3".into())
             .spawn(move || {
                 for i in ((message_count / 3) * 2)..(message_count) {
-                    match sender3.send_await_timeout(i, timeout) {
+                    match sender3.send_await_timeout(i, 20) {
                         Ok(_c) => {
                             debug_if_needed(sender3.core.clone());
                             ()

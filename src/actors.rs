@@ -16,7 +16,7 @@
 
 use crate::secc;
 use crate::secc::*;
-use log::error;
+use log::{error, warn};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
 use uuid::Uuid;
 
 /// A type used by Axiom actors for sending a message through a channel to an actor.
@@ -366,7 +365,7 @@ impl Actor {
     {
         // TODO Let the user pass the size of the channel queue when creating the actor.
         // Create the channel for the actor.
-        let (tx, receiver) = secc::create::<Arc<Message>>(32);
+        let (tx, receiver) = secc::create::<Arc<Message>>(32, 10);
 
         // The sender will be put inside the actor id.
         let aid = ActorId {
@@ -497,7 +496,7 @@ pub struct ActorSystem {
     /// Duration for threads to wait for new messages before cycling and checking again. Defaults
     /// to 10 milliseconds.
     /// TODO Allow user to pass this as configuration.
-    thread_wait_time: Option<Duration>,
+    thread_wait_time: u16,
 }
 
 impl ActorSystem {
@@ -505,9 +504,13 @@ impl ActorSystem {
     /// The user should benchmark how many slots in the work channel and the number of threads
     /// they need in order to satisfy the requirements of the system they are creating.
     pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
+        // Amount of time to wait in ms for between polling an empty work channel.
+        // // FIXME allow user to pass in configuration.
+        let thread_wait_time = 10;
         // TODO Instead of two parameters we should pass a configuration struct.
         // We will use arcs for the sender and receivers because the they will surf threads.
-        let (sender, receiver) = secc::create_with_arcs::<Arc<Actor>>(run_channel_size);
+        let (sender, receiver) =
+            secc::create_with_arcs::<Arc<Actor>>(run_channel_size, thread_wait_time);
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = Arc::new(ActorSystem {
@@ -517,7 +520,7 @@ impl ActorSystem {
             actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
             thread_pool: Mutex::new(Vec::with_capacity(thread_pool_size as usize)),
             shutdown_triggered: AtomicBool::new(false),
-            thread_wait_time: Some(Duration::from_millis(10)),
+            thread_wait_time,
         });
 
         // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
@@ -621,10 +624,23 @@ impl ActorSystem {
     fn schedule(aid: Arc<ActorId>) {
         // Note that this is implemented here rather than calling the sender directly
         // from the send in order to allow internal optimization of the actor system.
-        // FIXME (Issue #10) Harden this against the actor being out of the map.
         let guard = aid.system.actors_by_aid.read().unwrap();
-        // FIXME (Issue #11) if the actor is not able to schedule, this will panic.
-        (aid.system.sender.send(guard.get(&aid).unwrap().clone())).unwrap();
+        match guard.get(&aid) {
+            Some(actor) => aid
+                .system
+                .sender
+                .send(actor.clone())
+                .expect("Unable to Schedule actor: "),
+            None => {
+                // The actor was removed from the map so ignore the problem and just log
+                // a warning.
+                warn!(
+                    "Attempted to schedule actor with aid {:?} but the actor does not exist.",
+                    aid.clone()
+                );
+                ()
+            }
+        }
     }
 
     /// Stops an actor by shutting down its channels and removing it from the actors list and
@@ -654,6 +670,7 @@ impl ActorSystem {
 mod tests {
     use super::*;
     use crate::tests::*;
+    use std::time::Duration;
 
     /// A test helper to assert that a certain number of messages arrived in a certain time.
     fn assert_await_received(aid: &Arc<ActorId>, count: u8, timeout_ms: u64) {
@@ -878,6 +895,34 @@ mod tests {
 
         // Shut down the system and clean up test.
         ActorSystem::shutdown(system);
+    }
+
+    #[test]
+    fn test_actor_not_in_map() {
+        init_test_log();
+
+        // This test verifies that the system does not panic if we schedule to an actor
+        // that does not exist in the map. This can happen if the actor is stopped before
+        // the system notifies the actor id that it is dead.
+        let system = ActorSystem::create(10, 1);
+
+        let aid = ActorSystem::spawn(
+            &system,
+            0 as usize,
+            |_state: &mut usize, _aid: Arc<ActorId>, _message: &Arc<Message>| Status::Processed,
+        );
+
+        // We force remove the actor from the system so now it cannot be scheduled.
+        let sys_clone = system.clone();
+        let mut guard = (*sys_clone.actors_by_aid).write().unwrap();
+        guard.remove(&aid);
+        drop(guard); // give up the lock
+
+        // Send a message to the actor.
+        ActorId::send(&aid, Arc::new(11));
+
+        // Wait for the message to get there because test is asynchronous.
+        ActorSystem::shutdown(system)
     }
 
     // ---------- Complete Example ----------
