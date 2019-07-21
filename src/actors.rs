@@ -159,7 +159,7 @@ impl ActorId {
     /// use axiom::actors::*;
     /// use std::sync::Arc;
     ///
-    /// let system = ActorSystem::create(10, 1);
+    /// let system = ActorSystem::create(ActorSystemConfig::create());
     ///
     /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
@@ -187,7 +187,7 @@ impl ActorId {
     /// use axiom::actors::*;
     /// use std::sync::Arc;
     ///
-    /// let system = ActorSystem::create(10, 1);
+    /// let system = ActorSystem::create(ActorSystemConfig::create());
     ///
     /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
@@ -365,13 +365,13 @@ impl Actor {
     {
         // TODO Let the user pass the size of the channel queue when creating the actor.
         // Create the channel for the actor.
-        let (tx, receiver) = secc::create::<Arc<Message>>(32, 10);
+        let (sender, receiver) = secc::create::<Arc<Message>>(32, 10);
 
         // The sender will be put inside the actor id.
         let aid = ActorId {
             id: Uuid::new_v4(),
             node_id: node_id,
-            sender: ActorSender::Local(tx),
+            sender: ActorSender::Local(sender),
             system: system.clone(),
             is_stopped: AtomicBool::new(false),
         };
@@ -402,7 +402,7 @@ impl Actor {
                 // tried to process a message for an actor and was beaten to it by another
                 // thread. In this case we will just ignore the error and write out a debug
                 // message for purposes of later optimization.
-                error!("Error Occurred {:?}", err);
+                warn!("Error Occurred {:?}", err);
                 ()
             }
             Result::Ok(message) => {
@@ -467,6 +467,60 @@ impl Actor {
     }
 }
 
+/// Configuration structure for the Axiom actor system which is built using the builder
+/// pattern that allows a user to override default values.
+pub struct ActorSystemConfig {
+    /// The number of slots to allocate for the work channel. This is the channel that the
+    /// worker threads use to schedule work on actors.
+    pub work_channel_size: u16,
+    /// The size of the thread pool which governs how many worker threads there are in
+    /// the system.
+    pub thread_pool_size: u16,
+    /// Amount of time to wait in milliseconds for between polling an empty work channel.
+    pub thread_wait_time: u16,
+}
+
+impl ActorSystemConfig {
+    /// Create the config with the default values.
+    pub fn create() -> ActorSystemConfig {
+        ActorSystemConfig {
+            work_channel_size: 100,
+            thread_pool_size: 4,
+            thread_wait_time: 10,
+        }
+    }
+
+    /// Create a new config object based on the one passed with the new value
+    /// for `work_channel_size`.
+    pub fn work_channel_size(&self, value: u16) -> ActorSystemConfig {
+        ActorSystemConfig {
+            work_channel_size: value,
+            thread_pool_size: self.thread_pool_size,
+            thread_wait_time: self.thread_wait_time,
+        }
+    }
+
+    /// Create a new config object based on the one passed with the new value
+    /// for `thread_pool_size`.
+    pub fn thread_pool_size(&self, value: u16) -> ActorSystemConfig {
+        ActorSystemConfig {
+            work_channel_size: self.work_channel_size,
+            thread_pool_size: value,
+            thread_wait_time: self.thread_wait_time,
+        }
+    }
+
+    /// Create a new config object based on the one passed with the new value
+    /// for `thread_wait_time`.
+    pub fn thread_wait_time(&self, value: u16) -> ActorSystemConfig {
+        ActorSystemConfig {
+            work_channel_size: self.work_channel_size,
+            thread_pool_size: self.thread_pool_size,
+            thread_wait_time: value,
+        }
+    }
+}
+
 /// An actor system that contains and manages the actors spawned inside it.
 ///
 /// The actors live inside the actor system and are managed by the actor system throughout
@@ -503,14 +557,10 @@ impl ActorSystem {
     /// Creates an actor system with the given size for the dispatcher channel and thread pool.  
     /// The user should benchmark how many slots in the work channel and the number of threads
     /// they need in order to satisfy the requirements of the system they are creating.
-    pub fn create(run_channel_size: u16, thread_pool_size: u16) -> Arc<ActorSystem> {
+    pub fn create(config: ActorSystemConfig) -> Arc<ActorSystem> {
         // Amount of time to wait in ms for between polling an empty work channel.
-        // // FIXME allow user to pass in configuration.
-        let thread_wait_time = 10;
-        // TODO Instead of two parameters we should pass a configuration struct.
-        // We will use arcs for the sender and receivers because the they will surf threads.
         let (sender, receiver) =
-            secc::create_with_arcs::<Arc<Actor>>(run_channel_size, thread_wait_time);
+            secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = Arc::new(ActorSystem {
@@ -518,9 +568,9 @@ impl ActorSystem {
             sender,
             receiver,
             actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
-            thread_pool: Mutex::new(Vec::with_capacity(thread_pool_size as usize)),
+            thread_pool: Mutex::new(Vec::with_capacity(config.thread_pool_size as usize)),
             shutdown_triggered: AtomicBool::new(false),
-            thread_wait_time,
+            thread_wait_time: config.thread_wait_time,
         });
 
         // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
@@ -528,7 +578,7 @@ impl ActorSystem {
         // around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.thread_pool.lock().unwrap();
-            for _ in 0..thread_pool_size {
+            for _ in 0..config.thread_pool_size {
                 let thread = ActorSystem::start_dispatcher_thread(system.clone());
                 guard.push(thread);
             }
@@ -597,7 +647,7 @@ impl ActorSystem {
     /// use axiom::actors::*;
     /// use std::sync::Arc;
     ///
-    /// let system = ActorSystem::create(10, 1);
+    /// let system = ActorSystem::create(ActorSystemConfig::create());
     ///
     /// let aid = ActorSystem::spawn(&system,
     ///     0 as usize,
@@ -694,7 +744,7 @@ mod tests {
 
         // This test shows how the simplest actor can be built and used. This actor uses a closure
         // that simply returns that the message is processed.
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
@@ -719,7 +769,7 @@ mod tests {
 
         // This test shows how the simplest struct-based actor can be built and used. This actor
         // merely returns that the message was processed.
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
 
         // We declare a basic struct that has a handle method that does basically nothing.
         // Subsequently we will create that struct when we spawn the actor and then send the
@@ -750,7 +800,7 @@ mod tests {
         // messages and mutate its state based upon the messages passed. Note that the state of
         // the actor is not available outside the actor itself. There is no way to get access to
         // the state without going through the actor.
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
@@ -796,7 +846,7 @@ mod tests {
         // This test shows how a struct-based actor can be used and process different kinds of
         // messages and mutate its state based upon the messages passed. Note that the state of
         // the actor is not available outside the actor itself.
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
 
         // We create a basic struct with a handler and use that handler to dispatch to other
         // inherent methods in the struct. Note that we don't have to implement any traits here
@@ -851,7 +901,7 @@ mod tests {
     fn test_actor_stop() {
         init_test_log();
 
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types
@@ -904,7 +954,7 @@ mod tests {
         // This test verifies that the system does not panic if we schedule to an actor
         // that does not exist in the map. This can happen if the actor is stopped before
         // the system notifies the actor id that it is dead.
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
 
         let aid = ActorSystem::spawn(
             &system,
@@ -987,7 +1037,7 @@ mod tests {
 
         // This test uses the actor struct declared above to demonstrate and test most of the
         // capabilities of actors. This is a fairly complete example.
-        let system = ActorSystem::create(10, 1);
+        let system = ActorSystem::create(ActorSystemConfig::create());
         let starting_state: StructActor = StructActor { count: 5 as usize };
 
         let aid = ActorSystem::spawn(&system, starting_state, StructActor::handle);

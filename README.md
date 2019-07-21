@@ -41,7 +41,7 @@ Axiom in only a few lines of code.
 use axiom::actors::*;
 use std::sync::Arc;
 
-let system = ActorSystem::create(10, 1);
+let system = ActorSystem::create(ActorSystemConfig::create());
 
 let aid = ActorSystem::spawn(&system,
     0 as usize,
@@ -60,7 +60,7 @@ different message types:
 use axiom::actors::*;
 use std::sync::Arc;
 
-let system = ActorSystem::create(10, 1);
+let system = ActorSystem::create(ActorSystemConfig::create());
 
 struct Data {
     value: i32,
