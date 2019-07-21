@@ -493,7 +493,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 receive_ptrs.skipped = receive_ptrs.queue_head;
                 receive_ptrs.cursor = next_read_pos;
             } else {
-                // There is a cursor already so make sure we increment cursor and precursor.
+                // There is a cursor already so make sure we increment cursor and skipped.
                 receive_ptrs.skipped = receive_ptrs.cursor;
                 receive_ptrs.cursor = next_read_pos;
             }

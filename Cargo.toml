@@ -47,6 +47,7 @@ env_logger = "0.6.2"
 [dependencies]
 uuid = "0.7.4"
 log ="0.4"
+serde = "1.0.97"
 
 [features]
 default = ["uuid/v4"]

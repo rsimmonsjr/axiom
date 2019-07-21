@@ -37,7 +37,7 @@
 //! use axiom::actors::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(10, 1);
+//! let system = ActorSystem::create(ActorSystemConfig::create());
 //!
 //! let aid = ActorSystem::spawn(&system,
 //!     0 as usize,
@@ -56,7 +56,7 @@
 //! use axiom::actors::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(10, 1);
+//! let system = ActorSystem::create(ActorSystemConfig::create());
 //!
 //! struct Data {
 //!     value: i32,
