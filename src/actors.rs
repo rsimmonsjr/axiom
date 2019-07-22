@@ -134,11 +134,11 @@ impl fmt::Debug for ActorSender {
 /// actor to send an id to another actor easily.
 pub struct ActorId {
     /// The unique id for this actor within the entire cluster.
-    pub id: Uuid,
-    /// The id for the node that this actor is on locally. This is where the actor actually
-    /// lives but the user shouldn't need to worry about this under most circumstances because
-    /// messages can be sent transparently across remote boundaries.
-    pub node_id: Uuid,
+    pub uuid: Uuid,
+    /// The unique uuid for the node that this actor is on locally. This is where the actor
+    /// actually lives but the user shouldn't need to worry about this under most circumstances
+    /// because messages can be sent transparently across remote boundaries.
+    pub node_uuid: Uuid,
     /// The handle to the sender side for the actor's message channel.
     sender: ActorSender,
     /// Holds a reference to the local actor system that the actor id lives at.
@@ -278,8 +278,8 @@ impl fmt::Debug for ActorId {
         write!(
             formatter,
             "ActorId{{id: {}, node_id: {}, is_local: {}}}",
-            self.id.to_string(),
-            self.node_id.to_string(),
+            self.uuid.to_string(),
+            self.node_uuid.to_string(),
             // FIXME Fix when remote actors are introduced.
             if let ActorSender::Local(_) = self.sender {
                 true
@@ -292,7 +292,7 @@ impl fmt::Debug for ActorId {
 
 impl PartialEq for ActorId {
     fn eq(&self, other: &ActorId) -> bool {
-        self.id == other.id && self.node_id == other.node_id
+        self.uuid == other.uuid && self.node_uuid == other.node_uuid
     }
 }
 
@@ -300,8 +300,8 @@ impl Eq for ActorId {}
 
 impl Hash for ActorId {
     fn hash<H: Hasher>(&self, state: &'_ mut H) {
-        self.id.hash(state);
-        self.node_id.hash(state);
+        self.uuid.hash(state);
+        self.node_uuid.hash(state);
     }
 }
 
@@ -369,8 +369,8 @@ impl Actor {
 
         // The sender will be put inside the actor id.
         let aid = ActorId {
-            id: Uuid::new_v4(),
-            node_id: node_id,
+            uuid: Uuid::new_v4(),
+            node_uuid: node_id,
             sender: ActorSender::Local(sender),
             system: system.clone(),
             is_stopped: AtomicBool::new(false),
@@ -551,6 +551,13 @@ pub struct ActorSystem {
     /// to 10 milliseconds.
     /// TODO Allow user to pass this as configuration.
     thread_wait_time: u16,
+    /// Holds a map of the actor ids by their UUID in the actor. UUIDs of actors are assigned
+    /// when an actor is spawned and are cluster unique. This means that it should be easy if
+    /// a user knows an actor's uuid to get an [`axiom::actors::ActorId`] for that actor if they
+    /// know its UUID. The user wont need to know if the aid is local or remote, once thy have
+    /// the id that is enough to send to the actor or monitor it.
+    /// FIXME Implement monitors
+    aids_by_uuid: Arc<RwLock<HashMap<Uuid, Arc<ActorId>>>>,
 }
 
 impl ActorSystem {
@@ -568,6 +575,7 @@ impl ActorSystem {
             sender,
             receiver,
             actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
+            aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
             thread_pool: Mutex::new(Vec::with_capacity(config.thread_pool_size as usize)),
             shutdown_triggered: AtomicBool::new(false),
             thread_wait_time: config.thread_wait_time,
@@ -659,10 +667,12 @@ impl ActorSystem {
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        let mut guard = system.actors_by_aid.write().unwrap();
+        let mut actors_by_aid = system.actors_by_aid.write().unwrap();
+        let mut aids_by_uuid = system.aids_by_uuid.write().unwrap();
         let actor = Actor::new(system.clone(), system.node_id, state, processor);
         let aid = actor.aid.clone();
-        guard.insert(aid.clone(), actor);
+        actors_by_aid.insert(aid.clone(), actor);
+        aids_by_uuid.insert(aid.uuid, aid.clone());
         aid
     }
 
@@ -674,8 +684,8 @@ impl ActorSystem {
     fn schedule(aid: Arc<ActorId>) {
         // Note that this is implemented here rather than calling the sender directly
         // from the send in order to allow internal optimization of the actor system.
-        let guard = aid.system.actors_by_aid.read().unwrap();
-        match guard.get(&aid) {
+        let actors_by_aid = aid.system.actors_by_aid.read().unwrap();
+        match actors_by_aid.get(&aid) {
             Some(actor) => aid
                 .system
                 .sender
@@ -701,16 +711,25 @@ impl ActorSystem {
     /// send the actor a [`axiom::actors::SystemMsg::Shutdown`] message and allow it to shutdown
     /// gracefully.
     pub fn stop(&self, aid: Arc<ActorId>) {
-        let mut guard = self.actors_by_aid.write().unwrap();
-        guard.remove(&aid);
+        let mut actors_by_aid = self.actors_by_aid.write().unwrap();
+        let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
+        actors_by_aid.remove(&aid);
+        aids_by_uuid.remove(&aid.uuid);
         aid.stop();
     }
 
     /// Checks to see if the actor with the given [`axiom::actors::ActorId`] is alive within
     /// this actor system.
     pub fn is_alive(&self, aid: &Arc<ActorId>) -> bool {
-        let guard = self.actors_by_aid.write().unwrap();
-        guard.contains_key(aid)
+        let actors_by_aid = self.actors_by_aid.write().unwrap();
+        actors_by_aid.contains_key(aid)
+    }
+
+    /// Look up an [`axiom::actors::ActorId`] by the unique UUID of the actor and either returns
+    /// the located `aid` in a [`std::Option::Some`] or [`std::Option::None`] if not found.
+    pub fn find_aid_by_uuid(&self, uuid: &Uuid) -> Option<Arc<ActorId>> {
+        let aids_by_uuid = self.aids_by_uuid.read().unwrap();
+        aids_by_uuid.get(uuid).map(|aid| aid.clone())
     }
 }
 
@@ -736,6 +755,12 @@ mod tests {
                 )
             }
         }
+    }
+
+    /// A function that just returns [`axiom::actors::Status::Processed`] which can be
+    /// used as a handler for a simple actor.
+    fn simple_handler(_state: &mut usize, _aid: Arc<ActorId>, _message: &Arc<Message>) -> Status {
+        Status::Processed
     }
 
     #[test]
@@ -898,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn test_actor_stop() {
+    fn test_actor_returns_stop() {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::create());
@@ -937,14 +962,56 @@ mod tests {
         // Make sure that the actor is actually stopped and cant get more messages.
         assert!(true, aid.is_stopped());
         match ActorId::try_send(&aid, Arc::new(42 as i32)) {
-            Err(ActorError::ActorStopped) => assert!(true), // all ok!
+            Err(ActorError::ActorStopped) => assert!(true), // all OK!
             Ok(_) => assert!(false, "Expected the actor to be shut down!"),
             Err(e) => assert!(false, "Unexpected error: {:?}", e),
         }
         assert_eq!(false, system.is_alive(&aid));
 
+        // Verify the actor is NOT in the maps
+        let sys_clone = system.clone();
+        let actors_by_aid = sys_clone.actors_by_aid.read().unwrap();
+        assert_eq!(false, actors_by_aid.contains_key(&aid));
+        let aids_by_uuid = sys_clone.aids_by_uuid.read().unwrap();
+        assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid));
+
         // Shut down the system and clean up test.
         ActorSystem::shutdown(system);
+    }
+
+    #[test]
+    fn test_actor_force_stop() {
+        init_test_log();
+
+        // This test verifies that the system does not panic if we schedule to an actor
+        // that does not exist in the map. This can happen if the actor is stopped before
+        // the system notifies the actor id that it is dead.
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        let aid = ActorSystem::spawn(&system, 0, simple_handler);
+        ActorId::send(&aid, Arc::new(11));
+        assert_await_received(&aid, 1, 1000);
+
+        // Now we force stop the actor.
+        system.stop(aid.clone());
+
+        // Make sure the actor is out of the maps and cant be sent to.
+        assert!(true, aid.is_stopped());
+        match ActorId::try_send(&aid, Arc::new(42)) {
+            Err(ActorError::ActorStopped) => assert!(true), // all OK!
+            Ok(_) => assert!(false, "Expected the actor to be shut down!"),
+            Err(e) => assert!(false, "Unexpected error: {:?}", e),
+        }
+        assert_eq!(false, system.is_alive(&aid));
+
+        // Verify the actor is NOT in the maps
+        let sys_clone = system.clone();
+        let actors_by_aid = sys_clone.actors_by_aid.read().unwrap();
+        assert_eq!(false, actors_by_aid.contains_key(&aid));
+        let aids_by_uuid = sys_clone.aids_by_uuid.read().unwrap();
+        assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid));
+
+        // Wait for the message to get there because test is asynchronous.
+        ActorSystem::shutdown(system)
     }
 
     #[test]
@@ -955,24 +1022,44 @@ mod tests {
         // that does not exist in the map. This can happen if the actor is stopped before
         // the system notifies the actor id that it is dead.
         let system = ActorSystem::create(ActorSystemConfig::create());
-
-        let aid = ActorSystem::spawn(
-            &system,
-            0 as usize,
-            |_state: &mut usize, _aid: Arc<ActorId>, _message: &Arc<Message>| Status::Processed,
-        );
+        let aid = ActorSystem::spawn(&system, 0, simple_handler);
 
         // We force remove the actor from the system so now it cannot be scheduled.
         let sys_clone = system.clone();
-        let mut guard = (*sys_clone.actors_by_aid).write().unwrap();
-        guard.remove(&aid);
-        drop(guard); // give up the lock
+        let mut actors_by_aid = (*sys_clone.actors_by_aid).write().unwrap();
+        actors_by_aid.remove(&aid);
+        drop(actors_by_aid); // Give up the lock.
 
         // Send a message to the actor.
         ActorId::send(&aid, Arc::new(11));
 
         // Wait for the message to get there because test is asynchronous.
         ActorSystem::shutdown(system)
+    }
+
+    #[test]
+    fn test_find_by_uuid() {
+        init_test_log();
+
+        // This test checks that we can look up an actor by the UUID of the actor. Note that the
+        // UUIDs for the actors are generated using the version 4 UUID so the chance of collision
+        // in the cluster is not worth considering.
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        let aid = ActorSystem::spawn(&system, 0 as usize, simple_handler);
+
+        // Send a message to the actor verifying it is up.
+        ActorId::send(&aid, Arc::new(11));
+        let found: &Arc<ActorId> = &system.find_aid_by_uuid(&aid.uuid).unwrap();
+        assert!(Arc::ptr_eq(&aid, found));
+
+        // Kill the actor and it should be out of the map.
+        system.stop(aid.clone());
+        assert_eq!(None, system.find_aid_by_uuid(&aid.uuid));
+        assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
+
+        // Wait for the message to get there because test is asynchronous.
+        assert_await_received(&aid, 1, 1000);
+        ActorSystem::shutdown(system);
     }
 
     // ---------- Complete Example ----------
