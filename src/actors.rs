@@ -1156,10 +1156,10 @@ mod tests {
         let found1: &Arc<ActorId> = &system.find_aid_by_name("alpha").unwrap();
         assert!(Arc::ptr_eq(&aid1, found1));
 
-        let aid2 = ActorSystem::spawn_named(&system, "beta", 0 as usize, simple_handler).unwrap();
+        let aid2 = ActorSystem::spawn_named(&system, "bravo", 0 as usize, simple_handler).unwrap();
         ActorId::send(&aid2, Arc::new(11));
         assert_await_received(&aid2, 1, 1000);
-        let found2: &Arc<ActorId> = &system.find_aid_by_name("beta").unwrap();
+        let found2: &Arc<ActorId> = &system.find_aid_by_name("bravo").unwrap();
         assert!(Arc::ptr_eq(&aid2, found2));
 
         // Spawn an actor to overwrite "alpha" in the names and make sure it did.
@@ -1180,14 +1180,14 @@ mod tests {
 
         // Stop "beta" and they should and it should be out of the map.
         system.stop(aid2.clone());
-        assert_eq!(None, system.find_aid_by_name("beta"));
+        assert_eq!(None, system.find_aid_by_name("bravo"));
         assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid));
 
         // Now we should be able to crate a new actor with the name beta.
-        let aid3 = ActorSystem::spawn_named(&system, "beta", 0 as usize, simple_handler).unwrap();
+        let aid3 = ActorSystem::spawn_named(&system, "bravo", 0 as usize, simple_handler).unwrap();
         ActorId::send(&aid3, Arc::new(11));
         assert_await_received(&aid3, 1, 1000);
-        let found4: &Arc<ActorId> = &system.find_aid_by_name("beta").unwrap();
+        let found4: &Arc<ActorId> = &system.find_aid_by_name("bravo").unwrap();
         assert!(Arc::ptr_eq(&aid3, found4));
 
         // Wait for the message to get there because test is asynchronous.
