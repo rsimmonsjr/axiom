@@ -291,9 +291,10 @@ impl fmt::Debug for ActorId {
     fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "ActorId{{id: {}, node_id: {}, is_local: {}}}",
+            "ActorId{{id: {}, node_id: {}, name: {:?}, is_local: {}}}",
             self.uuid.to_string(),
             self.node_uuid.to_string(),
+            self.name,
             // FIXME Fix when remote actors are introduced.
             if let ActorSender::Local(_) = self.sender {
                 true
@@ -788,24 +789,24 @@ impl ActorSystem {
     /// send the actor a [`axiom::actors::SystemMsg::Shutdown`] message and allow it to shutdown
     /// gracefully.
     pub fn stop(&self, aid: Arc<ActorId>) {
-        let mut actors_by_aid = self.actors_by_aid.write().unwrap();
-        let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
-        let mut aids_by_name = self.aids_by_name.write().unwrap();
-        actors_by_aid.remove(&aid);
-        aids_by_uuid.remove(&aid.uuid);
-        if let Some(name_string) = &aid.name {
-            aids_by_name.remove(name_string);
+        {
+            let mut actors_by_aid = self.actors_by_aid.write().unwrap();
+            let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
+            let mut aids_by_name = self.aids_by_name.write().unwrap();
+            actors_by_aid.remove(&aid);
+            aids_by_uuid.remove(&aid.uuid);
+            if let Some(name_string) = &aid.name {
+                aids_by_name.remove(name_string);
+            }
+            aid.stop();
         }
-        aid.stop();
 
         // Notify all of the actors monitoring the actor that is stopped and remove the
         // actor from the map of monitors.
-        let mut monitoring_by_monitored = self.monitoring_by_monitored.write().unwrap();
-        if let Some(monitoring) = monitoring_by_monitored.get(&aid) {
+        if let Some(monitoring) = self.monitoring_by_monitored.write().unwrap().remove(&aid) {
             for m_aid in monitoring {
-                ActorId::send(m_aid, Arc::new(SystemMsg::Stopped(aid.clone())));
+                ActorId::send(&m_aid, Arc::new(SystemMsg::Stopped(aid.clone())));
             }
-            monitoring_by_monitored.remove(&aid);
         }
     }
 
@@ -835,9 +836,9 @@ impl ActorSystem {
     pub fn monitor(&self, monitoring: &Arc<ActorId>, monitored: &Arc<ActorId>) {
         let mut monitoring_by_monitored = self.monitoring_by_monitored.write().unwrap();
         let monitoring_vec = monitoring_by_monitored
-            .entry(monitoring.clone())
+            .entry(monitored.clone())
             .or_insert(Vec::new());
-        monitoring_vec.push(monitored.clone());
+        monitoring_vec.push(monitoring.clone());
     }
 }
 
@@ -1177,9 +1178,9 @@ mod tests {
     fn test_named_actors() {
         init_test_log();
 
-        // This test checks that we can look up an actor by the UUID of the actor. Note that the
-        // UUIDs for the actors are generated using the version 4 UUID so the chance of collision
-        // in the cluster is not worth considering.
+        // This test verifies that the concept of named actors works properly. When a user wants
+        // to declare a named actor they cannot register the same name twice and when the actor
+        // stops the name should be removed from the registered names and be available again.
         let system = ActorSystem::create(ActorSystemConfig::create());
 
         let aid1 = ActorSystem::spawn_named(&system, "alpha", 0 as usize, simple_handler).unwrap();
@@ -1221,6 +1222,60 @@ mod tests {
         assert_await_received(&aid3, 1, 1000);
         let found4: &Arc<ActorId> = &system.find_aid_by_name("bravo").unwrap();
         assert!(Arc::ptr_eq(&aid3, found4));
+
+        // Wait for the message to get there because test is asynchronous.
+        ActorSystem::shutdown(system);
+    }
+
+    /// A helper handler used by `test_monitors` that expects to get a stopped message for the
+    /// `aid` that was being monitored.
+    fn monitor_handler(
+        state: &mut Arc<ActorId>,
+        _aid: Arc<ActorId>,
+        message: &Arc<Message>,
+    ) -> Status {
+        if let Some(msg) = message.downcast_ref::<SystemMsg>() {
+            match msg {
+                SystemMsg::Stopped(aid) => {
+                    assert!(Arc::ptr_eq(state, aid));
+                    Status::Processed
+                }
+                _ => {
+                    assert!(false, "Received some other message!");
+                    Status::Processed // This assertion will fail but we still have to return.
+                }
+            }
+        } else {
+            assert!(false, "Received some other message!");
+            Status::Processed // This assertion will fail but we still have to return.
+        }
+    }
+
+    #[test]
+    fn test_monitors() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        let monitored = ActorSystem::spawn(&system, 0 as usize, simple_handler);
+        let not_monitoring = ActorSystem::spawn(&system, 0 as usize, simple_handler);
+        let monitoring1 = ActorSystem::spawn(&system, monitored.clone(), monitor_handler);
+        let monitoring2 = ActorSystem::spawn(&system, monitored.clone(), monitor_handler);
+        system.monitor(&monitoring1, &monitored);
+        system.monitor(&monitoring2, &monitored);
+
+        {
+            // Validate the monitors are there in a block to release mutex afterwards.
+            let monitoring_by_monitored = &system.monitoring_by_monitored.read().unwrap();
+            let m_vec = monitoring_by_monitored.get(&monitored).unwrap();
+            assert!(m_vec.contains(&monitoring1));
+            assert!(m_vec.contains(&monitoring2));
+        }
+
+        // Stop the actor and it should be out of the map.
+        system.stop(monitored.clone());
+        assert_await_received(&monitoring1, 1, 1000);
+        assert_await_received(&monitoring2, 1, 1000);
+        assert_await_received(&not_monitoring, 0, 1000);
 
         // Wait for the message to get there because test is asynchronous.
         ActorSystem::shutdown(system);
