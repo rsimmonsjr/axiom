@@ -81,13 +81,18 @@ pub enum SystemMsg {
 }
 
 /// Errors returned from actors and other parts of the actor system.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ActorError {
     /// Error sent when attempting to send to an actor that has already been stopped. A stopped
     /// actor cannot accept any more messages and is shut down. The holder of an
     /// [`axiom::actors::ActorId`] to a stopped actor should throw away the
     /// [`axiom::actors::ActorId`] as the actor can never be started again.
     ActorStopped,
+
+    /// An error returned when an actor is already using a local name but the user tries to
+    /// register that name for a new actor. The error contains the name that was attempted
+    /// to be registered.
+    NameAlreadyUsed(String),
 
     /// Error Used for when an attempt is made to send a message to a remote actor. **This
     /// error will be removed when remote actors are implemented.**
@@ -139,6 +144,9 @@ pub struct ActorId {
     /// actually lives but the user shouldn't need to worry about this under most circumstances
     /// because messages can be sent transparently across remote boundaries.
     pub node_uuid: Uuid,
+    /// The name of the actor as assigned by the user at spawn time if any. Note that this name
+    /// is local only, no guarantees are made that the name will be unique within the cluster.
+    pub name: Option<String>,
     /// The handle to the sender side for the actor's message channel.
     sender: ActorSender,
     /// Holds a reference to the local actor system that the actor id lives at.
@@ -356,6 +364,7 @@ impl Actor {
     pub fn new<F, State>(
         system: Arc<ActorSystem>,
         node_id: Uuid,
+        name: Option<String>,
         mut state: State,
         mut processor: F,
     ) -> Arc<Actor>
@@ -371,6 +380,7 @@ impl Actor {
         let aid = ActorId {
             uuid: Uuid::new_v4(),
             node_uuid: node_id,
+            name,
             sender: ActorSender::Local(sender),
             system: system.clone(),
             is_stopped: AtomicBool::new(false),
@@ -551,13 +561,12 @@ pub struct ActorSystem {
     /// to 10 milliseconds.
     /// TODO Allow user to pass this as configuration.
     thread_wait_time: u16,
-    /// Holds a map of the actor ids by their UUID in the actor. UUIDs of actors are assigned
-    /// when an actor is spawned and are cluster unique. This means that it should be easy if
-    /// a user knows an actor's uuid to get an [`axiom::actors::ActorId`] for that actor if they
-    /// know its UUID. The user wont need to know if the aid is local or remote, once thy have
-    /// the id that is enough to send to the actor or monitor it.
-    /// FIXME Implement monitors
+    /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
+    /// when an actor is spawned and are cluster unique.
     aids_by_uuid: Arc<RwLock<HashMap<Uuid, Arc<ActorId>>>>,
+    /// Holds a map of user assigned names to actor ids. The name is set when the actor is
+    /// spawned and is not guaranteed to be unique in the cluster.
+    aids_by_name: Arc<RwLock<HashMap<String, Arc<ActorId>>>>,
 }
 
 impl ActorSystem {
@@ -576,6 +585,7 @@ impl ActorSystem {
             receiver,
             actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
             aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
+            aids_by_name: Arc::new(RwLock::new(HashMap::new())),
             thread_pool: Mutex::new(Vec::with_capacity(config.thread_pool_size as usize)),
             shutdown_triggered: AtomicBool::new(false),
             thread_wait_time: config.thread_wait_time,
@@ -645,7 +655,25 @@ impl ActorSystem {
         self.receiver.pending()
     }
 
-    /// Spawns a new actor on the actor `system` using the given `starting_state` for the actors
+    // A internal helper to register an actor in the actor system.
+    fn register_actor(&self, actor: Arc<Actor>) -> Result<Arc<ActorId>, ActorError> {
+        let mut actors_by_aid = self.actors_by_aid.write().unwrap();
+        let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
+        let mut aids_by_name = self.aids_by_name.write().unwrap();
+        let aid = actor.aid.clone();
+        if let Some(name_string) = &aid.name {
+            if aids_by_name.contains_key(name_string) {
+                return Err(ActorError::NameAlreadyUsed(name_string.clone()));
+            } else {
+                aids_by_name.insert(name_string.clone(), aid.clone());
+            }
+        }
+        aids_by_uuid.insert(aid.uuid, aid.clone());
+        actors_by_aid.insert(aid.clone(), actor);
+        Ok(aid)
+    }
+
+    /// Spawns a new unnamed actor on the `system` using the given `starting_state` for the actor
     /// and the given `processor` function that will be used to process actor messages.
     ///
     /// The returned [`ActorId`] can be used to send messages to the actor.
@@ -667,13 +695,50 @@ impl ActorSystem {
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        let mut actors_by_aid = system.actors_by_aid.write().unwrap();
-        let mut aids_by_uuid = system.aids_by_uuid.write().unwrap();
-        let actor = Actor::new(system.clone(), system.node_id, state, processor);
-        let aid = actor.aid.clone();
-        actors_by_aid.insert(aid.clone(), actor);
-        aids_by_uuid.insert(aid.uuid, aid.clone());
-        aid
+        let actor = Actor::new(system.clone(), system.node_id, None, state, processor);
+        system.register_actor(actor).unwrap()
+    }
+
+    /// Spawns a new named actor on the `system` using the given `starting_state` for the
+    /// actor and the given `processor` function that will be used to process actor messages.
+    /// If the `name` is already registered then this function will return an [`std::Result::Err`]
+    /// with the value [`axiom::actors::ActorError::NameAlreadyUsed`] containing the name
+    /// attempted to be registered.
+    ///
+    /// The returned [`ActorId`] can be used to send messages to the actor.
+    ///
+    /// # Examples
+    /// ```
+    /// use axiom::actors::*;
+    /// use std::sync::Arc;
+    ///
+    /// let system = ActorSystem::create(ActorSystemConfig::create());
+    ///
+    /// let aid = ActorSystem::spawn_named(
+    ///     &system,
+    ///     "alpha",
+    ///     0 as usize,
+    ///     |_state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| Status::Processed,
+    /// );
+    /// ```
+    pub fn spawn_named<F, State>(
+        system: &Arc<Self>,
+        name: &str,
+        state: State,
+        processor: F,
+    ) -> Result<Arc<ActorId>, ActorError>
+    where
+        State: Send + Sync + 'static,
+        F: Processor<State> + 'static,
+    {
+        let actor = Actor::new(
+            system.clone(),
+            system.node_id,
+            Some(name.to_string()),
+            state,
+            processor,
+        );
+        system.register_actor(actor)
     }
 
     /// Schedules the `aid` for work on the given actor system. Note that this is the only time
@@ -713,8 +778,12 @@ impl ActorSystem {
     pub fn stop(&self, aid: Arc<ActorId>) {
         let mut actors_by_aid = self.actors_by_aid.write().unwrap();
         let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
+        let mut aids_by_name = self.aids_by_name.write().unwrap();
         actors_by_aid.remove(&aid);
         aids_by_uuid.remove(&aid.uuid);
+        if let Some(name_string) = &aid.name {
+            aids_by_name.remove(name_string);
+        }
         aid.stop();
     }
 
@@ -730,6 +799,14 @@ impl ActorSystem {
     pub fn find_aid_by_uuid(&self, uuid: &Uuid) -> Option<Arc<ActorId>> {
         let aids_by_uuid = self.aids_by_uuid.read().unwrap();
         aids_by_uuid.get(uuid).map(|aid| aid.clone())
+    }
+
+    /// Look up an [`axiom::actors::ActorId`] by the user assigned name of the actor and either
+    /// returns the located `aid` in a [`std::Option::Some`] or [`std::Option::None`] if not
+    /// found.
+    pub fn find_aid_by_name(&self, name: &str) -> Option<Arc<ActorId>> {
+        let aids_by_name = self.aids_by_name.read().unwrap();
+        aids_by_name.get(&name.to_string()).map(|aid| aid.clone())
     }
 }
 
@@ -1049,16 +1126,71 @@ mod tests {
 
         // Send a message to the actor verifying it is up.
         ActorId::send(&aid, Arc::new(11));
+        assert_await_received(&aid, 1, 1000);
         let found: &Arc<ActorId> = &system.find_aid_by_uuid(&aid.uuid).unwrap();
         assert!(Arc::ptr_eq(&aid, found));
 
-        // Kill the actor and it should be out of the map.
+        // Stop the actor and it should be out of the map.
         system.stop(aid.clone());
         assert_eq!(None, system.find_aid_by_uuid(&aid.uuid));
+
+        // Verify attempting to find with unregistered name returns none.
         assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
         // Wait for the message to get there because test is asynchronous.
-        assert_await_received(&aid, 1, 1000);
+        ActorSystem::shutdown(system);
+    }
+
+    #[test]
+    fn test_named_actors() {
+        init_test_log();
+
+        // This test checks that we can look up an actor by the UUID of the actor. Note that the
+        // UUIDs for the actors are generated using the version 4 UUID so the chance of collision
+        // in the cluster is not worth considering.
+        let system = ActorSystem::create(ActorSystemConfig::create());
+
+        let aid1 = ActorSystem::spawn_named(&system, "alpha", 0 as usize, simple_handler).unwrap();
+        ActorId::send(&aid1, Arc::new(11));
+        assert_await_received(&aid1, 1, 1000);
+        let found1: &Arc<ActorId> = &system.find_aid_by_name("alpha").unwrap();
+        assert!(Arc::ptr_eq(&aid1, found1));
+
+        let aid2 = ActorSystem::spawn_named(&system, "bravo", 0 as usize, simple_handler).unwrap();
+        ActorId::send(&aid2, Arc::new(11));
+        assert_await_received(&aid2, 1, 1000);
+        let found2: &Arc<ActorId> = &system.find_aid_by_name("bravo").unwrap();
+        assert!(Arc::ptr_eq(&aid2, found2));
+
+        // Spawn an actor to overwrite "alpha" in the names and make sure it did.
+        let result = ActorSystem::spawn_named(&system, "alpha", 0 as usize, simple_handler);
+        assert_eq!(
+            Err(ActorError::NameAlreadyUsed("alpha".to_string())),
+            result
+        );
+
+        // The same actor has "alpha" name and is still up.
+        let found3: &Arc<ActorId> = &system.find_aid_by_name("alpha").unwrap();
+        assert!(Arc::ptr_eq(&aid1, found3));
+        ActorId::send(&aid1, Arc::new(11));
+        assert_await_received(&aid1, 2, 1000);
+
+        // Verify attempting to find with unregistered name returns none.
+        assert_eq!(None, system.find_aid_by_name("charlie"));
+
+        // Stop "beta" and they should and it should be out of the map.
+        system.stop(aid2.clone());
+        assert_eq!(None, system.find_aid_by_name("bravo"));
+        assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid));
+
+        // Now we should be able to crate a new actor with the name beta.
+        let aid3 = ActorSystem::spawn_named(&system, "bravo", 0 as usize, simple_handler).unwrap();
+        ActorId::send(&aid3, Arc::new(11));
+        assert_await_received(&aid3, 1, 1000);
+        let found4: &Arc<ActorId> = &system.find_aid_by_name("bravo").unwrap();
+        assert!(Arc::ptr_eq(&aid3, found4));
+
+        // Wait for the message to get there because test is asynchronous.
         ActorSystem::shutdown(system);
     }
 
