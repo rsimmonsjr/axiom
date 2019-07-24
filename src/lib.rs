@@ -107,7 +107,7 @@
 //!
 //! *It's important to keep in mind that the starting state is moved into the actor and you
 //! will not have external access to it afterwards.* This is by design and although you could
-//! conceivably use a `std::sync::Arc` to a structure as state, that would definitely be a bad
+//! conceivably use a [`std::sync::Arc`] to a structure as state, that would definitely be a bad
 //! idea as it would break the rules we laid out for actors.
 //!
 //! There is a lot more to learn and explore and your best resource is the test code for Axiom.
@@ -129,6 +129,7 @@ mod tests {
             .try_init();
     }
 
+    // FIXME Replace this stub with some comprehensive library tests.
     #[test]
     fn it_works() {
         assert_eq!(2 + 2, 4);

@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// A message that is used to indicate that a position index points to no other node. Note that
-/// this message is something beyond the capability of any user to allocate for the channel size.
+/// this value is something beyond the capability of any user to allocate for the channel size.
 const NIL_NODE: usize = 1 << 16 as usize;
 
 /// Errors potentially returned from channel operations.
@@ -53,7 +53,7 @@ impl<T: Sync + Send> fmt::Debug for SeccErrors<T> {
 
 /// A single node in the channel's buffer.
 struct SeccNode<T: Sync + Send> {
-    /// Contains a message set in the node in a Some or a None if empty.  Note that this is unsafe
+    /// Contains a message in a `Some` or a `None` if the node is empty.  Note that this is unsafe
     /// in order to get around Rust mutability locks so that this data structure can be passed
     /// around immutably but also still be able to send and receive.
     cell: UnsafeCell<Option<T>>,
@@ -63,7 +63,7 @@ struct SeccNode<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> SeccNode<T> {
-    /// Creates a new node where the next index is set to the nil node.
+    /// Creates a new node where the next index is set to the `NIL_NODE`.
     fn new() -> SeccNode<T> {
         SeccNode {
             cell: UnsafeCell::new(None),
@@ -71,7 +71,7 @@ impl<T: Sync + Send> SeccNode<T> {
         }
     }
 
-    /// Creates a new node where the next index is the given message.
+    /// Creates a new node where the next index is set to point at the provided value.
     fn with_next(next: usize) -> SeccNode<T> {
         SeccNode {
             cell: UnsafeCell::new(None),
@@ -128,7 +128,8 @@ struct SeccSendPtrs {
     /// The tail of the queue which holds messages currently in the channel.
     queue_tail: usize,
     /// The head of the pool of available nodes to be used when sending messages to the channel.  
-    /// Note that if there is only one node in the pool then the channel is full.
+    /// Note that if there is only one node in the pool then the channel is full as neither the
+    /// pool nor queue may be empty.
     pool_head: usize,
 }
 
@@ -136,7 +137,8 @@ struct SeccSendPtrs {
 #[derive(Debug)]
 struct SeccReceivePtrs {
     /// The head of the queue which holds messages currently in the channel.  Note that if there
-    /// is only one node in the queue then the channel is empty.
+    /// is only one node in the queue then the channel is empty as neither the pool nor queue
+    /// may be empty.
     queue_head: usize,
     /// The tail of the pool of available nodes to be used when sending messages to the channel.
     pool_tail: usize,
@@ -148,11 +150,11 @@ struct SeccReceivePtrs {
     cursor: usize,
 }
 
-/// Data structure that contains the core of the channel including tracking of statistics
-/// and node storage.
+/// Data structure that contains the core of the channel including tracking of statistics and
+/// node storage.
 pub struct SeccCore<T: Sync + Send> {
     /// Capacity of the channel, which is the total number of items that can be stored. Note that
-    /// there will be 2 additional nodes allocated because neither the queue nor pool should ever
+    /// there will be 2 additional nodes allocated because neither the queue nor pool may ever
     /// be empty.
     capacity: usize,
     /// The timeout used for polling the channel when waiting forever to send or recieve.
@@ -198,9 +200,9 @@ pub struct SeccSender<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> SeccSender<T> {
-    /// Sends a message to the channel, the message will be moved into the channel, it will take
-    /// ownership of the message. This function will either return an empty [`std::Result::Ok`] or
-    /// an [`std::Result::Err`] containing the last message sent if something went wrong.
+    /// Sends a message, which will be moved into the channel. This function will either return
+    /// an empty [`std::Result::Ok`] or an [`std::Result::Err`] containing the last message
+    /// sent if something went wrong such as the channel being full.
     pub fn send(&self, message: T) -> Result<(), SeccErrors<T>> {
         unsafe {
             // Retrieve send pointers and the encoded indexes inside them and their Condvar.
@@ -255,7 +257,7 @@ impl<T: Sync + Send> SeccSender<T> {
                 Err(SeccErrors::Full(v)) => {
                     message = v;
                     let dur = Duration::from_millis(timeout_ms as u64);
-                    // We will put a condvar to be notified if space opens up.
+                    // We will put a condvar on the mutex to be notified if space opens up.
                     let (ref mutex, ref condvar) = &*self.core.receive_ptrs;
                     let receive_ptrs = mutex.lock().unwrap();
 
@@ -335,8 +337,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
             }
 
             // Extract the message and return a reference to it. If this panics then there
-            // was somehow a receivable node with no message in it. That should never happen
-            // under normal circumstances.
+            // was somehow a receivable node with no message in it which should never happen.
             let message: &T = (*((*read_ptr).cell).get())
                 .as_ref()
                 .expect("secc::peek(): empty receivable node");
@@ -346,9 +347,10 @@ impl<T: Sync + Send> SeccReceiver<T> {
 
     /// Receives the next message that is receivable. This will either receive the message at
     /// the head of the channel or, in the case that there is a skip cursor active, the next
-    /// receivable message will be in the node at the skip cursor. This means that it is possible
-    /// that receive could return an [`axiom::secc::SeccErrors::Empty`] when there are actually
-    /// messages in the channel because there will be none readable until the skip is reset.
+    /// receivable message will be in the node pointed to by the skip cursor. This means that it
+    /// is possible that receive could return an [`axiom::secc::SeccErrors::Empty`] when there
+    /// are actually messages in the channel because there will be none readable until the skip
+    /// is reset.
     pub fn receive(&self) -> Result<T, SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
@@ -383,9 +385,10 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 } else {
                     // If the cursor is set we have to dequeue in the middle of the list and fix
                     // the node chain and then move the node that the cursor was pointing at to
-                    // the pool tail. Note that the precursor will never be [`NIL_NODE`] when the
-                    // cursor is set because that would mean that there is no skip going on.
-                    // Precursor is only ever set to a skipped node that could be read.
+                    // the pool tail. Note that the `skipped` pointer will never be [`NIL_NODE`]
+                    // when the cursor is not [`NIL_NODE`]. The `skipped` pointer is only ever
+                    // set to a skipped node that could be read and lags beind `cursor` by one
+                    // node in the queue.
                     let skipped_ptr = (*self.core.node_ptrs.get())[receive_ptrs.skipped];
                     ((*skipped_ptr).next).store(next_read_pos, Ordering::SeqCst);
                     (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
@@ -414,7 +417,8 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// messages in the channel or an error if the channel was empty.
+    /// Removes the next receivable message in the channel and abandons it or returns an error
+    /// if the channel was empty.
     pub fn pop(&self) -> Result<(), SeccErrors<T>> {
         self.receive()?;
         Ok(())
@@ -465,11 +469,11 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// Skips the next message to be received from the channel. If the skip succeeds than the number
-    /// of receivable messages will drop by one. Calling this function will either set up a skip
-    /// cursor in the channel or move an existing skip cursor. To receive skipped messages the
-    /// user will need to first call [`axiom::secc::SeccReceiver::reset_skip`] prior to calling
-    /// [`axiom::secc::SeccReceiver::receive`] in order to clear the skip cursor.
+    /// Skips the next message to be received from the channel. If the skip succeeds than the
+    /// number of receivable messages will drop by one. Calling this function will either set up
+    /// a skip `cursor` in the channel or move an existing skip `cursor`. To receive skipped
+    /// messages the user will need to first call [`axiom::secc::SeccReceiver::reset_skip`] prior
+    /// to calling [`axiom::secc::SeccReceiver::receive`] thus clearing the skip cursor.
     pub fn skip(&self) -> Result<(), SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
@@ -502,9 +506,9 @@ impl<T: Sync + Send> SeccReceiver<T> {
         }
     }
 
-    /// Cancels skipping messages in the channel and resets the pointers of the channel back to
-    /// the head allowing previously skipped messages to be received. Note that calling this
-    /// method on a channel with no skip cursor is essentially a no-op.
+    /// Cancels skipping messages in the channel and resets the `skipped` and `cursor` pointers
+    /// to [`NIL_NODE`] allowing previously skipped messages to be received. Note that calling
+    /// this method on a channel with no skip cursor will do nothing.
     pub fn reset_skip(&self) -> Result<(), SeccErrors<T>> {
         // Retrieve receive pointers and the encoded indexes inside them.
         let (ref mutex, ref condvar) = &*self.core.receive_ptrs;
@@ -514,7 +518,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
             unsafe {
                 // We start from queue head and count to the cursor to get the number of now
                 // receivable messages in the channel.
-                let mut count: usize = 1; // minimum number of skipped nodes
+                let mut count: usize = 1; // Minimum number of skipped nodes.
                 let mut next_ptr = (*(*self.core.node_ptrs.get())[receive_ptrs.queue_head])
                     .next
                     .load(Ordering::SeqCst);
@@ -529,7 +533,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 receive_ptrs.skipped = NIL_NODE;
             }
         }
-        // Notify anyone waiting on receivable messages to be available.
+        // Notify anyone waiting for receivable messages to be available.
         condvar.notify_all();
         Ok(())
     }
@@ -565,8 +569,8 @@ pub fn create<T: Sync + Send>(capacity: u16, poll_ms: u16) -> (SeccSender<T>, Se
     let queue_head = nodes.len() - 1;
     let queue_tail = queue_head;
 
-    // Allocate the tail in the pool of nodes that will be added to in order to form
-    // the pool. Note that although this is expensive, it only has to be done once.
+    // Allocate the tail in the pool of nodes that will be added to in order to form the pool.
+    // Note that although this is expensive, it only has to be done once.
     nodes.push(SeccNode::<T>::new());
     node_ptrs.push(nodes.last_mut().unwrap() as *mut SeccNode<T>);
     let mut pool_head = nodes.len() - 1;
@@ -1027,11 +1031,11 @@ mod tests {
         assert_node_next_nil!(pointers, 2);
         assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL_NODE, NIL_NODE);
 
+        // FIXME Issue #13: Add tests to verify skipping functionality.
+
         // This debug line here so we don't get unused warnings as it is not necessary to the
         // test. :) This function can be called by developers writing tests to debug the channel.
         debug_channel("send/receive done: ", sender.core.clone());
-
-        // FIXME test Skipping
     }
 
     #[test]
@@ -1117,7 +1121,7 @@ mod tests {
         init_test_log();
 
         // Tests that triggering send and receive as close to at the same time as possible does
-        // not cause any race conditions.  order to try to test potential races.
+        // not cause any race conditions.
         let (sender, receiver) = create_with_arcs::<u32>(5, 20);
         let receiver2 = receiver.clone();
         let pair = Arc::new((Mutex::new((false, false)), Condvar::new()));
