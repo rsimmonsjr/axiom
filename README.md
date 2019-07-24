@@ -10,6 +10,15 @@ over years of Actor model implementations in Akka and Erlang. Axiom is, however,
 re-implementation of either of the two aforementioned actor models but rather a new 
 implementation deriving inspiration from the good parts of those models.
 
+### What's New
+* 2019-07-23: 0.0.5 
+  * Various documentation and miscellaneous fixes.
+  * Issue 11: Actors shouldn't panic if they cant schedule the actor.
+  * Issue 16: Put in a means to allow an actor to monitor another actor.
+  * Issue 25: Implement a means to lookup an Actor by its UUID.
+  * Issue 27: Add the ability to register a local name for an actor.
+  * Issue 29: Implement monitors for actors.
+
 # Getting Started
 
 *An actor model is an architectural asynchronous programming paradigm characterized by the use
