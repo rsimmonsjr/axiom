@@ -70,11 +70,17 @@ pub enum Status {
 
 /// An enum containing messages that are sent to actors by the actor system itself and are
 /// universal to all actors.
+#[derive(Debug, Eq, PartialEq)]
 pub enum SystemMsg {
     /// A message that instructs an actor to shut down. The actor receiving this message
     /// should shut down all open file handles and any other resources and return a
     /// [`axiom::actors::Status::Stop`] from the process call.
     Stop,
+
+    /// A message sent to an actor when an actor it is monitoring is stopped and thus not
+    /// able to process additional messages. The enum contains the `aid` of the actor that
+    /// stopped.
+    Stopped(Arc<ActorId>),
 }
 
 /// Errors returned from actors and other parts of the actor system.
@@ -290,9 +296,10 @@ impl fmt::Debug for ActorId {
     fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "ActorId{{id: {}, node_id: {}, is_local: {}}}",
+            "ActorId{{id: {}, node_id: {}, name: {:?}, is_local: {}}}",
             self.uuid.to_string(),
             self.node_uuid.to_string(),
+            self.name,
             // FIXME Fix when remote actors are introduced.
             if let ActorSender::Local(_) = self.sender {
                 true
@@ -545,6 +552,8 @@ impl ActorSystemConfig {
 pub struct ActorSystem {
     /// Id for this actor system and node.
     pub node_id: Uuid,
+    /// The configuration for the actor system which was passed to it when created.
+    pub configuration: ActorSystemConfig,
     /// Sender side of the work channel. When an actor gets a message and its pending count
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a message if it has more messages
@@ -553,24 +562,24 @@ pub struct ActorSystem {
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
     receiver: Arc<SeccReceiver<Arc<Actor>>>,
+    /// Holds handles to the pool of threads processing the work channel.
+    thread_pool: Mutex<Vec<JoinHandle<()>>>,
+    /// A flag holding whether or not the system is currently shutting down.
+    shutdown_triggered: AtomicBool,
     /// Holds the [`axiom::actors::Actor`] objects keyed by the [`axiom::actors::ActorId`]. The
     /// [`std::sync::RwLock`] will be locked for write only when a new actor is spawned but
     /// otherwise will be locked for read by the [`axiom::actors::ActorId`] instances when they
     /// attempt to send an actor to the work channel for processing.
     actors_by_aid: Arc<RwLock<HashMap<Arc<ActorId>, Arc<Actor>>>>,
-    /// Holds handles to the pool of threads processing the work channel.
-    thread_pool: Mutex<Vec<JoinHandle<()>>>,
-    /// A flag holding whether or not the system is currently shutting down.
-    shutdown_triggered: AtomicBool,
-    /// Duration for threads to wait for new messages before cycling and checking again. Defaults
-    /// to 10 milliseconds.
-    thread_wait_time: u16,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
     aids_by_uuid: Arc<RwLock<HashMap<Uuid, Arc<ActorId>>>>,
     /// Holds a map of user assigned names to actor ids. The name is set when the actor is
     /// spawned.
     aids_by_name: Arc<RwLock<HashMap<String, Arc<ActorId>>>>,
+    /// Holds a map of monitors where the key is the `aid` of the actor being monitored and
+    /// the value is a vector of `aid`s that are monitoring the actor.
+    monitoring_by_monitored: Arc<RwLock<HashMap<Arc<ActorId>, Vec<Arc<ActorId>>>>>,
 }
 
 impl ActorSystem {
@@ -582,17 +591,21 @@ impl ActorSystem {
         let (sender, receiver) =
             secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
+        // Convert to usize for pre-allocating a vector.
+        let thread_pool_size: usize = config.thread_pool_size as usize;
+
         // Creates the actor system with the thread pools and actor map initialized.
         let system = Arc::new(ActorSystem {
             node_id: Uuid::new_v4(),
+            configuration: config,
             sender,
             receiver,
+            thread_pool: Mutex::new(Vec::with_capacity(thread_pool_size)),
+            shutdown_triggered: AtomicBool::new(false),
             actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
             aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
             aids_by_name: Arc::new(RwLock::new(HashMap::new())),
-            thread_pool: Mutex::new(Vec::with_capacity(config.thread_pool_size as usize)),
-            shutdown_triggered: AtomicBool::new(false),
-            thread_wait_time: config.thread_wait_time,
+            monitoring_by_monitored: Arc::new(RwLock::new(HashMap::new())),
         });
 
         // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
@@ -600,7 +613,7 @@ impl ActorSystem {
         // get around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.thread_pool.lock().unwrap();
-            for _ in 0..config.thread_pool_size {
+            for _ in 0..thread_pool_size {
                 let thread = ActorSystem::start_dispatcher_thread(system.clone());
                 guard.push(thread);
             }
@@ -624,7 +637,7 @@ impl ActorSystem {
 
         thread::spawn(move || {
             while !system.shutdown_triggered.load(Ordering::Relaxed) {
-                match receiver.receive_await_timeout(system.thread_wait_time) {
+                match receiver.receive_await_timeout(system.configuration.thread_wait_time) {
                     Err(_) => (), // not an error, just loop and try again.
                     Ok(actor) => Actor::receive(actor),
                 }
@@ -780,15 +793,25 @@ impl ActorSystem {
     /// send the actor a [`axiom::actors::SystemMsg::Stop`] message and allow it to stop
     /// gracefully.
     pub fn stop(&self, aid: Arc<ActorId>) {
-        let mut actors_by_aid = self.actors_by_aid.write().unwrap();
-        let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
-        let mut aids_by_name = self.aids_by_name.write().unwrap();
-        actors_by_aid.remove(&aid);
-        aids_by_uuid.remove(&aid.uuid);
-        if let Some(name_string) = &aid.name {
-            aids_by_name.remove(name_string);
+        {
+            let mut actors_by_aid = self.actors_by_aid.write().unwrap();
+            let mut aids_by_uuid = self.aids_by_uuid.write().unwrap();
+            let mut aids_by_name = self.aids_by_name.write().unwrap();
+            actors_by_aid.remove(&aid);
+            aids_by_uuid.remove(&aid.uuid);
+            if let Some(name_string) = &aid.name {
+                aids_by_name.remove(name_string);
+            }
+            aid.stop();
         }
-        aid.stop();
+
+        // Notify all of the actors monitoring the actor that is stopped and remove the
+        // actor from the map of monitors.
+        if let Some(monitoring) = self.monitoring_by_monitored.write().unwrap().remove(&aid) {
+            for m_aid in monitoring {
+                ActorId::send(&m_aid, Arc::new(SystemMsg::Stopped(aid.clone())));
+            }
+        }
     }
 
     /// Checks to see if the actor with the given [`axiom::actors::ActorId`] is alive within
@@ -811,6 +834,15 @@ impl ActorSystem {
     pub fn find_aid_by_name(&self, name: &str) -> Option<Arc<ActorId>> {
         let aids_by_name = self.aids_by_name.read().unwrap();
         aids_by_name.get(&name.to_string()).map(|aid| aid.clone())
+    }
+
+    /// Adds a monitor so that `monitoring` will be informed if `monitored` stops.
+    pub fn monitor(&self, monitoring: &Arc<ActorId>, monitored: &Arc<ActorId>) {
+        let mut monitoring_by_monitored = self.monitoring_by_monitored.write().unwrap();
+        let monitoring_vec = monitoring_by_monitored
+            .entry(monitored.clone())
+            .or_insert(Vec::new());
+        monitoring_vec.push(monitoring.clone());
     }
 }
 
@@ -1026,6 +1058,7 @@ mod tests {
                     *state += 1;
                     match msg {
                         SystemMsg::Stop => Status::Stop,
+                        m => panic!("unexpected message: {:?}", m),
                     }
                 } else {
                     assert!(false, "Failed to dispatch properly");
@@ -1148,9 +1181,9 @@ mod tests {
     fn test_named_actors() {
         init_test_log();
 
-        // This test verifies functionality around named actors including spawning, prevention
-        // of using the same name multiple times and that the names map is cleaned up when the
-        // actor is stopped.
+        // This test verifies that the concept of named actors works properly. When a user wants
+        // to declare a named actor they cannot register the same name twice and when the actor
+        // stops the name should be removed from the registered names and be available again.
         let system = ActorSystem::create(ActorSystemConfig::create());
 
         let aid1 = ActorSystem::spawn_named(&system, "alpha", 0 as usize, simple_handler).unwrap();
@@ -1193,6 +1226,60 @@ mod tests {
         assert_await_received(&aid3, 1, 1000);
         let found4: &Arc<ActorId> = &system.find_aid_by_name("bravo").unwrap();
         assert!(Arc::ptr_eq(&aid3, found4));
+
+        // Wait for the message to get there because test is asynchronous.
+        ActorSystem::shutdown(system);
+    }
+
+    /// A helper handler used by `test_monitors` that expects to get a stopped message for the
+    /// `aid` that was being monitored.
+    fn monitor_handler(
+        state: &mut Arc<ActorId>,
+        _aid: Arc<ActorId>,
+        message: &Arc<Message>,
+    ) -> Status {
+        if let Some(msg) = message.downcast_ref::<SystemMsg>() {
+            match msg {
+                SystemMsg::Stopped(aid) => {
+                    assert!(Arc::ptr_eq(state, aid));
+                    Status::Processed
+                }
+                _ => {
+                    assert!(false, "Received some other message!");
+                    Status::Processed // This assertion will fail but we still have to return.
+                }
+            }
+        } else {
+            assert!(false, "Received some other message!");
+            Status::Processed // This assertion will fail but we still have to return.
+        }
+    }
+
+    #[test]
+    fn test_monitors() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        let monitored = ActorSystem::spawn(&system, 0 as usize, simple_handler);
+        let not_monitoring = ActorSystem::spawn(&system, 0 as usize, simple_handler);
+        let monitoring1 = ActorSystem::spawn(&system, monitored.clone(), monitor_handler);
+        let monitoring2 = ActorSystem::spawn(&system, monitored.clone(), monitor_handler);
+        system.monitor(&monitoring1, &monitored);
+        system.monitor(&monitoring2, &monitored);
+
+        {
+            // Validate the monitors are there in a block to release mutex afterwards.
+            let monitoring_by_monitored = &system.monitoring_by_monitored.read().unwrap();
+            let m_vec = monitoring_by_monitored.get(&monitored).unwrap();
+            assert!(m_vec.contains(&monitoring1));
+            assert!(m_vec.contains(&monitoring2));
+        }
+
+        // Stop the actor and it should be out of the map.
+        system.stop(monitored.clone());
+        assert_await_received(&monitoring1, 1, 1000);
+        assert_await_received(&monitoring2, 1, 1000);
+        assert_await_received(&not_monitoring, 0, 1000);
 
         // Wait for the message to get there because test is asynchronous.
         ActorSystem::shutdown(system);
