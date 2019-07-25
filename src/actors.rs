@@ -384,8 +384,8 @@ impl Actor {
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        // TODO Let the user pass the size of the channel queue when creating the actor.
-        // Create the channel for the actor.
+        // FIXME: Issue #33: Let the user pass the size of the channel queue when creating
+        // the actor.  Create the channel for the actor.
         let (sender, receiver) = secc::create::<Arc<Message>>(32, 10);
 
         // The sender will be put inside the actor id.
@@ -630,8 +630,8 @@ impl ActorSystem {
     /// to run and not take up resources if they have no messages to process but also prevents
     /// one super busy actor from starving out other actors of that get messages only occasionally.
     fn start_dispatcher_thread(system: Arc<ActorSystem>) -> JoinHandle<()> {
-        // FIXME Add metrics to this to log warnings if the messages take to long to process.
-        // FIXME Add metrics to this to log a warning if messages or actors are spending too
+        // FIXME Issue #32: Add metrics to this to log warnings if the messages take to long to process.
+        // FIXME Issue #32: Add metrics to this to log a warning if messages or actors are spending too
         // long in the channel.
         let receiver = system.receiver.clone();
 

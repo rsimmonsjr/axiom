@@ -653,6 +653,7 @@ mod tests {
             $skipped:expr,
             $cursor:expr
         ) => {{
+            let actual = debug_channel($sender.core.clone());
             let (ref mutex, _) = &*$sender.core.send_ptrs;
             let send_ptrs = mutex.lock().unwrap();
             let (ref mutex, _) = &*$receiver.core.receive_ptrs;
@@ -660,33 +661,48 @@ mod tests {
 
             assert_eq!(
                 $queue_head, receive_ptrs.queue_head,
-                " <== queue_head mismatch\n"
+                " <== queue_head mismatch!\n Actual: {}\n",
+                actual
             );
             assert_eq!(
                 $queue_tail, send_ptrs.queue_tail,
-                "<== queue_tail mismatch\n"
+                "<== queue_tail mismatch\n Actual: {}\n",
+                actual
             );
-            assert_eq!($pool_head, send_ptrs.pool_head, "<== pool_head mismatch\n");
+            assert_eq!(
+                $pool_head, send_ptrs.pool_head,
+                "<== pool_head mismatch\n Actual: {}\n",
+                actual
+            );
             assert_eq!(
                 $pool_tail, receive_ptrs.pool_tail,
-                " <== pool_tail mismatch\n"
+                " <== pool_tail mismatch\n Actual: {}\n",
+                actual
             );
-            assert_eq!($skipped, receive_ptrs.skipped, " <== skipped mismatch\n");
-            assert_eq!($cursor, receive_ptrs.cursor, " <== pool_tail mismatch\n");
+            assert_eq!(
+                $skipped, receive_ptrs.skipped,
+                " <== skipped mismatch\n Actual: {}\n",
+                actual
+            );
+            assert_eq!(
+                $cursor, receive_ptrs.cursor,
+                " <== cursor mismatch\n Actual: {}\n",
+                actual
+            );
         }};
     }
 
     /// Asserts that the given node in the queue has the expected next pointer.
     macro_rules! assert_node_next {
         ($pointers:expr, $node:expr, $next:expr) => {
-            unsafe { assert_eq!((*$pointers[$node]).next.load(Ordering::Relaxed), $next) }
+            unsafe { assert_eq!((*$pointers[$node]).next.load(Ordering::Relaxed), $next,) }
         };
     }
 
     /// Asserts that the given node in the queue has the expected next pointing to `NIL_NODE`.
     macro_rules! assert_node_next_nil {
         ($pointers:expr, $node:expr) => {
-            unsafe { assert_eq!((*$pointers[$node]).next.load(Ordering::Relaxed), NIL_NODE) }
+            unsafe { assert_eq!((*$pointers[$node]).next.load(Ordering::Relaxed), NIL_NODE,) }
         };
     }
 
@@ -745,19 +761,18 @@ mod tests {
     }
 
     /// Creates a debug string for debugging channel problems.
-    pub fn debug_channel<T: Send + Sync>(prefix: &str, core: Arc<SeccCore<T>>) {
+    pub fn debug_channel<T: Send + Sync>(core: Arc<SeccCore<T>>) -> String {
         let r = core.receivable.load(Ordering::Relaxed);
         let (ref mutex, _) = &*core.receive_ptrs;
         let receive_ptrs = mutex.lock().unwrap();
         let (ref mutex, _) = &*core.send_ptrs;
         let send_ptrs = mutex.lock().unwrap();
-        println!(
-            "{} Receivable: {}, {}, {}",
-            prefix,
+        format!(
+            "Receivable: {}, {}, {}",
             r,
             debug_receive(core.clone(), receive_ptrs),
             debug_send(core.clone(), send_ptrs)
-        );
+        )
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -873,7 +888,8 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
 
-        // Validate that we cannot fill the channel past its capacity.
+        // Validate that we cannot fill the channel past its capacity and attempts do not
+        // mangle the pointers in the channel.
         assert_eq!(Err(SeccErrors::Full(Items::F)), sender.send(Items::F));
         assert_eq!(5, sender.pending());
         assert_eq!(5, sender.receivable());
@@ -886,13 +902,6 @@ mod tests {
         assert_eq!(5, sender.sent());
         assert_eq!(0, sender.received());
 
-        assert_eq!(Err(SeccErrors::Full(Items::F)), sender.send(Items::F));
-        assert_eq!(5, sender.pending());
-        assert_eq!(5, sender.receivable());
-        assert_eq!(5, sender.sent());
-        assert_eq!(0, sender.received());
-
-        // Validate that receiving from the channel performs the proper pointer operations.
         assert_node_next!(pointers, 0, 6);
         assert_node_next!(pointers, 6, 5);
         assert_node_next!(pointers, 5, 4);
@@ -902,6 +911,22 @@ mod tests {
         assert_node_next_nil!(pointers, 1);
         assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
 
+        // Peek at the first message in the channel which should change nothing.
+        assert_eq!(Ok(&Items::A), receiver.peek());
+        assert_eq!(5, receiver.pending());
+        assert_eq!(5, receiver.receivable());
+        assert_eq!(5, receiver.sent());
+        assert_eq!(0, receiver.received());
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_node_next_nil!(pointers, 1);
+        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
+
+        // Validate that receiving from the channel performs the proper pointer operations.
         assert_eq!(Ok(Items::A), receiver.receive());
         assert_eq!(4, receiver.pending());
         assert_eq!(4, receiver.receivable());
@@ -1031,11 +1056,145 @@ mod tests {
         assert_node_next_nil!(pointers, 2);
         assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL_NODE, NIL_NODE);
 
-        // FIXME Issue #13: Add tests to verify skipping functionality.
+        // Skipping in empty queue should return empty and not mangle pointers.
+        assert_eq!(Err(SeccErrors::Empty), receiver.skip());
+        assert_eq!(0, receiver.pending());
+        assert_eq!(0, receiver.receivable());
+        assert_eq!(6, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next_nil!(pointers, 1);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL_NODE, NIL_NODE);
 
-        // This debug line here so we don't get unused warnings as it is not necessary to the
-        // test. :) This function can be called by developers writing tests to debug the channel.
-        debug_channel("send/receive done: ", sender.core.clone());
+        // Send another value to the channel so we can test skipping.
+        assert_eq!(Ok(()), sender.send(Items::A));
+        assert_eq!(1, receiver.pending());
+        assert_eq!(1, receiver.receivable());
+        assert_eq!(7, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next_nil!(pointers, 0);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 0, 6, 2, NIL_NODE, NIL_NODE);
+
+        // Skipping sets the skip cursor.
+        assert_eq!(Ok(()), receiver.skip());
+        assert_eq!(1, receiver.pending());
+        assert_eq!(0, receiver.receivable());
+        assert_eq!(7, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next_nil!(pointers, 0);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 0, 6, 2, 1, 0);
+
+        // A skip attempt should return empty and not change the pointers.
+        assert_eq!(Err(SeccErrors::Empty), receiver.skip());
+        assert_eq!(1, receiver.pending());
+        assert_eq!(0, receiver.receivable());
+        assert_eq!(7, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next_nil!(pointers, 0);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 0, 6, 2, 1, 0);
+
+        // Sending another item while skipping should work.
+        assert_eq!(Ok(()), sender.send(Items::B));
+        assert_eq!(2, receiver.pending());
+        assert_eq!(1, receiver.receivable());
+        assert_eq!(8, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 6, 5, 2, 1, 0);
+
+        // Peek will return a reference to cursor's item but not delete it.
+        assert_eq!(Ok(&Items::B), receiver.peek());
+        assert_eq!(2, receiver.pending());
+        assert_eq!(1, receiver.receivable());
+        assert_eq!(8, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_node_next!(pointers, 5, 4);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 6, 5, 2, 1, 0);
+
+        // Sending another item while skipping and after peeking should work but peek shouldn't
+        // move to the new node.
+        assert_eq!(Ok(()), sender.send(Items::C));
+        assert_eq!(Ok(&Items::B), receiver.peek());
+        assert_eq!(3, receiver.pending());
+        assert_eq!(2, receiver.receivable());
+        assert_eq!(9, receiver.sent());
+        assert_eq!(6, receiver.received());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 2, 1, 0);
+
+        // Skip again and make sure pointers are right.
+        assert_eq!(Ok(()), receiver.skip());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 6);
+        assert_node_next!(pointers, 6, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next_nil!(pointers, 2);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 2, 0, 6);
+
+        // Receive at skip cursor and verify nodes move right.
+        assert_eq!(Ok(Items::C), receiver.receive());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 6, 0, 5);
+
+        // If we reset the skip then the cursor is cleared but the rest reamins the same.
+        assert_eq!(Ok(()), receiver.reset_skip());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 6, NIL_NODE, NIL_NODE);
     }
 
     #[test]
@@ -1183,7 +1342,11 @@ mod tests {
 
         let debug_if_needed = |core: Arc<SeccCore<u32>>| {
             if core.receivable.load(Ordering::Relaxed) > core.capacity {
-                debug_channel(thread::current().name().unwrap(), core);
+                println!(
+                    "{}: {}",
+                    thread::current().name().unwrap(),
+                    debug_channel(core)
+                );
             }
         };
 
