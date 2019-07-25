@@ -19,6 +19,8 @@ implementation deriving inspiration from the good parts of those models.
   * Issue 27: Add the ability to register a local name for an actor.
   * Issue 29: Implement monitors for actors.
 
+[Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
+
 # Getting Started
 
 *An actor model is an architectural asynchronous programming paradigm characterized by the use
