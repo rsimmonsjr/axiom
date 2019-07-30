@@ -116,6 +116,7 @@
 //!
 
 pub mod actors;
+pub mod message;
 pub mod secc;
 
 #[cfg(test)]
