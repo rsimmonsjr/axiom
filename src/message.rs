@@ -12,16 +12,7 @@ pub trait ActorMessage: Send + Sync + Any {
     fn to_json(&self) -> String;
 }
 
-// TODO Take off pub from methods if possible and remove downcast_ref method if unused?
 impl dyn ActorMessage {
-    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
-        if TypeId::of::<T>() == self.type_id() {
-            unsafe { Some(&*(self as *const Self as *const T)) }
-        } else {
-            None
-        }
-    }
-
     fn downcast<T: ActorMessage>(self: Arc<Self>) -> Option<Arc<T>> {
         if TypeId::of::<T>() == (*self).type_id() {
             unsafe {
@@ -151,31 +142,33 @@ impl Message {
     where
         T: 'static + ActorMessage + DeserializeOwned + ?Sized,
     {
-        // To make this fail fast we will first check against the type_id hash of the type
-        // that the user wants to convert it to.
+        // To make this fail fast we will first check against the hash of the type_id that the
+        // user wants to convert the message content to.
         if self.type_id_hash != Message::hash_type_id::<T>() {
             None
         } else {
-            // We first have to figure out if the content is local or remote because they have
+            // We first have to figure out if the content is Local or Remote because they have
             // vastly different implications.
             let read_guard = self.content.read().unwrap();
             match &*read_guard {
-                // If the content is local then we need to downcast to the arc of the required
-                // type.  This should fail fast if the type ids don't match.
+                // If the content is Local then we just downcast the arc type.
+                // type. This should fail fast if the type ids don't match.
                 MessageContent::Local(content) => content.clone().downcast::<T>(),
+                // If the content is Remote then we will turn it into a Local.
                 MessageContent::Remote(_) => {
-                    // Since we have to change the content to be local, we have to drop the
-                    // read lock and try to re-acquire a write.
+                    // To convert the message we have to drop the read lock and re-acquire a
+                    // write lock on the content.
                     drop(read_guard);
                     let mut write_guard = self.content.write().unwrap();
+                    // Because of a potential race we will try again.
                     match &*write_guard {
-                        // Someone beat us to the write and now we just downcast normally.
+                        // Another thread beat us to the write so we just downcast normally.
                         MessageContent::Local(content) => content.clone().downcast::<T>(),
-                        // We got the write lock and the content is still remote.
+                        // This thread got the write lock and the content is still remote.
                         MessageContent::Remote(content) => {
+                            // We deserialize the content and replace it in the message.
                             match serde_json::from_str::<T>(&content) {
                                 Ok(concrete) => {
-                                    // We deserialize the content and replace it in the message
                                     // with a new local variant.
                                     let new_value: Arc<T> = Arc::new(concrete);
                                     *write_guard = MessageContent::Local(new_value.clone());
@@ -214,14 +207,6 @@ mod tests {
         T: 'static + ActorMessage,
     {
         Arc::new(value)
-    }
-
-    #[test]
-    fn test_actor_message_downcast_ref() {
-        let value = 11 as i32;
-        let msg = new_actor_msg(value);
-        assert_eq!(value, *msg.downcast_ref::<i32>().unwrap());
-        assert_eq!(None, msg.downcast_ref::<u32>());
     }
 
     #[test]
@@ -273,7 +258,6 @@ mod tests {
 
     #[test]
     fn test_remote_to_local() {
-        // TODO Create and test a new_remote for Message only if we need that for serialization.
         let value = 11 as i32;
         let serialized = serde_json::to_string(&value).unwrap();
         let hash = Message::hash_type_id::<i32>();
