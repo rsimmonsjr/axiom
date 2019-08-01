@@ -52,7 +52,7 @@ pub enum MessageContent {
     /// The message is from remote and has the given hash of a [`std::any::TypeId`] and the
     /// serialized content.
     /// FIXME Don't use JSON here in production.
-    Remote(u64, String),
+    Remote(String),
 }
 
 impl Serialize for MessageContent {
@@ -79,6 +79,10 @@ impl<'de> Deserialize<'de> for MessageContent {
 
 #[derive(Serialize, Deserialize)]
 pub struct Message {
+    /// The hash of the [`TypeId`] for the type used to construct the message.
+    type_id_hash: u64,
+    /// The content of the message in a RwLock. The lock is needed because if the message
+    /// came from remote, it will need to be converted to a local message variant.
     content: RwLock<MessageContent>,
 }
 
@@ -96,6 +100,7 @@ impl Message {
         T: 'static + ActorMessage,
     {
         Message {
+            type_id_hash: Message::hash_type_id::<T>(),
             content: RwLock::new(MessageContent::Local(Arc::new(value))),
         }
     }
@@ -115,6 +120,7 @@ impl Message {
         T: 'static + ActorMessage,
     {
         Message {
+            type_id_hash: Message::hash_type_id::<T>(),
             content: RwLock::new(MessageContent::Local(value.clone())),
         }
     }
@@ -145,20 +151,19 @@ impl Message {
     where
         T: 'static + ActorMessage + DeserializeOwned + ?Sized,
     {
-        // We first have to figure out if the content is local or remote because they have
-        // vastly different implications.
-        let read_guard = self.content.read().unwrap();
-        match &*read_guard {
-            // If the content is local then we need to downcast to the arc of the required type.
-            // This should fail fast if the type ids don't match.
-            MessageContent::Local(content) => content.clone().downcast::<T>(),
-            MessageContent::Remote(type_id_hash, _) => {
-                // Remote content means it was serialized from elsewhere and we need to try to
-                // deserialize it if possible but first we will cross check the type the user
-                // wants so that we can fail fast if they don't match.
-                if *type_id_hash != Message::hash_type_id::<T>() {
-                    None
-                } else {
+        // To make this fail fast we will first check against the type_id hash of the type
+        // that the user wants to convert it to.
+        if *type_id_hash != Message::hash_type_id::<T>() {
+            None
+        } else {
+            // We first have to figure out if the content is local or remote because they have
+            // vastly different implications.
+            let read_guard = self.content.read().unwrap();
+            match &*read_guard {
+                // If the content is local then we need to downcast to the arc of the required
+                // type.  This should fail fast if the type ids don't match.
+                MessageContent::Local(content) => content.clone().downcast::<T>(),
+                MessageContent::Remote(_) => {
                     // Since we have to change the content to be local, we have to drop the
                     // read lock and try to re-acquire a write.
                     drop(read_guard);
@@ -167,7 +172,7 @@ impl Message {
                         // Someone beat us to the write and now we just downcast normally.
                         MessageContent::Local(content) => content.clone().downcast::<T>(),
                         // We got the write lock and the content is still remote.
-                        MessageContent::Remote(_, content) => {
+                        MessageContent::Remote(content) => {
                             match serde_json::from_str::<T>(&content) {
                                 Ok(concrete) => {
                                     // We deserialize the content and replace it in the message
@@ -233,7 +238,7 @@ mod tests {
         let msg = Message::new(value);
         let read_guard = msg.content.read().unwrap();
         match &*read_guard {
-            MessageContent::Remote(_, _) => assert!(false, "Expected a Local variant."),
+            MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
             MessageContent::Local(content) => {
                 assert_eq!(value, *content.clone().downcast::<i32>().unwrap());
             }
@@ -247,7 +252,7 @@ mod tests {
         let msg = Message::from_arc(arc.clone());
         let read_guard = msg.content.read().unwrap();
         match &*read_guard {
-            MessageContent::Remote(_, _) => assert!(false, "Expected a Local variant."),
+            MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
             MessageContent::Local(content) => {
                 assert_eq!(value, *content.clone().downcast::<i32>().unwrap());
                 assert!(Arc::ptr_eq(
@@ -272,8 +277,9 @@ mod tests {
         let value = 11 as i32;
         let serialized = serde_json::to_string(&value).unwrap();
         let hash = Message::hash_type_id::<i32>();
-        let content = MessageContent::Remote(hash, serialized.clone());
+        let content = MessageContent::Remote(serialized.clone());
         let msg = Message {
+            type_id_hash: hash,
             content: RwLock::new(content),
         };
 
@@ -281,10 +287,10 @@ mod tests {
             // A failure to downcast should leave the message as it is.
             assert_eq!(None, msg.content_as::<u32>());
             let read_guard = msg.content.read().unwrap();
+            assert_eq!(hash, msg.type_id_hash);
             match &*read_guard {
                 MessageContent::Local(_) => assert!(false, "Expected a Remote variant."),
-                MessageContent::Remote(tid_hash, content) => {
-                    assert_eq!(hash, *tid_hash);
+                MessageContent::Remote(content) => {
                     assert_eq!(serialized, *content);
                 }
             }
@@ -297,8 +303,9 @@ mod tests {
 
             // Now we test to make sure that it indeed got converted.
             let read_guard = msg.content.read().unwrap();
+            assert_eq!(hash, msg.type_id_hash);
             match &*read_guard {
-                MessageContent::Remote(_, _) => assert!(false, "Expected a Local variant."),
+                MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
                 MessageContent::Local(content) => {
                     assert_eq!(value, *content.clone().downcast::<i32>().unwrap());
                 }
