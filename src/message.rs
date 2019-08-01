@@ -153,7 +153,7 @@ impl Message {
     {
         // To make this fail fast we will first check against the type_id hash of the type
         // that the user wants to convert it to.
-        if *type_id_hash != Message::hash_type_id::<T>() {
+        if self.type_id_hash != Message::hash_type_id::<T>() {
             None
         } else {
             // We first have to figure out if the content is local or remote because they have
@@ -199,7 +199,7 @@ impl Message {
         let read_guard = self.content.read().unwrap();
         match &*read_guard {
             MessageContent::Local(m) => m.to_json(),
-            MessageContent::Remote(_type_id, m) => m.clone(),
+            MessageContent::Remote(m) => m.clone(),
         }
     }
 }
