@@ -117,6 +117,7 @@ impl Message {
     }
 
     /// A helper that will return the hash of the type id for `T`.
+    #[inline]
     fn hash_type_id<T: 'static>() -> u64 {
         let mut hasher = DefaultHasher::new();
         TypeId::of::<T>().hash(&mut hasher);
