@@ -7,8 +7,7 @@ use std::hash::Hasher;
 use std::sync::{Arc, RwLock};
 
 pub trait ActorMessage: Send + Sync + Any {
-    /// Get a JSON representation of `self`. Note that the default implementation uses
-    /// `serde_json` to do the conversion.
+    /// Get a JSON representation of `self`.
     fn to_json(&self) -> String;
 }
 
@@ -47,24 +46,26 @@ pub enum MessageContent {
 }
 
 impl Serialize for MessageContent {
-    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        panic!("Not implemented yet")
-        /*match *self {
-            Local(ref actor_message) => serializer.serialize_some(value),
-            None => serializer.serialize_none(),
-        }*/
+        match self {
+            MessageContent::Local(v) => MessageContent::Remote(v.to_json()).serialize(serializer),
+            MessageContent::Remote(content) => {
+                // Replace hardcoded name with `core::intrinsics::type_name` when stable.
+                serializer.serialize_str(content)
+            }
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for MessageContent {
-    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        panic!("Not Implemented!!!")
+        Ok(MessageContent::Remote(String::deserialize(deserializer)?))
     }
 }
 
@@ -255,6 +256,26 @@ mod tests {
         let msg = Message::new(value);
         assert_eq!(value, *msg.content_as::<i32>().unwrap());
         assert_eq!(None, msg.content_as::<u32>());
+    }
+
+    #[test]
+    fn test_message_serialization() {
+        let value = 11 as i32;
+        let msg = Message::new(value);
+        let serialized = serde_json::to_string_pretty(&msg).expect("Couldn't serialize.");
+        let deserialized: Message =
+            serde_json::from_str(&serialized).expect("Couldn't deserialize.");
+        let read_guard = deserialized.content.read().unwrap();
+        match &*read_guard {
+            MessageContent::Local(_) => panic!("Expected a Remote variant."),
+            MessageContent::Remote(_) => {
+                drop(read_guard);
+                match deserialized.content_as::<i32>() {
+                    None => panic!("Could not cast content."),
+                    Some(v) => assert_eq!(value, *v),
+                }
+            }
+        }
     }
 
     #[test]
