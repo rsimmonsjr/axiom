@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 
 pub trait ActorMessage: Send + Sync + Any {
     /// Get a JSON representation of `self`.
-    fn to_json(&self) -> String;
+    fn to_bincode(&self) -> Vec<u8>;
 }
 
 impl dyn ActorMessage {
@@ -30,8 +30,8 @@ impl<T: 'static> ActorMessage for T
 where
     T: Serialize + DeserializeOwned + Sync + Send + Any + ?Sized,
 {
-    fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap()
+    fn to_bincode(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap()
     }
 }
 
@@ -41,8 +41,7 @@ pub enum MessageContent {
     Local(Arc<dyn ActorMessage + 'static>),
     /// The message is from remote and has the given hash of a [`std::any::TypeId`] and the
     /// serialized content.
-    /// FIXME Don't use JSON here in production.
-    Remote(String),
+    Remote(Vec<u8>),
 }
 
 impl Serialize for MessageContent {
@@ -51,11 +50,10 @@ impl Serialize for MessageContent {
         S: Serializer,
     {
         match self {
-            MessageContent::Local(v) => MessageContent::Remote(v.to_json()).serialize(serializer),
-            MessageContent::Remote(content) => {
-                // Replace hardcoded name with `core::intrinsics::type_name` when stable.
-                serializer.serialize_str(content)
+            MessageContent::Local(v) => {
+                MessageContent::Remote(v.to_bincode()).serialize(serializer)
             }
+            MessageContent::Remote(content) => serializer.serialize_bytes(content),
         }
     }
 }
@@ -65,7 +63,9 @@ impl<'de> Deserialize<'de> for MessageContent {
     where
         D: Deserializer<'de>,
     {
-        Ok(MessageContent::Remote(String::deserialize(deserializer)?))
+        Ok(MessageContent::Remote(Vec::<u8>::deserialize(
+            deserializer,
+        )?))
     }
 }
 
@@ -169,7 +169,7 @@ impl Message {
                         // This thread got the write lock and the content is still remote.
                         MessageContent::Remote(content) => {
                             // We deserialize the content and replace it in the message.
-                            match serde_json::from_str::<T>(&content) {
+                            match bincode::deserialize::<T>(&content) {
                                 Ok(concrete) => {
                                     // with a new local variant.
                                     let new_value: Arc<T> = Arc::new(concrete);
@@ -187,14 +187,6 @@ impl Message {
                     }
                 }
             }
-        }
-    }
-
-    pub fn to_json(&self) -> String {
-        let read_guard = self.content.read().unwrap();
-        match &*read_guard {
-            MessageContent::Local(m) => m.to_json(),
-            MessageContent::Remote(m) => m.clone(),
         }
     }
 }
@@ -262,9 +254,9 @@ mod tests {
     fn test_message_serialization() {
         let value = 11 as i32;
         let msg = Message::new(value);
-        let serialized = serde_json::to_string_pretty(&msg).expect("Couldn't serialize.");
+        let serialized = bincode::serialize(&msg).expect("Couldn't serialize.");
         let deserialized: Message =
-            serde_json::from_str(&serialized).expect("Couldn't deserialize.");
+            bincode::deserialize(&serialized).expect("Couldn't deserialize.");
         let read_guard = deserialized.content.read().unwrap();
         match &*read_guard {
             MessageContent::Local(_) => panic!("Expected a Remote variant."),
@@ -281,7 +273,7 @@ mod tests {
     #[test]
     fn test_remote_to_local() {
         let value = 11 as i32;
-        let serialized = serde_json::to_string(&value).unwrap();
+        let serialized = bincode::serialize(&value).unwrap();
         let hash = Message::hash_type_id::<i32>();
         let content = MessageContent::Remote(serialized.clone());
         let msg = Message {
