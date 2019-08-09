@@ -37,6 +37,8 @@ where
 
 /// The message content in a message.
 pub enum MessageContent {
+    // FIXME Investigate if it is possible to get rid of the inner arc since the message will
+    // always be in an Arc anyway.
     /// The message is a local message.
     Local(Arc<dyn ActorMessage + 'static>),
     /// The message is from remote and has the given hash of a [`std::any::TypeId`] and the
@@ -69,13 +71,23 @@ impl<'de> Deserialize<'de> for MessageContent {
     }
 }
 
+/// Holds the data used in a message.
 #[derive(Serialize, Deserialize)]
-pub struct Message {
+struct MessageData {
     /// The hash of the [`TypeId`] for the type used to construct the message.
     type_id_hash: u64,
     /// The content of the message in a RwLock. The lock is needed because if the message
     /// came from remote, it will need to be converted to a local message variant.
     content: RwLock<MessageContent>,
+}
+
+/// A type for a message sent to an actor channel.
+///
+/// Note that this type uses an internal [`Arc`] so there is no reason to surround it with
+/// another [`Arc`] to make it thread safe.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Message {
+    data: Arc<MessageData>,
 }
 
 impl Message {
@@ -92,12 +104,16 @@ impl Message {
         T: 'static + ActorMessage,
     {
         Message {
-            type_id_hash: Message::hash_type_id::<T>(),
-            content: RwLock::new(MessageContent::Local(Arc::new(value))),
+            data: Arc::new(MessageData {
+                type_id_hash: Message::hash_type_id::<T>(),
+                content: RwLock::new(MessageContent::Local(Arc::new(value))),
+            }),
         }
     }
 
     /// Creates a new message from an [`Arc`], transferring ownership of the Arc to the message.
+    /// Note that this is more efficient if a user wants to send a message that is already an
+    /// [`Arc`] so they dont create an arc inside an [`Arc`].
     ///
     /// # Examples
     /// ```rust
@@ -112,8 +128,10 @@ impl Message {
         T: 'static + ActorMessage,
     {
         Message {
-            type_id_hash: Message::hash_type_id::<T>(),
-            content: RwLock::new(MessageContent::Local(value.clone())),
+            data: Arc::new(MessageData {
+                type_id_hash: Message::hash_type_id::<T>(),
+                content: RwLock::new(MessageContent::Local(value.clone())),
+            }),
         }
     }
 
@@ -146,12 +164,12 @@ impl Message {
     {
         // To make this fail fast we will first check against the hash of the type_id that the
         // user wants to convert the message content to.
-        if self.type_id_hash != Message::hash_type_id::<T>() {
+        if self.data.type_id_hash != Message::hash_type_id::<T>() {
             None
         } else {
             // We first have to figure out if the content is Local or Remote because they have
             // vastly different implications.
-            let read_guard = self.content.read().unwrap();
+            let read_guard = self.data.content.read().unwrap();
             match &*read_guard {
                 // If the content is Local then we just downcast the arc type.
                 // type. This should fail fast if the type ids don't match.
@@ -161,7 +179,7 @@ impl Message {
                     // To convert the message we have to drop the read lock and re-acquire a
                     // write lock on the content.
                     drop(read_guard);
-                    let mut write_guard = self.content.write().unwrap();
+                    let mut write_guard = self.data.content.write().unwrap();
                     // Because of a potential race we will try again.
                     match &*write_guard {
                         // Another thread beat us to the write so we just downcast normally.
@@ -215,7 +233,7 @@ mod tests {
     fn test_message_new() {
         let value = 11 as i32;
         let msg = Message::new(value);
-        let read_guard = msg.content.read().unwrap();
+        let read_guard = msg.data.content.read().unwrap();
         match &*read_guard {
             MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
             MessageContent::Local(content) => {
@@ -229,7 +247,7 @@ mod tests {
         let value = 11 as i32;
         let arc = Arc::new(value);
         let msg = Message::from_arc(arc.clone());
-        let read_guard = msg.content.read().unwrap();
+        let read_guard = msg.data.content.read().unwrap();
         match &*read_guard {
             MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
             MessageContent::Local(content) => {
@@ -257,7 +275,7 @@ mod tests {
         let serialized = bincode::serialize(&msg).expect("Couldn't serialize.");
         let deserialized: Message =
             bincode::deserialize(&serialized).expect("Couldn't deserialize.");
-        let read_guard = deserialized.content.read().unwrap();
+        let read_guard = deserialized.data.content.read().unwrap();
         match &*read_guard {
             MessageContent::Local(_) => panic!("Expected a Remote variant."),
             MessageContent::Remote(_) => {
@@ -273,23 +291,19 @@ mod tests {
     #[test]
     fn test_remote_to_local() {
         let value = 11 as i32;
-        let serialized = bincode::serialize(&value).unwrap();
+        let local = Message::new(value);
+        let serialized = bincode::serialize(&local).expect("Couldn't serialize.");
+        let msg: Message = bincode::deserialize(&serialized).expect("Couldn't deserialize.");
         let hash = Message::hash_type_id::<i32>();
-        let content = MessageContent::Remote(serialized.clone());
-        let msg = Message {
-            type_id_hash: hash,
-            content: RwLock::new(content),
-        };
-
         {
             // A failure to downcast should leave the message as it is.
             assert_eq!(None, msg.content_as::<u32>());
-            let read_guard = msg.content.read().unwrap();
-            assert_eq!(hash, msg.type_id_hash);
+            let read_guard = msg.data.content.read().unwrap();
+            assert_eq!(hash, msg.data.type_id_hash);
             match &*read_guard {
                 MessageContent::Local(_) => assert!(false, "Expected a Remote variant."),
                 MessageContent::Remote(content) => {
-                    assert_eq!(serialized, *content);
+                    assert_eq!(bincode::serialize(&value).unwrap(), *content);
                 }
             }
         }
@@ -300,8 +314,8 @@ mod tests {
             assert_eq!(value, *msg.content_as::<i32>().unwrap());
 
             // Now we test to make sure that it indeed got converted.
-            let read_guard = msg.content.read().unwrap();
-            assert_eq!(hash, msg.type_id_hash);
+            let read_guard = msg.data.content.read().unwrap();
+            assert_eq!(hash, msg.data.type_id_hash);
             match &*read_guard {
                 MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
                 MessageContent::Local(content) => {
