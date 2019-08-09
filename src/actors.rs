@@ -18,8 +18,8 @@ use crate::secc;
 use crate::secc::*;
 use log::{error, warn};
 use once_cell::sync::OnceCell;
-use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde::ser::{SerializeStruct, Serializer};
+use serde::de::Deserializer;
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -162,6 +162,15 @@ struct ActorIdData {
     sender: ActorSender,
 }
 
+// A helper type to make serialization cleaner. This contains the serialized form of the
+// [`ActorId`].
+#[derive(Serialize, Deserialize)]
+struct ActorIdSerializedForm {
+    uuid: Uuid,
+    node_uuid: Uuid,
+    name: Option<String>,
+}
+
 /// Encapsulates an ID to an actor and is often referred to as an `aid`.
 ///
 /// This is a unique reference to the actor within the entire cluster and can be used to send
@@ -181,12 +190,12 @@ impl Serialize for ActorId {
     where
         S: Serializer,
     {
-        // 3 is the number of fields in the struct.
-        let mut state = serializer.serialize_struct("ActorId", 3)?;
-        state.serialize_field("uuid", &self.data.uuid)?;
-        state.serialize_field("node_uuid", &self.data.node_uuid)?;
-        state.serialize_field("name", &self.data.name)?;
-        state.end()
+        let serialized_form = ActorIdSerializedForm {
+            uuid: self.uuid(),
+            node_uuid: self.node_uuid(),
+            name: self.name(),
+        };
+        serialized_form.serialize(serializer)
     }
 }
 
@@ -195,99 +204,24 @@ impl<'de> Deserialize<'de> for ActorId {
     where
         D: Deserializer<'de>,
     {
-        struct ActorIdVisitor;
+        let serialized_form = ActorIdSerializedForm::deserialize(deserializer)?;
 
-        impl ActorIdVisitor {
-            fn create(uuid: Uuid, node_uuid: Uuid, name: Option<String>) -> ActorId {
-                let system = ActorSystem::current();
-                // We will look up the AID in the table to return to the user if it
-                // exists otherwise it must be a remote AID.
-                match system.find_aid_by_uuid(&uuid) {
-                    Some(aid) => aid.clone(),
-                    None => ActorId {
-                        data: Arc::new(ActorIdData {
-                            uuid,
-                            node_uuid,
-                            name,
-                            sender: ActorSender::Remote,
-                            // TODO This should be inside the local sender.
-                            is_stopped: AtomicBool::new(false),
-                        }),
-                    },
-                }
-            }
+        let system = ActorSystem::current();
+        // We will look up the AID in the table to return to the user if it
+        // exists otherwise it must be a remote AID.
+        match system.find_aid_by_uuid(&serialized_form.uuid) {
+            Some(aid) => Ok(aid.clone()),
+            None => Ok(ActorId {
+                data: Arc::new(ActorIdData {
+                    uuid: serialized_form.uuid,
+                    node_uuid: serialized_form.node_uuid,
+                    name: serialized_form.name,
+                    sender: ActorSender::Remote,
+                    // TODO This should be inside the local sender.
+                    is_stopped: AtomicBool::new(false),
+                }),
+            }),
         }
-
-        impl<'de> Visitor<'de> for ActorIdVisitor {
-            type Value = ActorId;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct ActorId")
-            }
-
-            fn visit_seq<V>(self, mut seq: V) -> Result<ActorId, V::Error>
-            where
-                V: SeqAccess<'de>,
-            {
-                let uuid = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let node_uuid = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-                let name = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(2, &self))?;
-                Ok(ActorIdVisitor::create(uuid, node_uuid, name))
-            }
-
-            fn visit_map<V>(self, mut map: V) -> Result<ActorId, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                #[derive(Deserialize)]
-                #[serde(field_identifier, rename_all = "snake_case")]
-                enum Field {
-                    Uuid,
-                    NodeUuid,
-                    Name,
-                };
-
-                let mut uuid: Option<Uuid> = None;
-                let mut node_uuid: Option<Uuid> = None;
-                let mut name: Option<Option<String>> = None;
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::Uuid => {
-                            if uuid.is_some() {
-                                return Err(de::Error::duplicate_field("uuid"));
-                            }
-                            uuid = Some(map.next_value()?);
-                        }
-                        Field::NodeUuid => {
-                            if node_uuid.is_some() {
-                                return Err(de::Error::duplicate_field("node_uuid"));
-                            }
-                            node_uuid = Some(map.next_value()?);
-                        }
-                        Field::Name => {
-                            if name.is_some() {
-                                return Err(de::Error::duplicate_field("name"));
-                            }
-                            name = Some(map.next_value()?);
-                        }
-                    }
-                }
-                Ok(ActorIdVisitor::create(
-                    uuid.ok_or_else(|| de::Error::missing_field("secs"))?,
-                    node_uuid.ok_or_else(|| de::Error::missing_field("nanos"))?,
-                    name.ok_or_else(|| de::Error::missing_field("name"))?,
-                ))
-            }
-        }
-
-        const FIELDS: &'static [&'static str] = &["secs", "nanos"];
-        deserializer.deserialize_struct("ActorId", FIELDS, ActorIdVisitor)
     }
 }
 
@@ -458,7 +392,7 @@ impl ActorId {
     /// Stopped actor ids are unable to send messages to the actor.
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn is_stopped(&self) -> bool {
-        self.data.is_stopped.load(Ordering::AcqRel)
+        self.data.is_stopped.load(Ordering::Relaxed)
     }
 
     /// Marks the actor referenced by the [`axiom::actors::ActorId`] as stopped and puts
@@ -1097,6 +1031,45 @@ mod tests {
     use super::*;
     use crate::tests::*;
     use std::time::Duration;
+
+    #[test]
+    fn test_actor_id_serialization() {
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        system.init_current();
+        let aid = system.spawn(0 as usize, simple_handler);
+
+        // forces the test to break here if someone changes this.
+        if let ActorSender::Local(_) = aid.data.sender {
+        } else {
+            panic!("The sender should be `Local`")
+        }
+
+        let serialized = bincode::serialize(&aid).expect("Couldn't serialize.");
+        let deserialized: ActorId =
+            bincode::deserialize(&serialized).expect("Couldn't deserialize.");
+        // In this case the resulting AID should be identical to the serialized one because
+        // we have the same actor system in a threadlocal.
+        assert!(Arc::ptr_eq(&aid.data, &deserialized.data));
+
+        // If we deserialize on another actor system it should be a remote AID.
+        let handle = thread::spawn(move || {
+            let system = ActorSystem::create(ActorSystemConfig::create());
+            system.init_current();
+
+            let deserialized: ActorId =
+                bincode::deserialize(&serialized).expect("Couldn't deserialize.");
+            if let ActorSender::Remote = deserialized.data.sender {
+                assert_eq!(aid.uuid(), deserialized.uuid());
+                assert_eq!(aid.node_uuid(), deserialized.node_uuid());
+                assert_eq!(aid.name(), deserialized.name());
+                assert_eq!(false, deserialized.is_stopped());
+            } else {
+                panic!("The sender should be `Remote`")
+            }
+        });
+
+        handle.join().unwrap();
+    }
 
     /// A test helper to assert that a certain number of messages arrived in a certain time.
     fn assert_await_received(aid: &ActorId, count: u8, timeout_ms: u64) {
