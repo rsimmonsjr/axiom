@@ -163,5 +163,8 @@ core principles:
    be a dumping ground for copy-paste or throwaway code. The best tests will look like 
    architected code.  
 
+## Acknowledgements
 
+This product would not be possible without all the help and support I have received on the Rust
+discord server, especially from the user Talchas.
 

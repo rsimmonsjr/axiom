@@ -35,16 +35,18 @@
 //!
 //! ```rust
 //! use axiom::actors::*;
+//! use axiom::message::*;
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::create());
+//! system.init_current(); // Needed to call from outside of actor system threads.
 //!
-//! let aid = ActorSystem::spawn(&system,
+//! let aid = system.spawn(
 //!     0 as usize,
-//!     |_state: &mut usize, _aid: Arc<ActorId>, message: &Arc<Message>| Status::Processed,
+//!     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
 //!  );
 //!
-//! ActorId::send(&aid, Arc::new(11));
+//! ActorId::send(&aid, Message::new(11));
 //! ```
 //!
 //! This code creates an actor system, spawns an actor and finally sends the actor a message.
@@ -54,49 +56,50 @@
 //!
 //! ```rust
 //! use axiom::actors::*;
+//! use axiom::message::*;
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::create());
+//! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! struct Data {
 //!     value: i32,
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(&mut self, _aid: Arc<ActorId>, message: &bool) -> Status {
+//!     fn handle_bool(&mut self, _aid: ActorId, message: &bool) -> Status {
 //!         if *message {
 //!             self.value += 1;
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Status::Processed // assertion will fail but we still have to return.
+//!         Status::Processed // This assertion will fail but we still have to return.
 //!     }
 //!
-//!     fn handle_i32(&mut self, _aid: Arc<ActorId>, message: &i32) -> Status {
+//!     fn handle_i32(&mut self, _aid: ActorId, message: &i32) -> Status {
 //!         self.value += *message;
-//!         Status::Processed // assertion will fail but we still have to return.
+//!         Status::Processed // This assertion will fail but we still have to return.
 //!     }
 //!
-//!     fn handle(&mut self, aid: Arc<ActorId>, message: &Arc<Message>) -> Status {
-//!         if let Some(msg) = message.downcast_ref::<bool>() {
-//!             self.handle_bool(aid, msg)
-//!         } else if let Some(msg) = message.downcast_ref::<i32>() {
-//!             self.handle_i32(aid, msg)
+//!     fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
+//!         if let Some(msg) = message.content_as::<bool>() {
+//!             self.handle_bool(aid, &*msg)
+//!         } else if let Some(msg) = message.content_as::<i32>() {
+//!             self.handle_i32(aid, &*msg)
 //!         } else {
 //!             assert!(false, "Failed to dispatch properly");
-//!             Status::Stop // assertion will fail but we still have to return.
+//!             Status::Stop // This assertion will fail but we still have to return.
 //!         }
 //!     }
 //! }
 //!
 //! let data = Data { value: 0 };
+//! let aid = system.spawn( data, Data::handle);
 //!
-//! let aid = ActorSystem::spawn(&system, data, Data::handle);
-//!
-//! ActorId::send(&aid, Arc::new(11));
-//! ActorId::send(&aid, Arc::new(true));
-//! ActorId::send(&aid, Arc::new(true));
-//! ActorId::send(&aid, Arc::new(false));
+//! ActorId::send(&aid, Message::new(11));
+//! ActorId::send(&aid, Message::new(true));
+//! ActorId::send(&aid, Message::new(true));
+//! ActorId::send(&aid, Message::new(false));
 //! ```
 //!
 //! This code creates an actor out of an arbitrary struct. Since the only requirement to make
@@ -116,6 +119,7 @@
 //!
 
 pub mod actors;
+pub mod message;
 pub mod secc;
 
 #[cfg(test)]
