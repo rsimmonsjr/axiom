@@ -26,7 +26,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
 use uuid::Uuid;
@@ -119,7 +119,7 @@ pub enum ActorError {
 /// an Axiom system on the same machine, the two instances are considered remote.
 enum ActorSender {
     /// A sender used for sending messages to local actors.
-    /// FIXME the actor should actually live here instead of the hashtable. This would simplify
+    /// FIXME (Issue #43) The actor should actually live here instead of the hashtable. This would simplify
     /// dispatching greatly.
     Local(SeccSender<Message>),
 
@@ -690,6 +690,9 @@ struct ActorSystemData {
     thread_pool: Mutex<Vec<JoinHandle<()>>>,
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: AtomicBool,
+    // Stores the number of running threads with a Condvar that will be used to notify anyone
+    // waiting on the condvar that all threads have exited.
+    running_thread_count: Arc<(Mutex<u16>, Condvar)>,
     /// Holds the [`axiom::actors::Actor`] objects keyed by the [`axiom::actors::ActorId`]. The
     /// [`std::sync::RwLock`] will be locked for write only when a new actor is spawned but
     /// otherwise will be locked for read by the [`axiom::actors::ActorId`] instances when they
@@ -730,7 +733,8 @@ impl ActorSystem {
             secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
         // Convert to usize for pre-allocating a vector.
-        let thread_pool_size: usize = config.thread_pool_size as usize;
+        let thread_pool = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
+        let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
@@ -739,8 +743,9 @@ impl ActorSystem {
                 configuration: config,
                 sender,
                 receiver,
-                thread_pool: Mutex::new(Vec::with_capacity(thread_pool_size)),
+                thread_pool,
                 shutdown_triggered: AtomicBool::new(false),
+                running_thread_count,
                 actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
                 aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
                 aids_by_name: Arc::new(RwLock::new(HashMap::new())),
@@ -786,6 +791,13 @@ impl ActorSystem {
                     Ok(actor) => Actor::receive(actor),
                 }
             }
+            let (mutex, condvar) = &*system.data.running_thread_count;
+            let mut count = mutex.lock().unwrap();
+            *count = *count - 1;
+            // If this is the last thread exiting we will notify any waiters.
+            if *count == 0 {
+                condvar.notify_all();
+            }
         })
     }
 
@@ -812,16 +824,24 @@ impl ActorSystem {
         })
     }
 
-    /// Triggers a shutdown of the system and returns only when all threads have joined. This
-    /// allows a graceful shutdown of the actor system but any messages pending in actor channels
-    /// will get discarded.
-    pub fn shutdown(&self) {
+    /// Triggers a shutdown but doesnt wait for threads to stop. This function is non-blocking.
+    pub fn trigger_shutdown(&self) {
         self.data.shutdown_triggered.store(true, Ordering::Relaxed);
-        let mut guard = self.data.thread_pool.lock().unwrap();
-        let vec = std::mem::replace(&mut *guard, vec![]);
-        for handle in vec {
-            handle.join().unwrap();
-        }
+    }
+
+    /// Awaits for the actor system to be shutdown using a relatively CPU minimal condvar as
+    /// a signalling mechanism. This function will block until all actor system threads have
+    /// returned.
+    pub fn await_shutdown(&self) {
+        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
+        let guard = mutex.lock().unwrap();
+        let _condvar_guard = condvar.wait(guard).unwrap();
+    }
+
+    /// Triggers a shutdown of the system and returns only when all threads have joined.
+    pub fn trigger_and_await_shutdown(&self) {
+        self.trigger_shutdown();
+        self.await_shutdown();
     }
 
     /// Returns the total number of times actors have been sent to the work channel.
@@ -1048,6 +1068,28 @@ mod tests {
     use crate::tests::*;
     use std::time::Duration;
 
+    /// A test helper to assert that a certain number of messages arrived in a certain time.
+    fn assert_await_received(aid: &ActorId, count: u8, timeout_ms: u64) {
+        use std::time::Instant;
+        let start = Instant::now();
+        let duration = Duration::from_millis(timeout_ms);
+        while aid.received() < count as usize {
+            if Instant::elapsed(&start) > duration {
+                assert!(
+                    false,
+                    "Timed out! count: {} timeout_ms: {}",
+                    count, timeout_ms
+                )
+            }
+        }
+    }
+
+    /// A function that just returns [`axiom::actors::Status::Processed`] which can be
+    /// used as a handler for a simple actor.
+    fn simple_handler(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
+        Status::Processed
+    }
+
     #[test]
     fn test_actor_id_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::create());
@@ -1087,26 +1129,38 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// A test helper to assert that a certain number of messages arrived in a certain time.
-    fn assert_await_received(aid: &ActorId, count: u8, timeout_ms: u64) {
-        use std::time::Instant;
-        let start = Instant::now();
-        let duration = Duration::from_millis(timeout_ms);
-        while aid.received() < count as usize {
-            if Instant::elapsed(&start) > duration {
-                assert!(
-                    false,
-                    "Timed out! count: {} timeout_ms: {}",
-                    count, timeout_ms
-                )
-            }
-        }
-    }
+    #[test]
+    fn test_actor_id_as_message() {
+        init_test_log();
 
-    /// A function that just returns [`axiom::actors::Status::Processed`] which can be
-    /// used as a handler for a simple actor.
-    fn simple_handler(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
-        Status::Processed
+        // This test verifies that an ActorId can be used as a message and inside other
+        // objects used as a message.
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        system.init_current();
+
+        #[derive(Serialize, Deserialize)]
+        enum Op {
+            Aid(ActorId),
+        }
+
+        // The user will send our own ActorId to us.
+        let aid = system.spawn(0, |_state: &mut i32, aid: ActorId, message: &Message| {
+            if let Some(msg) = message.content_as::<ActorId>() {
+                assert_eq!(aid.uuid(), msg.uuid());
+            } else if let Some(msg) = message.content_as::<Op>() {
+                match &*msg {
+                    Op::Aid(a) => assert_eq!(aid.uuid(), a.uuid()),
+                }
+            }
+            Status::Processed
+        });
+
+        // Send a message to the actor.
+        aid.send(Message::new(aid.clone()));
+
+        // Wait for the start and our message to get there because test is asynchronous.
+        assert_await_received(&aid, 2, 1000);
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1131,7 +1185,7 @@ mod tests {
 
         // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1161,7 +1215,7 @@ mod tests {
 
         // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1218,7 +1272,7 @@ mod tests {
 
         // Wait for all of the messages to get there because test is asynchronous.
         assert_await_received(&aid, 4, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1281,7 +1335,7 @@ mod tests {
 
         // Wait for all of the messages to get there because this test is asynchronous.
         assert_await_received(&aid, 4, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1348,7 +1402,7 @@ mod tests {
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
 
         // Shut down the system and clean up test.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1384,7 +1438,7 @@ mod tests {
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1408,7 +1462,7 @@ mod tests {
         aid.send(Message::new(11));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1434,7 +1488,7 @@ mod tests {
         assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1495,7 +1549,7 @@ mod tests {
         assert!(Arc::ptr_eq(&aid3.data, &found4.data));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     /// A helper handler used by `test_monitors` that expects to get a stopped message for the
@@ -1547,97 +1601,6 @@ mod tests {
         assert_await_received(&not_monitoring, 1, 1000);
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
-
-    // ---------- Complete Example ----------
-    // TODO Work on this to add more actors and cross actor sending and so on.
-
-    #[derive(Debug, Serialize, Deserialize)]
-    enum Operation {
-        Inc,
-        Dec,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct StructActor {
-        count: usize,
-    }
-
-    impl StructActor {
-        fn handle_op(&mut self, aid: ActorId, msg: &Operation) -> Status {
-            match msg {
-                Operation::Inc => {
-                    assert_eq!(1, aid.received());
-                    self.count += 1;
-                    assert_eq!(6 as usize, self.count);
-                }
-                Operation::Dec => {
-                    assert_eq!(2, aid.received());
-                    self.count -= 1;
-                    assert_eq!(5 as usize, self.count);
-                }
-            }
-            Status::Processed
-        }
-
-        fn handle_i32(&mut self, aid: ActorId, msg: &i32) -> Status {
-            assert_eq!(3, aid.received());
-            assert_eq!(17 as i32, *msg);
-            self.count += *msg as usize;
-            assert_eq!(22 as usize, self.count);
-            Status::Processed
-        }
-
-        fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
-            if let Some(msg) = message.content_as::<i32>() {
-                self.handle_i32(aid, &*msg)
-            } else if let Some(msg) = message.content_as::<Operation>() {
-                self.handle_op(aid, &*msg)
-            } else if let Some(msg) = message.content_as::<u8>() {
-                assert_eq!(4, aid.received());
-                assert_eq!(7 as u8, *msg);
-                self.count += *msg as usize;
-                assert_eq!(29 as usize, self.count);
-                Status::Processed
-            } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                match &*msg {
-                    SystemMsg::Start => Status::Processed,
-                    SystemMsg::Stop => Status::Stop,
-                    m => panic!("unexpected message: {:?}", m),
-                }
-            } else {
-                assert!(false, "Failed to dispatch properly");
-                Status::Processed // This assertion will fail but we still have to return.
-            }
-        }
-    }
-
-    #[test]
-    fn test_full_example() {
-        init_test_log();
-
-        // This test uses the actor struct declared above to demonstrate and test most of the
-        // capabilities of actors. This is a fairly complete example.
-        let system = ActorSystem::create(ActorSystemConfig::create());
-        system.init_current();
-        let starting_state: StructActor = StructActor { count: 5 as usize };
-
-        let aid = system.spawn(starting_state, StructActor::handle);
-
-        assert_eq!(1, aid.sent());
-        aid.send(Message::new(Operation::Inc));
-        assert_eq!(2, aid.sent());
-        aid.send(Message::new(Operation::Dec));
-        assert_eq!(3, aid.sent());
-        aid.send(Message::new(17 as i32));
-        assert_eq!(4, aid.sent());
-        aid.send(Message::new(7 as u8));
-        assert_eq!(5, aid.sent());
-
-        // Wait for the message to get there because test is asynch.
-        assert_await_received(&aid, 4, 1000);
-        system.shutdown();
-    }
-
 }
