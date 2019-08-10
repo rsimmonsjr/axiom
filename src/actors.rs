@@ -632,7 +632,7 @@ pub struct ActorSystemConfig {
 }
 
 impl ActorSystemConfig {
-    /// Create the configuration with the default values.
+    /// Create the config with the default values.
     pub fn create() -> ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 100,
@@ -641,7 +641,7 @@ impl ActorSystemConfig {
         }
     }
 
-    /// Create a new configuration object based on the one passed with the new value
+    /// Create a new config object based on the one passed with the new value
     /// for `work_channel_size`.
     pub fn work_channel_size(&self, value: u16) -> ActorSystemConfig {
         ActorSystemConfig {
@@ -651,7 +651,7 @@ impl ActorSystemConfig {
         }
     }
 
-    /// Create a new configuration object based on the one passed with the new value
+    /// Create a new config object based on the one passed with the new value
     /// for `thread_pool_size`.
     pub fn thread_pool_size(&self, value: u16) -> ActorSystemConfig {
         ActorSystemConfig {
@@ -661,7 +661,7 @@ impl ActorSystemConfig {
         }
     }
 
-    /// Create a new configuration object based on the one passed with the new value
+    /// Create a new config object based on the one passed with the new value
     /// for `thread_wait_time`.
     pub fn thread_wait_time(&self, value: u16) -> ActorSystemConfig {
         ActorSystemConfig {
@@ -676,8 +676,8 @@ impl ActorSystemConfig {
 struct ActorSystemData {
     /// Id for this actor system and node.
     node_uuid: Uuid,
-    /// The configuration for the actor system which was passed to it when created.
-    configuration: ActorSystemConfig,
+    /// The config for the actor system which was passed to it when created.
+    config: ActorSystemConfig,
     /// Sender side of the work channel. When an actor gets a message and its pending count
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a message if it has more messages
@@ -724,7 +724,7 @@ pub struct ActorSystem {
 }
 
 impl ActorSystem {
-    /// Creates an actor system with the given configuration. The user should benchmark how
+    /// Creates an actor system with the given config. The user should benchmark how
     /// many slots in the work channel, the number of threads they need and so on in order
     /// to satisfy the requirements of the system they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
@@ -740,7 +740,7 @@ impl ActorSystem {
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
                 node_uuid: Uuid::new_v4(),
-                configuration: config,
+                config: config,
                 sender,
                 receiver,
                 thread_pool,
@@ -758,7 +758,7 @@ impl ActorSystem {
         // get around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.data.thread_pool.lock().unwrap();
-            for _ in 0..system.data.configuration.thread_pool_size {
+            for _ in 0..system.data.config.thread_pool_size {
                 let thread = system.start_dispatcher_thread();
                 guard.push(thread);
             }
@@ -781,7 +781,7 @@ impl ActorSystem {
         // long in the channel.
         let system = self.clone();
         let receiver = self.data.receiver.clone();
-        let thread_timeout = self.data.configuration.thread_wait_time;
+        let thread_timeout = self.data.config.thread_wait_time;
 
         thread::spawn(move || {
             system.init_current();
@@ -1053,9 +1053,9 @@ impl fmt::Debug for ActorSystem {
     fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "ActorSystem{{node_uuid: {}, configuration: {:?}}}",
+            "ActorSystem{{node_uuid: {}, config: {:?}}}",
             self.data.node_uuid.to_string(),
-            self.data.configuration,
+            self.data.config,
         )
     }
 }
