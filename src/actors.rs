@@ -74,6 +74,10 @@ pub enum Status {
 /// universal to all actors.
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SystemMsg {
+    /// A message that is sent by the system and guaranteed to be the first message that the
+    /// actor receives in its lifetime.
+    Start,
+
     /// A message that instructs an actor to shut down. The actor receiving this message
     /// should shut down all open file handles and any other resources and return a
     /// [`axiom::actors::Status::Stop`] from the process call.
@@ -86,7 +90,6 @@ pub enum SystemMsg {
 }
 
 /// Errors returned from actors and other parts of the actor system.
-/// FIXME (Issue: #39) Rename ActorError to just Error and let the user scope to actor::Error if needed.
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ActorError {
     /// Error sent when attempting to send to an actor that has already been stopped. A stopped
@@ -252,11 +255,10 @@ impl ActorId {
     ///     |_state: &mut usize, _aid: ActorId, _message: &Message| Status::Processed,
     ///  );
     ///
-    /// ActorId::send(&aid, Message::new(11));
+    /// aid.send(Message::new(11));
     /// ```
-    /// FIXME (Issue #40) Make this call on &self if possible
-    pub fn send(aid: &ActorId, message: Message) {
-        match ActorId::try_send(aid, message) {
+    pub fn send(&self, message: Message) {
+        match self.try_send(message) {
             Ok(_) => (),
             Err(e) => panic!("Error occurred sending to aid: {:?}", e),
         }
@@ -285,22 +287,22 @@ impl ActorId {
     ///     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
     ///  );
     ///
-    /// match ActorId::try_send(&aid, Message::new(11)) {
+    /// match aid.try_send(Message::new(11)) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     /// ```
-    pub fn try_send(aid: &ActorId, message: Message) -> Result<(), ActorError> {
-        if aid.data.is_stopped.load(Ordering::Relaxed) {
+    pub fn try_send(&self, message: Message) -> Result<(), ActorError> {
+        if self.data.is_stopped.load(Ordering::Relaxed) {
             Err(ActorError::ActorStopped)
         } else {
-            match &aid.data.sender {
+            match &self.data.sender {
                 ActorSender::Local(sender) => {
                     sender.send_await(message).unwrap();
                     // FIXME Investigate if this could race the dispatcher threads.
                     if sender.receivable() == 1 {
                         // Schedule on the actor system set as current for this thread.
-                        ActorSystem::current().schedule(aid.clone())
+                        ActorSystem::current().schedule(self.clone())
                     };
 
                     Ok(())
@@ -552,9 +554,19 @@ impl Actor {
             }
             Result::Ok(message) => {
                 // In this case there is a message in the channel that we have to process through
-                // the actor.
+                // the actor. We process the message and then we may override the actor's returned
+                // value if its a Stop message. This is not an error but an intentional act to
+                // allow the user not to do anything special if they don't handle the Stop.
                 let mut guard = actor.handler.lock().unwrap();
-                let result = (&mut *guard)(actor.aid.clone(), message);
+                let mut result = (&mut *guard)(actor.aid.clone(), message);
+                if let Some(m) = message.content_as::<SystemMsg>() {
+                    if let SystemMsg::Stop = *m {
+                        // Stop the actor anyway.
+                        result = Status::Stop
+                    }
+                };
+
+                // Handle the result of the processing.
                 match result {
                     Status::Processed => {
                         match actor.receiver.pop() {
@@ -863,7 +875,7 @@ impl ActorSystem {
     ///     0 as usize,
     ///     |_state: &mut usize, _aid: ActorId, _message: &Message| Status::Processed,
     /// );
-    /// ActorId::send(&aid, Message::new(11));
+    /// aid.send(Message::new(11));
     /// ```
     pub fn spawn<F, State>(&self, state: State, processor: F) -> ActorId
     where
@@ -871,7 +883,9 @@ impl ActorSystem {
         F: Processor<State> + 'static,
     {
         let actor = Actor::new(self.data.node_uuid, None, state, processor);
-        self.register_actor(actor).unwrap()
+        let result = self.register_actor(actor).unwrap();
+        result.send(Message::new(SystemMsg::Start));
+        result
     }
 
     /// Spawns a new named actor on the `system` using the given starting `state` for the actor
@@ -911,7 +925,9 @@ impl ActorSystem {
             state,
             processor,
         );
-        self.register_actor(actor)
+        let result = self.register_actor(actor)?;
+        result.send(Message::new(SystemMsg::Start));
+        Ok(result)
     }
 
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
@@ -1111,7 +1127,7 @@ mod tests {
         );
 
         // Send a message to the actor.
-        ActorId::send(&aid, Message::new(11));
+        aid.send(Message::new(11));
 
         // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
@@ -1141,7 +1157,7 @@ mod tests {
         let aid = system.spawn(Data {}, Data::handle);
 
         // Send a message to the actor.
-        ActorId::send(&aid, Message::new(11));
+        aid.send(Message::new(11));
 
         // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
@@ -1166,11 +1182,18 @@ mod tests {
             // Expected messages in the expected order.
             let expected: Vec<i32> = vec![11, 13, 17];
             // Attempt to downcast to expected message.
-            if let Some(msg) = message.content_as::<i32>() {
-                assert_eq!(expected[*state], *msg);
+            if let Some(_msg) = message.content_as::<SystemMsg>() {
+                *state += 1;
+                Status::Processed
+            } else if let Some(msg) = message.content_as::<i32>() {
+                assert_eq!(expected[*state - 1], *msg);
                 assert_eq!(*state, aid.received());
                 *state += 1;
                 assert_eq!(aid.pending(), aid.sent() - aid.received());
+                Status::Processed
+            } else if let Some(_msg) = message.content_as::<SystemMsg>() {
+                // Note that we put this last because it only is ever received once, we
+                // want the most frequently received messages first.
                 Status::Processed
             } else {
                 assert!(false, "Failed to dispatch properly");
@@ -1180,18 +1203,21 @@ mod tests {
 
         let aid = system.spawn(starting_state, closure);
 
+        // First message will always be the SystemMsg::Start
+        assert_eq!(1, aid.sent());
+
         // Send some messages to the actor in the order required in the test. In a real actor
         // its unlikely any order restriction would be needed. However this test makes sure that
         // the messages are processed correctly.
-        ActorId::send(&aid, Message::new(11 as i32));
-        assert_eq!(1, aid.sent());
-        ActorId::send(&aid, Message::new(13 as i32));
+        aid.send(Message::new(11 as i32));
         assert_eq!(2, aid.sent());
-        ActorId::send(&aid, Message::new(17 as i32));
+        aid.send(Message::new(13 as i32));
         assert_eq!(3, aid.sent());
+        aid.send(Message::new(17 as i32));
+        assert_eq!(4, aid.sent());
 
         // Wait for all of the messages to get there because test is asynchronous.
-        assert_await_received(&aid, 3, 1000);
+        assert_await_received(&aid, 4, 1000);
         system.shutdown();
     }
 
@@ -1232,6 +1258,10 @@ mod tests {
                     self.handle_bool(aid, &*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
                     self.handle_i32(aid, &*msg)
+                } else if let Some(_msg) = message.content_as::<SystemMsg>() {
+                    // Note that we put this last because it only is ever received once, we
+                    // want the most frequently received messages first.
+                    Status::Processed
                 } else {
                     assert!(false, "Failed to dispatch properly");
                     Status::Stop // This assertion will fail but we still have to return.
@@ -1244,10 +1274,10 @@ mod tests {
         let aid = system.spawn(data, Data::handle);
 
         // Send some messages to the actor.
-        ActorId::send(&aid, Message::new(11));
-        ActorId::send(&aid, Message::new(true));
-        ActorId::send(&aid, Message::new(true));
-        ActorId::send(&aid, Message::new(false));
+        aid.send(Message::new(11));
+        aid.send(Message::new(true));
+        aid.send(Message::new(true));
+        aid.send(Message::new(false));
 
         // Wait for all of the messages to get there because this test is asynchronous.
         assert_await_received(&aid, 4, 1000);
@@ -1270,14 +1300,21 @@ mod tests {
             0 as usize,
             |state: &mut usize, _aid: ActorId, message: &Message| {
                 if let Some(_msg) = message.content_as::<i32>() {
-                    assert_eq!(0 as usize, *state);
+                    assert_eq!(1 as usize, *state);
                     *state += 1;
                     Status::Processed
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    assert_eq!(1 as usize, *state);
-                    *state += 1;
                     match &*msg {
-                        SystemMsg::Stop => Status::Stop,
+                        SystemMsg::Start => {
+                            assert_eq!(0 as usize, *state);
+                            *state += 1;
+                            Status::Processed
+                        }
+                        SystemMsg::Stop => {
+                            assert_eq!(2 as usize, *state);
+                            *state += 1;
+                            Status::Stop
+                        }
                         m => panic!("unexpected message: {:?}", m),
                     }
                 } else {
@@ -1288,15 +1325,15 @@ mod tests {
         );
 
         // Send a message to the actor.
-        ActorId::send(&aid, Message::new(11 as i32));
-        ActorId::send(&aid, Message::new(SystemMsg::Stop));
+        aid.send(Message::new(11 as i32));
+        aid.send(Message::new(SystemMsg::Stop));
 
         // Wait for the message to get there because test is asynchronous.
-        assert_await_received(&aid, 2, 1000);
+        assert_await_received(&aid, 3, 1000);
 
         // Make sure that the actor is actually stopped and cant get more messages.
         assert!(true, aid.is_stopped());
-        match ActorId::try_send(&aid, Message::new(42 as i32)) {
+        match aid.try_send(Message::new(42 as i32)) {
             Err(ActorError::ActorStopped) => assert!(true), // all OK!
             Ok(_) => assert!(false, "Expected the actor to be shut down!"),
             Err(e) => assert!(false, "Unexpected error: {:?}", e),
@@ -1324,15 +1361,15 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::create());
         system.init_current();
         let aid = system.spawn(0, simple_handler);
-        ActorId::send(&aid, Message::new(11));
-        assert_await_received(&aid, 1, 1000);
+        aid.send(Message::new(11));
+        assert_await_received(&aid, 2, 1000);
 
         // Now we force stop the actor.
         system.stop(aid.clone());
 
         // Make sure the actor is out of the maps and cant be sent to.
         assert!(true, aid.is_stopped());
-        match ActorId::try_send(&aid, Message::new(42)) {
+        match aid.try_send(Message::new(42)) {
             Err(ActorError::ActorStopped) => assert!(true), // all OK!
             Ok(_) => assert!(false, "Expected the actor to be shut down!"),
             Err(e) => assert!(false, "Unexpected error: {:?}", e),
@@ -1368,7 +1405,7 @@ mod tests {
         drop(actors_by_aid); // Give up the lock.
 
         // Send a message to the actor.
-        ActorId::send(&aid, Message::new(11));
+        aid.send(Message::new(11));
 
         // Wait for the message to get there because test is asynchronous.
         system.shutdown();
@@ -1384,7 +1421,7 @@ mod tests {
         let aid = system.spawn(0 as usize, simple_handler);
 
         // Send a message to the actor verifying it is up.
-        ActorId::send(&aid, Message::new(11));
+        aid.send(Message::new(11));
         assert_await_received(&aid, 1, 1000);
         let found: &ActorId = &system.find_aid_by_uuid(&aid.uuid()).unwrap();
         assert!(Arc::ptr_eq(&aid.data, &found.data));
@@ -1470,6 +1507,7 @@ mod tests {
                     assert!(Arc::ptr_eq(&state.data, &aid.data));
                     Status::Processed
                 }
+                SystemMsg::Start => Status::Processed,
                 _ => {
                     assert!(false, "Received some other message!");
                     Status::Processed // This assertion will fail but we still have to return.
@@ -1504,9 +1542,9 @@ mod tests {
 
         // Stop the actor and it should be out of the map.
         system.stop(monitored.clone());
-        assert_await_received(&monitoring1, 1, 1000);
-        assert_await_received(&monitoring2, 1, 1000);
-        assert_await_received(&not_monitoring, 0, 1000);
+        assert_await_received(&monitoring1, 2, 1000);
+        assert_await_received(&monitoring2, 2, 1000);
+        assert_await_received(&not_monitoring, 1, 1000);
 
         // Wait for the message to get there because test is asynchronous.
         system.shutdown();
@@ -1530,12 +1568,12 @@ mod tests {
         fn handle_op(&mut self, aid: ActorId, msg: &Operation) -> Status {
             match msg {
                 Operation::Inc => {
-                    assert_eq!(0, aid.received());
+                    assert_eq!(1, aid.received());
                     self.count += 1;
                     assert_eq!(6 as usize, self.count);
                 }
                 Operation::Dec => {
-                    assert_eq!(1, aid.received());
+                    assert_eq!(2, aid.received());
                     self.count -= 1;
                     assert_eq!(5 as usize, self.count);
                 }
@@ -1544,7 +1582,7 @@ mod tests {
         }
 
         fn handle_i32(&mut self, aid: ActorId, msg: &i32) -> Status {
-            assert_eq!(2, aid.received());
+            assert_eq!(3, aid.received());
             assert_eq!(17 as i32, *msg);
             self.count += *msg as usize;
             assert_eq!(22 as usize, self.count);
@@ -1557,11 +1595,17 @@ mod tests {
             } else if let Some(msg) = message.content_as::<Operation>() {
                 self.handle_op(aid, &*msg)
             } else if let Some(msg) = message.content_as::<u8>() {
-                assert_eq!(3, aid.received());
+                assert_eq!(4, aid.received());
                 assert_eq!(7 as u8, *msg);
                 self.count += *msg as usize;
                 assert_eq!(29 as usize, self.count);
                 Status::Processed
+            } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                match &*msg {
+                    SystemMsg::Start => Status::Processed,
+                    SystemMsg::Stop => Status::Stop,
+                    m => panic!("unexpected message: {:?}", m),
+                }
             } else {
                 assert!(false, "Failed to dispatch properly");
                 Status::Processed // This assertion will fail but we still have to return.
@@ -1581,14 +1625,15 @@ mod tests {
 
         let aid = system.spawn(starting_state, StructActor::handle);
 
-        ActorId::send(&aid, Message::new(Operation::Inc));
         assert_eq!(1, aid.sent());
-        ActorId::send(&aid, Message::new(Operation::Dec));
+        aid.send(Message::new(Operation::Inc));
         assert_eq!(2, aid.sent());
-        ActorId::send(&aid, Message::new(17 as i32));
+        aid.send(Message::new(Operation::Dec));
         assert_eq!(3, aid.sent());
-        ActorId::send(&aid, Message::new(7 as u8));
+        aid.send(Message::new(17 as i32));
         assert_eq!(4, aid.sent());
+        aid.send(Message::new(7 as u8));
+        assert_eq!(5, aid.sent());
 
         // Wait for the message to get there because test is asynch.
         assert_await_received(&aid, 4, 1000);
