@@ -65,7 +65,7 @@ let aid = system.spawn(
     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
  );
 
-aid.send(Message::new(11));use axiom::actors::*;
+aid.send(Message::new(11));
 ```
 
 This code creates an actor system, spawns an actor and finally sends the actor a message.
