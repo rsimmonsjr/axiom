@@ -34,8 +34,7 @@
 //! Axiom in only a few lines of code.
 //!
 //! ```rust
-//! use axiom::actors::*;
-//! use axiom::message::*;
+//! use axiom::*;
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::create());
@@ -46,7 +45,7 @@
 //!     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
 //!  );
 //!
-//! ActorId::send(&aid, Message::new(11));
+//! aid.send(Message::new(11));
 //! ```
 //!
 //! This code creates an actor system, spawns an actor and finally sends the actor a message.
@@ -55,8 +54,7 @@
 //! different message types:
 //!
 //! ```rust
-//! use axiom::actors::*;
-//! use axiom::message::*;
+//! use axiom::*;
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::create());
@@ -96,10 +94,10 @@
 //! let data = Data { value: 0 };
 //! let aid = system.spawn( data, Data::handle);
 //!
-//! ActorId::send(&aid, Message::new(11));
-//! ActorId::send(&aid, Message::new(true));
-//! ActorId::send(&aid, Message::new(true));
-//! ActorId::send(&aid, Message::new(false));
+//! aid.send(Message::new(11));
+//! aid.send(Message::new(true));
+//! aid.send(Message::new(true));
+//! aid.send(Message::new(false));
 //! ```
 //!
 //! This code creates an actor out of an arbitrary struct. Since the only requirement to make
@@ -122,8 +120,17 @@ pub mod actors;
 pub mod message;
 pub mod secc;
 
+pub use crate::actors::ActorError;
+pub use crate::actors::ActorId;
+pub use crate::actors::ActorSystem;
+pub use crate::actors::ActorSystemConfig;
+pub use crate::actors::Status;
+pub use crate::actors::SystemMsg;
+pub use crate::message::Message;
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use log::LevelFilter;
 
     pub fn init_test_log() {
@@ -133,9 +140,19 @@ mod tests {
             .try_init();
     }
 
-    // FIXME Replace this stub with some comprehensive library tests.
+    /*fn ping(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
+        Status::Processed
+    }
+
+    fn pong(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
+        Status::Processed
+    }*/
+
     #[test]
     fn it_works() {
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        system.init_current();
+
         assert_eq!(2 + 2, 4);
     }
 }

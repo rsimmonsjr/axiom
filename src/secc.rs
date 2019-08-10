@@ -30,7 +30,6 @@ use std::time::Duration;
 const NIL_NODE: usize = 1 << 16 as usize;
 
 /// Errors potentially returned from channel operations.
-/// FIXME (Issue #38) Rename this to just Error and let the user scope to secc::Error if needed.
 #[derive(Eq, PartialEq)]
 pub enum SeccErrors<T: Sync + Send> {
     /// Channel is full, no more messages can be sent, the enclosed message contains the last
