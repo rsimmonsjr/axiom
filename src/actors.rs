@@ -26,7 +26,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
 use uuid::Uuid;
@@ -119,9 +119,13 @@ pub enum ActorError {
 /// an Axiom system on the same machine, the two instances are considered remote.
 enum ActorSender {
     /// A sender used for sending messages to local actors.
-    /// FIXME the actor should actually live here instead of the hashtable. This would simplify
-    /// dispatching greatly.
-    Local(SeccSender<Message>),
+    Local {
+        /// Holds a boolean to indicate if the actor is stopped. A stopped actor will no longer
+        /// accept further messages to be sent.
+        stopped: AtomicBool,
+        // The send side of the actor's message channel.
+        sender: SeccSender<Message>,
+    },
 
     /// A sender that is used when an actor is remote to this actor system. The remote
     /// will use networking to send messages to the actor. Note that this doesnt care if the
@@ -138,7 +142,7 @@ impl fmt::Debug for ActorSender {
             formatter,
             "{}",
             match *self {
-                ActorSender::Local(_) => "ActorSender::Local",
+                ActorSender::Local { .. } => "ActorSender::Local",
                 ActorSender::Remote => "ActorSender::Remote",
             }
         )
@@ -157,10 +161,6 @@ struct ActorIdData {
     node_uuid: Uuid,
     /// See [`ActorId::name()`]
     name: Option<String>,
-    /// Holds a boolean to indicate if the actor is stopped. A stopped actor will no longer
-    /// accept further messages to be sent.
-    /// TODO is_stopped should be in local sender only.
-    is_stopped: AtomicBool,
     /// The handle to the sender side for the actor's message channel.
     sender: ActorSender,
 }
@@ -220,8 +220,6 @@ impl<'de> Deserialize<'de> for ActorId {
                     node_uuid: serialized_form.node_uuid,
                     name: serialized_form.name,
                     sender: ActorSender::Remote,
-                    // TODO This should be inside the local sender.
-                    is_stopped: AtomicBool::new(false),
                 }),
             }),
         }
@@ -293,11 +291,11 @@ impl ActorId {
     /// }
     /// ```
     pub fn try_send(&self, message: Message) -> Result<(), ActorError> {
-        if self.data.is_stopped.load(Ordering::Relaxed) {
-            Err(ActorError::ActorStopped)
-        } else {
-            match &self.data.sender {
-                ActorSender::Local(sender) => {
+        match &self.data.sender {
+            ActorSender::Local { stopped, sender } => {
+                if stopped.load(Ordering::Relaxed) {
+                    Err(ActorError::ActorStopped)
+                } else {
                     sender.send_await(message).unwrap();
                     // FIXME Investigate if this could race the dispatcher threads.
                     if sender.receivable() == 1 {
@@ -307,8 +305,8 @@ impl ActorId {
 
                     Ok(())
                 }
-                _ => Err(ActorError::RemoteNotImplemented),
             }
+            _ => Err(ActorError::RemoteNotImplemented),
         }
     }
 
@@ -340,8 +338,7 @@ impl ActorId {
     /// FIXME Write a Test.
     #[inline]
     pub fn is_local(&self) -> bool {
-        // FIXME Fix when remote actors are introduced.
-        if let ActorSender::Local(_) = self.data.sender {
+        if let ActorSender::Local { .. } = self.data.sender {
             true
         } else {
             false
@@ -353,7 +350,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn sent(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.sent(),
+            ActorSender::Local { sender, .. } => sender.sent(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -364,7 +361,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn received(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.received(),
+            ActorSender::Local { sender, .. } => sender.received(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -374,7 +371,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn receivable(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.receivable(),
+            ActorSender::Local { sender, .. } => sender.receivable(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -385,7 +382,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn pending(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.pending(),
+            ActorSender::Local { sender, .. } => sender.pending(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -394,14 +391,22 @@ impl ActorId {
     /// Stopped actor ids are unable to send messages to the actor.
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn is_stopped(&self) -> bool {
-        self.data.is_stopped.load(Ordering::Relaxed)
+        match &self.data.sender {
+            ActorSender::Local { stopped, .. } => stopped.load(Ordering::Relaxed),
+            _ => panic!("Only implemented for Local sender!"),
+        }
     }
 
     /// Marks the actor referenced by the [`axiom::actors::ActorId`] as stopped and puts
     /// mechanisms in place to cause no more messages to be sent to the actor. Note that once
     /// stopped, an actor id can never be started again.
     fn stop(&self) {
-        self.data.is_stopped.fetch_or(true, Ordering::AcqRel);
+        match &self.data.sender {
+            ActorSender::Local { stopped, .. } => {
+                stopped.fetch_or(true, Ordering::AcqRel);
+            }
+            _ => panic!("Only implemented for Local sender!"),
+        }
     }
 }
 
@@ -500,8 +505,10 @@ impl Actor {
                 uuid: Uuid::new_v4(),
                 node_uuid,
                 name,
-                sender: ActorSender::Local(sender),
-                is_stopped: AtomicBool::new(false),
+                sender: ActorSender::Local {
+                    stopped: AtomicBool::new(false),
+                    sender,
+                },
             }),
         };
 
@@ -512,7 +519,6 @@ impl Actor {
 
         // This is the receiving side of the actor which holds the processor wrapped in the
         // handler type.
-        // FIXME Get rid of the need to look up the actor object when enqueuing it for work!
         let actor = Actor {
             aid: aid.clone(),
             receiver,
@@ -523,13 +529,15 @@ impl Actor {
     }
 
     /// This method is called to finish up the procedure for processing a message
+    ///
+    /// FIXME This should be converted to use a reductions system to process x number
+    /// of messages until a certain configurable time elapses to improve performance with
+    /// actors that get tons of super fast messages.
     fn post_message_process(actor: &Arc<Self>) {
         // We check to see if the actor still has pending messages and if so we re-schedule it
         // for work at the back of the work channel. This prevents actors that get tons of
         // messages from starving out actors that get few messages.
-        // FIXME This should be converted to use a reductions system to process x number
-        // of messages until a certain configurable time elapses to improve performance with
-        // actors that get tons of super fast messages.
+
         if actor.receiver.receivable() > 0 {
             ActorSystem::current()
                 .data
@@ -632,7 +640,7 @@ pub struct ActorSystemConfig {
 }
 
 impl ActorSystemConfig {
-    /// Create the configuration with the default values.
+    /// Create the config with the default values.
     pub fn create() -> ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 100,
@@ -641,7 +649,7 @@ impl ActorSystemConfig {
         }
     }
 
-    /// Create a new configuration object based on the one passed with the new value
+    /// Create a new config object based on the one passed with the new value
     /// for `work_channel_size`.
     pub fn work_channel_size(&self, value: u16) -> ActorSystemConfig {
         ActorSystemConfig {
@@ -651,7 +659,7 @@ impl ActorSystemConfig {
         }
     }
 
-    /// Create a new configuration object based on the one passed with the new value
+    /// Create a new config object based on the one passed with the new value
     /// for `thread_pool_size`.
     pub fn thread_pool_size(&self, value: u16) -> ActorSystemConfig {
         ActorSystemConfig {
@@ -661,7 +669,7 @@ impl ActorSystemConfig {
         }
     }
 
-    /// Create a new configuration object based on the one passed with the new value
+    /// Create a new config object based on the one passed with the new value
     /// for `thread_wait_time`.
     pub fn thread_wait_time(&self, value: u16) -> ActorSystemConfig {
         ActorSystemConfig {
@@ -676,8 +684,8 @@ impl ActorSystemConfig {
 struct ActorSystemData {
     /// Id for this actor system and node.
     node_uuid: Uuid,
-    /// The configuration for the actor system which was passed to it when created.
-    configuration: ActorSystemConfig,
+    /// The config for the actor system which was passed to it when created.
+    config: ActorSystemConfig,
     /// Sender side of the work channel. When an actor gets a message and its pending count
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a message if it has more messages
@@ -690,6 +698,9 @@ struct ActorSystemData {
     thread_pool: Mutex<Vec<JoinHandle<()>>>,
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: AtomicBool,
+    // Stores the number of running threads with a Condvar that will be used to notify anyone
+    // waiting on the condvar that all threads have exited.
+    running_thread_count: Arc<(Mutex<u16>, Condvar)>,
     /// Holds the [`axiom::actors::Actor`] objects keyed by the [`axiom::actors::ActorId`]. The
     /// [`std::sync::RwLock`] will be locked for write only when a new actor is spawned but
     /// otherwise will be locked for read by the [`axiom::actors::ActorId`] instances when they
@@ -721,7 +732,7 @@ pub struct ActorSystem {
 }
 
 impl ActorSystem {
-    /// Creates an actor system with the given configuration. The user should benchmark how
+    /// Creates an actor system with the given config. The user should benchmark how
     /// many slots in the work channel, the number of threads they need and so on in order
     /// to satisfy the requirements of the system they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
@@ -730,17 +741,19 @@ impl ActorSystem {
             secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
         // Convert to usize for pre-allocating a vector.
-        let thread_pool_size: usize = config.thread_pool_size as usize;
+        let thread_pool = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
+        let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
                 node_uuid: Uuid::new_v4(),
-                configuration: config,
+                config: config,
                 sender,
                 receiver,
-                thread_pool: Mutex::new(Vec::with_capacity(thread_pool_size)),
+                thread_pool,
                 shutdown_triggered: AtomicBool::new(false),
+                running_thread_count,
                 actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
                 aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
                 aids_by_name: Arc::new(RwLock::new(HashMap::new())),
@@ -753,7 +766,7 @@ impl ActorSystem {
         // get around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.data.thread_pool.lock().unwrap();
-            for _ in 0..system.data.configuration.thread_pool_size {
+            for _ in 0..system.data.config.thread_pool_size {
                 let thread = system.start_dispatcher_thread();
                 guard.push(thread);
             }
@@ -776,7 +789,7 @@ impl ActorSystem {
         // long in the channel.
         let system = self.clone();
         let receiver = self.data.receiver.clone();
-        let thread_timeout = self.data.configuration.thread_wait_time;
+        let thread_timeout = self.data.config.thread_wait_time;
 
         thread::spawn(move || {
             system.init_current();
@@ -785,6 +798,13 @@ impl ActorSystem {
                     Err(_) => (), // not an error, just loop and try again.
                     Ok(actor) => Actor::receive(actor),
                 }
+            }
+            let (mutex, condvar) = &*system.data.running_thread_count;
+            let mut count = mutex.lock().unwrap();
+            *count = *count - 1;
+            // If this is the last thread exiting we will notify any waiters.
+            if *count == 0 {
+                condvar.notify_all();
             }
         })
     }
@@ -812,16 +832,24 @@ impl ActorSystem {
         })
     }
 
-    /// Triggers a shutdown of the system and returns only when all threads have joined. This
-    /// allows a graceful shutdown of the actor system but any messages pending in actor channels
-    /// will get discarded.
-    pub fn shutdown(&self) {
+    /// Triggers a shutdown but doesnt wait for threads to stop. This function is non-blocking.
+    pub fn trigger_shutdown(&self) {
         self.data.shutdown_triggered.store(true, Ordering::Relaxed);
-        let mut guard = self.data.thread_pool.lock().unwrap();
-        let vec = std::mem::replace(&mut *guard, vec![]);
-        for handle in vec {
-            handle.join().unwrap();
-        }
+    }
+
+    /// Awaits for the actor system to be shutdown using a relatively CPU minimal condvar as
+    /// a signalling mechanism. This function will block until all actor system threads have
+    /// returned.
+    pub fn await_shutdown(&self) {
+        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
+        let guard = mutex.lock().unwrap();
+        let _condvar_guard = condvar.wait(guard).unwrap();
+    }
+
+    /// Triggers a shutdown of the system and returns only when all threads have joined.
+    pub fn trigger_and_await_shutdown(&self) {
+        self.trigger_shutdown();
+        self.await_shutdown();
     }
 
     /// Returns the total number of times actors have been sent to the work channel.
@@ -1033,9 +1061,9 @@ impl fmt::Debug for ActorSystem {
     fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
         write!(
             formatter,
-            "ActorSystem{{node_uuid: {}, configuration: {:?}}}",
+            "ActorSystem{{node_uuid: {}, config: {:?}}}",
             self.data.node_uuid.to_string(),
-            self.data.configuration,
+            self.data.config,
         )
     }
 }
@@ -1047,45 +1075,6 @@ mod tests {
     use super::*;
     use crate::tests::*;
     use std::time::Duration;
-
-    #[test]
-    fn test_actor_id_serialization() {
-        let system = ActorSystem::create(ActorSystemConfig::create());
-        system.init_current();
-        let aid = system.spawn(0 as usize, simple_handler);
-
-        // forces the test to break here if someone changes this.
-        if let ActorSender::Local(_) = aid.data.sender {
-        } else {
-            panic!("The sender should be `Local`")
-        }
-
-        let serialized = bincode::serialize(&aid).expect("Couldn't serialize.");
-        let deserialized: ActorId =
-            bincode::deserialize(&serialized).expect("Couldn't deserialize.");
-        // In this case the resulting AID should be identical to the serialized one because
-        // we have the same actor system in a threadlocal.
-        assert!(Arc::ptr_eq(&aid.data, &deserialized.data));
-
-        // If we deserialize on another actor system it should be a remote AID.
-        let handle = thread::spawn(move || {
-            let system = ActorSystem::create(ActorSystemConfig::create());
-            system.init_current();
-
-            let deserialized: ActorId =
-                bincode::deserialize(&serialized).expect("Couldn't deserialize.");
-            if let ActorSender::Remote = deserialized.data.sender {
-                assert_eq!(aid.uuid(), deserialized.uuid());
-                assert_eq!(aid.node_uuid(), deserialized.node_uuid());
-                assert_eq!(aid.name(), deserialized.name());
-                assert_eq!(false, deserialized.is_stopped());
-            } else {
-                panic!("The sender should be `Remote`")
-            }
-        });
-
-        handle.join().unwrap();
-    }
 
     /// A test helper to assert that a certain number of messages arrived in a certain time.
     fn assert_await_received(aid: &ActorId, count: u8, timeout_ms: u64) {
@@ -1110,6 +1099,82 @@ mod tests {
     }
 
     #[test]
+    fn test_actor_id_serialization() {
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        system.init_current();
+        let aid = system.spawn(0 as usize, simple_handler);
+
+        // forces the test to break here if someone changes this.
+        match aid.data.sender {
+            ActorSender::Local { .. } => (),
+            _ => panic!("The sender should be `Local`"),
+        }
+
+        let serialized = bincode::serialize(&aid).expect("Couldn't serialize.");
+        let deserialized: ActorId =
+            bincode::deserialize(&serialized).expect("Couldn't deserialize.");
+        // In this case the resulting AID should be identical to the serialized one because
+        // we have the same actor system in a threadlocal.
+        assert!(Arc::ptr_eq(&aid.data, &deserialized.data));
+
+        // If we deserialize on another actor system it should be a remote AID.
+        let handle = thread::spawn(move || {
+            let system = ActorSystem::create(ActorSystemConfig::create());
+            system.init_current();
+
+            let deserialized: ActorId =
+                bincode::deserialize(&serialized).expect("Couldn't deserialize.");
+            match deserialized.data.sender {
+                ActorSender::Remote => {
+                    assert_eq!(aid.uuid(), deserialized.uuid());
+                    assert_eq!(aid.node_uuid(), deserialized.node_uuid());
+                    assert_eq!(aid.name(), deserialized.name());
+                }
+                _ => panic!(
+                    "The sender should be `Remote` but was {:?}",
+                    aid.data.sender
+                ),
+            }
+        });
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_actor_id_as_message() {
+        init_test_log();
+
+        // This test verifies that an ActorId can be used as a message and inside other
+        // objects used as a message.
+        let system = ActorSystem::create(ActorSystemConfig::create());
+        system.init_current();
+
+        #[derive(Serialize, Deserialize)]
+        enum Op {
+            Aid(ActorId),
+        }
+
+        // The user will send our own ActorId to us.
+        let aid = system.spawn(0, |_state: &mut i32, aid: ActorId, message: &Message| {
+            if let Some(msg) = message.content_as::<ActorId>() {
+                assert_eq!(aid.uuid(), msg.uuid());
+            } else if let Some(msg) = message.content_as::<Op>() {
+                match &*msg {
+                    Op::Aid(a) => assert_eq!(aid.uuid(), a.uuid()),
+                }
+            }
+            Status::Processed
+        });
+
+        // Send a message to the actor.
+        aid.send(Message::new(aid.clone()));
+
+        // Wait for the start and our message to get there because test is asynchronous.
+        assert_await_received(&aid, 2, 1000);
+        system.trigger_and_await_shutdown();
+    }
+
+    #[test]
     fn test_simplest_actor() {
         init_test_log();
 
@@ -1131,7 +1196,7 @@ mod tests {
 
         // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1161,7 +1226,7 @@ mod tests {
 
         // Wait for the message to get there because test is asynchronous.
         assert_await_received(&aid, 1, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1218,7 +1283,7 @@ mod tests {
 
         // Wait for all of the messages to get there because test is asynchronous.
         assert_await_received(&aid, 4, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1281,7 +1346,7 @@ mod tests {
 
         // Wait for all of the messages to get there because this test is asynchronous.
         assert_await_received(&aid, 4, 1000);
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1348,7 +1413,7 @@ mod tests {
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
 
         // Shut down the system and clean up test.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1384,7 +1449,7 @@ mod tests {
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1408,7 +1473,7 @@ mod tests {
         aid.send(Message::new(11));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1434,7 +1499,7 @@ mod tests {
         assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     #[test]
@@ -1495,7 +1560,7 @@ mod tests {
         assert!(Arc::ptr_eq(&aid3.data, &found4.data));
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
 
     /// A helper handler used by `test_monitors` that expects to get a stopped message for the
@@ -1547,97 +1612,6 @@ mod tests {
         assert_await_received(&not_monitoring, 1, 1000);
 
         // Wait for the message to get there because test is asynchronous.
-        system.shutdown();
+        system.trigger_and_await_shutdown();
     }
-
-    // ---------- Complete Example ----------
-    // TODO Work on this to add more actors and cross actor sending and so on.
-
-    #[derive(Debug, Serialize, Deserialize)]
-    enum Operation {
-        Inc,
-        Dec,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct StructActor {
-        count: usize,
-    }
-
-    impl StructActor {
-        fn handle_op(&mut self, aid: ActorId, msg: &Operation) -> Status {
-            match msg {
-                Operation::Inc => {
-                    assert_eq!(1, aid.received());
-                    self.count += 1;
-                    assert_eq!(6 as usize, self.count);
-                }
-                Operation::Dec => {
-                    assert_eq!(2, aid.received());
-                    self.count -= 1;
-                    assert_eq!(5 as usize, self.count);
-                }
-            }
-            Status::Processed
-        }
-
-        fn handle_i32(&mut self, aid: ActorId, msg: &i32) -> Status {
-            assert_eq!(3, aid.received());
-            assert_eq!(17 as i32, *msg);
-            self.count += *msg as usize;
-            assert_eq!(22 as usize, self.count);
-            Status::Processed
-        }
-
-        fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
-            if let Some(msg) = message.content_as::<i32>() {
-                self.handle_i32(aid, &*msg)
-            } else if let Some(msg) = message.content_as::<Operation>() {
-                self.handle_op(aid, &*msg)
-            } else if let Some(msg) = message.content_as::<u8>() {
-                assert_eq!(4, aid.received());
-                assert_eq!(7 as u8, *msg);
-                self.count += *msg as usize;
-                assert_eq!(29 as usize, self.count);
-                Status::Processed
-            } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                match &*msg {
-                    SystemMsg::Start => Status::Processed,
-                    SystemMsg::Stop => Status::Stop,
-                    m => panic!("unexpected message: {:?}", m),
-                }
-            } else {
-                assert!(false, "Failed to dispatch properly");
-                Status::Processed // This assertion will fail but we still have to return.
-            }
-        }
-    }
-
-    #[test]
-    fn test_full_example() {
-        init_test_log();
-
-        // This test uses the actor struct declared above to demonstrate and test most of the
-        // capabilities of actors. This is a fairly complete example.
-        let system = ActorSystem::create(ActorSystemConfig::create());
-        system.init_current();
-        let starting_state: StructActor = StructActor { count: 5 as usize };
-
-        let aid = system.spawn(starting_state, StructActor::handle);
-
-        assert_eq!(1, aid.sent());
-        aid.send(Message::new(Operation::Inc));
-        assert_eq!(2, aid.sent());
-        aid.send(Message::new(Operation::Dec));
-        assert_eq!(3, aid.sent());
-        aid.send(Message::new(17 as i32));
-        assert_eq!(4, aid.sent());
-        aid.send(Message::new(7 as u8));
-        assert_eq!(5, aid.sent());
-
-        // Wait for the message to get there because test is asynch.
-        assert_await_received(&aid, 4, 1000);
-        system.shutdown();
-    }
-
 }

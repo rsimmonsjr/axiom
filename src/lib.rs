@@ -132,6 +132,7 @@ pub use crate::message::Message;
 mod tests {
     use super::*;
     use log::LevelFilter;
+    use serde::{Deserialize, Serialize};
 
     pub fn init_test_log() {
         let _ = env_logger::builder()
@@ -140,18 +141,59 @@ mod tests {
             .try_init();
     }
 
-    /*fn ping(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
-        Status::Processed
+    #[derive(Serialize, Deserialize)]
+    enum PingPong {
+        Ping(ActorId),
+        Pong,
     }
 
-    fn pong(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
-        Status::Processed
-    }*/
+    fn ping(_state: &mut usize, aid: ActorId, message: &Message) -> Status {
+        if let Some(msg) = message.content_as::<PingPong>() {
+            match &*msg {
+                PingPong::Pong => {
+                    println!("===> Got a Pong!");
+                    ActorSystem::current().trigger_shutdown();
+                    Status::Processed
+                }
+                _ => panic!("Unexpected message"),
+            }
+        } else if let Some(msg) = message.content_as::<SystemMsg>() {
+            // start messages happen only once so we keep them last.
+            match &*msg {
+                SystemMsg::Start => {
+                    let pong_aid = ActorSystem::current().spawn(0, pong);
+                    println!("===> Sending a Ping!");
+                    pong_aid.send(Message::new(PingPong::Ping(aid.clone())));
+                    Status::Processed
+                }
+                _ => Status::Processed,
+            }
+        } else {
+            Status::Processed
+        }
+    }
+
+    fn pong(_state: &mut usize, _aid: ActorId, message: &Message) -> Status {
+        if let Some(msg) = message.content_as::<PingPong>() {
+            match &*msg {
+                PingPong::Ping(from) => {
+                    println!("++>> Ponging the Ping!");
+                    from.send(Message::new(PingPong::Pong));
+                    Status::Processed
+                }
+                _ => panic!("Unexpected message"),
+            }
+        } else {
+            Status::Processed
+        }
+    }
 
     #[test]
-    fn it_works() {
+    fn test_ping_pong() {
         let system = ActorSystem::create(ActorSystemConfig::create());
         system.init_current();
+        system.spawn(0, ping);
+        system.await_shutdown();
 
         assert_eq!(2 + 2, 4);
     }
