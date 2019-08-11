@@ -119,9 +119,13 @@ pub enum ActorError {
 /// an Axiom system on the same machine, the two instances are considered remote.
 enum ActorSender {
     /// A sender used for sending messages to local actors.
-    /// FIXME (Issue #43) The actor should actually live here instead of the hashtable. This would simplify
-    /// dispatching greatly.
-    Local(SeccSender<Message>),
+    Local {
+        /// Holds a boolean to indicate if the actor is stopped. A stopped actor will no longer
+        /// accept further messages to be sent.
+        stopped: AtomicBool,
+        // The send side of the actor's message channel.
+        sender: SeccSender<Message>,
+    },
 
     /// A sender that is used when an actor is remote to this actor system. The remote
     /// will use networking to send messages to the actor. Note that this doesnt care if the
@@ -138,7 +142,7 @@ impl fmt::Debug for ActorSender {
             formatter,
             "{}",
             match *self {
-                ActorSender::Local(_) => "ActorSender::Local",
+                ActorSender::Local { .. } => "ActorSender::Local",
                 ActorSender::Remote => "ActorSender::Remote",
             }
         )
@@ -157,10 +161,6 @@ struct ActorIdData {
     node_uuid: Uuid,
     /// See [`ActorId::name()`]
     name: Option<String>,
-    /// Holds a boolean to indicate if the actor is stopped. A stopped actor will no longer
-    /// accept further messages to be sent.
-    /// TODO is_stopped should be in local sender only.
-    is_stopped: AtomicBool,
     /// The handle to the sender side for the actor's message channel.
     sender: ActorSender,
 }
@@ -220,8 +220,6 @@ impl<'de> Deserialize<'de> for ActorId {
                     node_uuid: serialized_form.node_uuid,
                     name: serialized_form.name,
                     sender: ActorSender::Remote,
-                    // TODO This should be inside the local sender.
-                    is_stopped: AtomicBool::new(false),
                 }),
             }),
         }
@@ -293,11 +291,11 @@ impl ActorId {
     /// }
     /// ```
     pub fn try_send(&self, message: Message) -> Result<(), ActorError> {
-        if self.data.is_stopped.load(Ordering::Relaxed) {
-            Err(ActorError::ActorStopped)
-        } else {
-            match &self.data.sender {
-                ActorSender::Local(sender) => {
+        match &self.data.sender {
+            ActorSender::Local { stopped, sender } => {
+                if stopped.load(Ordering::Relaxed) {
+                    Err(ActorError::ActorStopped)
+                } else {
                     sender.send_await(message).unwrap();
                     // FIXME Investigate if this could race the dispatcher threads.
                     if sender.receivable() == 1 {
@@ -307,8 +305,8 @@ impl ActorId {
 
                     Ok(())
                 }
-                _ => Err(ActorError::RemoteNotImplemented),
             }
+            _ => Err(ActorError::RemoteNotImplemented),
         }
     }
 
@@ -340,8 +338,7 @@ impl ActorId {
     /// FIXME Write a Test.
     #[inline]
     pub fn is_local(&self) -> bool {
-        // FIXME Fix when remote actors are introduced.
-        if let ActorSender::Local(_) = self.data.sender {
+        if let ActorSender::Local { .. } = self.data.sender {
             true
         } else {
             false
@@ -353,7 +350,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn sent(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.sent(),
+            ActorSender::Local { sender, .. } => sender.sent(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -364,7 +361,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn received(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.received(),
+            ActorSender::Local { sender, .. } => sender.received(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -374,7 +371,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn receivable(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.receivable(),
+            ActorSender::Local { sender, .. } => sender.receivable(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -385,7 +382,7 @@ impl ActorId {
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn pending(&self) -> usize {
         match &self.data.sender {
-            ActorSender::Local(sender) => sender.pending(),
+            ActorSender::Local { sender, .. } => sender.pending(),
             _ => panic!("Only implemented for Local sender!"),
         }
     }
@@ -394,14 +391,22 @@ impl ActorId {
     /// Stopped actor ids are unable to send messages to the actor.
     /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
     pub fn is_stopped(&self) -> bool {
-        self.data.is_stopped.load(Ordering::Relaxed)
+        match &self.data.sender {
+            ActorSender::Local { stopped, .. } => stopped.load(Ordering::Relaxed),
+            _ => panic!("Only implemented for Local sender!"),
+        }
     }
 
     /// Marks the actor referenced by the [`axiom::actors::ActorId`] as stopped and puts
     /// mechanisms in place to cause no more messages to be sent to the actor. Note that once
     /// stopped, an actor id can never be started again.
     fn stop(&self) {
-        self.data.is_stopped.fetch_or(true, Ordering::AcqRel);
+        match &self.data.sender {
+            ActorSender::Local { stopped, .. } => {
+                stopped.fetch_or(true, Ordering::AcqRel);
+            }
+            _ => panic!("Only implemented for Local sender!"),
+        }
     }
 }
 
@@ -500,8 +505,10 @@ impl Actor {
                 uuid: Uuid::new_v4(),
                 node_uuid,
                 name,
-                sender: ActorSender::Local(sender),
-                is_stopped: AtomicBool::new(false),
+                sender: ActorSender::Local {
+                    stopped: AtomicBool::new(false),
+                    sender,
+                },
             }),
         };
 
@@ -512,7 +519,6 @@ impl Actor {
 
         // This is the receiving side of the actor which holds the processor wrapped in the
         // handler type.
-        // FIXME Get rid of the need to look up the actor object when enqueuing it for work!
         let actor = Actor {
             aid: aid.clone(),
             receiver,
@@ -523,13 +529,15 @@ impl Actor {
     }
 
     /// This method is called to finish up the procedure for processing a message
+    ///
+    /// FIXME This should be converted to use a reductions system to process x number
+    /// of messages until a certain configurable time elapses to improve performance with
+    /// actors that get tons of super fast messages.
     fn post_message_process(actor: &Arc<Self>) {
         // We check to see if the actor still has pending messages and if so we re-schedule it
         // for work at the back of the work channel. This prevents actors that get tons of
         // messages from starving out actors that get few messages.
-        // FIXME This should be converted to use a reductions system to process x number
-        // of messages until a certain configurable time elapses to improve performance with
-        // actors that get tons of super fast messages.
+
         if actor.receiver.receivable() > 0 {
             ActorSystem::current()
                 .data
@@ -1097,9 +1105,9 @@ mod tests {
         let aid = system.spawn(0 as usize, simple_handler);
 
         // forces the test to break here if someone changes this.
-        if let ActorSender::Local(_) = aid.data.sender {
-        } else {
-            panic!("The sender should be `Local`")
+        match aid.data.sender {
+            ActorSender::Local { .. } => (),
+            _ => panic!("The sender should be `Local`"),
         }
 
         let serialized = bincode::serialize(&aid).expect("Couldn't serialize.");
@@ -1116,13 +1124,16 @@ mod tests {
 
             let deserialized: ActorId =
                 bincode::deserialize(&serialized).expect("Couldn't deserialize.");
-            if let ActorSender::Remote = deserialized.data.sender {
-                assert_eq!(aid.uuid(), deserialized.uuid());
-                assert_eq!(aid.node_uuid(), deserialized.node_uuid());
-                assert_eq!(aid.name(), deserialized.name());
-                assert_eq!(false, deserialized.is_stopped());
-            } else {
-                panic!("The sender should be `Remote`")
+            match deserialized.data.sender {
+                ActorSender::Remote => {
+                    assert_eq!(aid.uuid(), deserialized.uuid());
+                    assert_eq!(aid.node_uuid(), deserialized.node_uuid());
+                    assert_eq!(aid.name(), deserialized.name());
+                }
+                _ => panic!(
+                    "The sender should be `Remote` but was {:?}",
+                    aid.data.sender
+                ),
             }
         });
 
