@@ -37,7 +37,7 @@
 //! use axiom::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(ActorSystemConfig::create());
+//! let system = ActorSystem::create(ActorSystemConfig::default());
 //! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! let aid = system.spawn(
@@ -57,7 +57,7 @@
 //! use axiom::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(ActorSystemConfig::create());
+//! let system = ActorSystem::create(ActorSystemConfig::default());
 //! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! struct Data {
@@ -151,7 +151,6 @@ mod tests {
         if let Some(msg) = message.content_as::<PingPong>() {
             match &*msg {
                 PingPong::Pong => {
-                    println!("===> Got a Pong!");
                     ActorSystem::current().trigger_shutdown();
                     Status::Processed
                 }
@@ -162,7 +161,6 @@ mod tests {
             match &*msg {
                 SystemMsg::Start => {
                     let pong_aid = ActorSystem::current().spawn(0, pong);
-                    println!("===> Sending a Ping!");
                     pong_aid.send(Message::new(PingPong::Ping(aid.clone())));
                     Status::Processed
                 }
@@ -177,7 +175,6 @@ mod tests {
         if let Some(msg) = message.content_as::<PingPong>() {
             match &*msg {
                 PingPong::Ping(from) => {
-                    println!("++>> Ponging the Ping!");
                     from.send(Message::new(PingPong::Pong));
                     Status::Processed
                 }
@@ -190,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_ping_pong() {
-        let system = ActorSystem::create(ActorSystemConfig::create());
+        let system = ActorSystem::create(ActorSystemConfig::default());
         system.init_current();
         system.spawn(0, ping);
         system.await_shutdown();
