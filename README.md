@@ -57,7 +57,7 @@ Axiom in only a few lines of code.
 use axiom::*;
 use std::sync::Arc;
 
-let system = ActorSystem::create(ActorSystemConfig::create());
+let system = ActorSystem::create(ActorSystemConfig::default());
 system.init_current(); // Needed to call from outside of actor system threads.
 
 let aid = system.spawn(
@@ -79,7 +79,7 @@ handles a couple of different message types:
 use axiom::*;
 use std::sync::Arc;
 
-let system = ActorSystem::create(ActorSystemConfig::create());
+let system = ActorSystem::create(ActorSystemConfig::default());
 system.init_current(); // Needed to call from outside of actor system threads.
 
 struct Data {

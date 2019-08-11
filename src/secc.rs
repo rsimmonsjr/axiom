@@ -27,7 +27,7 @@ use std::time::Duration;
 
 /// A message that is used to indicate that a position index points to no other node. Note that
 /// this value is something beyond the capability of any user to allocate for the channel size.
-const NIL_NODE: usize = 1 << 16 as usize;
+const NIL: usize = 1 << 16 as usize;
 
 /// Errors potentially returned from channel operations.
 #[derive(Eq, PartialEq)]
@@ -53,9 +53,9 @@ impl<T: Sync + Send> fmt::Debug for SeccErrors<T> {
 
 /// A single node in the channel's buffer.
 struct SeccNode<T: Sync + Send> {
-    /// Contains a message in a `Some` or a `None` if the node is empty.  Note that this is unsafe
-    /// in order to get around Rust mutability locks so that this data structure can be passed
-    /// around immutably but also still be able to send and receive.
+    /// Contains a message in a `Some` or contains `None` if the node is empty. Note that this is
+    /// an [`UnsafeCell`] in order to get around Rust mutability locks so that this data structure
+    /// can be passed around immutably but also still be able to send and receive.
     cell: UnsafeCell<Option<T>>,
     /// The pointer to the next node in the channel.
     next: AtomicUsize,
@@ -63,15 +63,16 @@ struct SeccNode<T: Sync + Send> {
 }
 
 impl<T: Sync + Send> SeccNode<T> {
-    /// Creates a new node where the next index is set to the `NIL_NODE`.
+    /// Creates a new node where the next index is set to the `NIL`.
     fn new() -> SeccNode<T> {
         SeccNode {
             cell: UnsafeCell::new(None),
-            next: AtomicUsize::new(NIL_NODE),
+            next: AtomicUsize::new(NIL),
         }
     }
 
-    /// Creates a new node where the next index is set to point at the provided value.
+    /// Creates a new node where the next index is set to point at the provided index in
+    /// the slice of allocated nodes.
     fn with_next(next: usize) -> SeccNode<T> {
         SeccNode {
             cell: UnsafeCell::new(None),
@@ -116,7 +117,7 @@ pub trait SeccCoreOps<T: Sync + Send> {
         self.core().sent.load(Ordering::Relaxed)
     }
 
-    /// Returns the total number of objects messages that have been received from the channel.
+    /// Returns the total number of messages that have been received from the channel.
     fn received(&self) -> usize {
         self.core().received.load(Ordering::Relaxed)
     }
@@ -142,10 +143,10 @@ struct SeccReceivePtrs {
     queue_head: usize,
     /// The tail of the pool of available nodes to be used when sending messages to the channel.
     pool_tail: usize,
-    /// Either [`NIL_NODE`], when there is no current skip cursor, or a pointer to the last
+    /// Either [`NIL`], when there is no current skip cursor, or a pointer to the last
     /// element skipped.
     skipped: usize,
-    /// Either [`NIL_NODE`], when there is no current skip cursor, or a pointer to the next
+    /// Either [`NIL`], when there is no current skip cursor, or a pointer to the next
     /// element that can be received from the channel.
     cursor: usize,
 }
@@ -159,12 +160,11 @@ pub struct SeccCore<T: Sync + Send> {
     capacity: usize,
     /// The timeout used for polling the channel when waiting forever to send or recieve.
     poll_ms: u16,
-    /// Node storage of the nodes. These nodes are never read directly except during allocation
-    /// and tests. Note this field is preceded with an underscore because although the nodes
-    /// live here they are never used directly once allocated.
+    /// Storage of the nodes. Note this field is preceded with an underscore because although
+    /// the nodes live here they are never used directly once allocated.
     _nodes: Box<[SeccNode<T>]>,
     /// Pointers to the nodes in the channel. It is critical that these pointers never change
-    /// order during the operations of the channel because the next pointers of the nodes refer
+    /// order during the operations of the channel because the pointers used in the channel refer
     /// to indexes in this vector rather than the raw pointers.
     node_ptrs: UnsafeCell<Vec<*mut SeccNode<T>>>,
     /// Indexes in the `node_ptrs` used for sending elements to the channel.  These pointers are
@@ -187,9 +187,9 @@ pub struct SeccCore<T: Sync + Send> {
     /// the same as `pending` unless there is a skip cursor active; in which case it may be
     /// smaller than pending or even 0.
     receivable: AtomicUsize,
-    /// Total number of messages that have been sent in the channel.
+    /// Total number of messages that have been sent to the channel.
     sent: AtomicUsize,
-    /// Total number of messages that have been received in the channel.
+    /// Total number of messages that have been received from the channel.
     received: AtomicUsize,
 }
 
@@ -202,7 +202,7 @@ pub struct SeccSender<T: Sync + Send> {
 impl<T: Sync + Send> SeccSender<T> {
     /// Sends a message, which will be moved into the channel. This function will either return
     /// an empty [`std::Result::Ok`] or an [`std::Result::Err`] containing the last message
-    /// sent if something went wrong such as the channel being full.
+    /// sent if something went wrong.
     pub fn send(&self, message: T) -> Result<(), SeccErrors<T>> {
         unsafe {
             // Retrieve send pointers and the encoded indexes inside them and their Condvar.
@@ -212,7 +212,7 @@ impl<T: Sync + Send> SeccSender<T> {
             // Get a pointer to the current pool_head and see if we have space to send.
             let pool_head_ptr = (*self.core.node_ptrs.get())[send_ptrs.pool_head];
             let next_pool_head = (*pool_head_ptr).next.load(Ordering::SeqCst);
-            if NIL_NODE == next_pool_head {
+            if NIL == next_pool_head {
                 Err(SeccErrors::Full(message))
             } else {
                 // We get the queue tail because the node from the pool will move here.
@@ -226,13 +226,13 @@ impl<T: Sync + Send> SeccSender<T> {
                 send_ptrs.queue_tail = send_ptrs.pool_head;
                 send_ptrs.pool_head = next_pool_head;
 
-                // Adjust channel metrics
+                // Adjust the channel metrics.
                 self.core.sent.fetch_add(1, Ordering::SeqCst);
                 self.core.receivable.fetch_add(1, Ordering::SeqCst);
                 self.core.pending.fetch_add(1, Ordering::SeqCst);
 
                 // The now filled node will get moved to the queue.
-                (*pool_head_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                (*pool_head_ptr).next.store(NIL, Ordering::SeqCst);
 
                 // We MUST set this LAST or we will get into a race with the receiver that would
                 // think this node is ready for receiving when it isn't until just now.
@@ -248,7 +248,7 @@ impl<T: Sync + Send> SeccSender<T> {
     }
 
     /// Send to the channel, awaiting capacity if necessary, with an optional timeout. This
-    /// function is semantically identical to [`axiom::secc::SeccSender::send`] but simply waits
+    /// function is semantically identical to [`SeccSender::send`] but simply waits
     /// for there to be space in the channel before sending. If the timeout is not provided this
     /// function will wait forever for capacity.
     pub fn send_await_timeout(&self, mut message: T, timeout_ms: u16) -> Result<(), SeccErrors<T>> {
@@ -262,21 +262,21 @@ impl<T: Sync + Send> SeccSender<T> {
                     let receive_ptrs = mutex.lock().unwrap();
 
                     // We will check if something got received before this function could create
-                    // the condvar; this would mean we missed the condvar message and space is
+                    // the condvar. This would mean we missed the condvar message and space is
                     // available to send.
                     let next_read_pos = unsafe {
-                        let read_ptr = if receive_ptrs.cursor == NIL_NODE {
+                        let read_ptr = if receive_ptrs.cursor == NIL {
                             (*self.core.node_ptrs.get())[receive_ptrs.queue_head]
                         } else {
                             (*self.core.node_ptrs.get())[receive_ptrs.cursor]
                         };
                         (*read_ptr).next.load(Ordering::SeqCst)
                     };
-                    if NIL_NODE != next_read_pos {
+                    if NIL != next_read_pos {
                         let result = condvar.wait_timeout(receive_ptrs, dur).unwrap();
                         self.core.awaited_capacity.fetch_add(1, Ordering::SeqCst);
                         if result.1.timed_out() {
-                            // try one more time to send.
+                            // We will try one more time to send in case we missed a notify.
                             return self.send(message);
                         }
                     }
@@ -326,13 +326,13 @@ impl<T: Sync + Send> SeccReceiver<T> {
             let receive_ptrs = mutex.lock().unwrap();
 
             // Get a pointer to the queue_head or cursor and see check for anything receivable.
-            let read_ptr = if receive_ptrs.cursor == NIL_NODE {
+            let read_ptr = if receive_ptrs.cursor == NIL {
                 (*self.core.node_ptrs.get())[receive_ptrs.queue_head]
             } else {
                 (*self.core.node_ptrs.get())[receive_ptrs.cursor]
             };
             let next_read_pos = (*read_ptr).next.load(Ordering::SeqCst);
-            if NIL_NODE == next_read_pos {
+            if NIL == next_read_pos {
                 return Err(SeccErrors::Empty);
             }
 
@@ -348,7 +348,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
     /// Receives the next message that is receivable. This will either receive the message at
     /// the head of the channel or, in the case that there is a skip cursor active, the next
     /// receivable message will be in the node pointed to by the skip cursor. This means that it
-    /// is possible that receive could return an [`axiom::secc::SeccErrors::Empty`] when there
+    /// is possible that receive could return an [`SeccErrors::Empty`] when there
     /// are actually messages in the channel because there will be none readable until the skip
     /// is reset.
     pub fn receive(&self) -> Result<T, SeccErrors<T>> {
@@ -358,13 +358,13 @@ impl<T: Sync + Send> SeccReceiver<T> {
             let mut receive_ptrs = mutex.lock().unwrap();
 
             // Get a pointer to the queue_head or cursor and see check for anything receivable.
-            let read_ptr = if receive_ptrs.cursor == NIL_NODE {
+            let read_ptr = if receive_ptrs.cursor == NIL {
                 (*self.core.node_ptrs.get())[receive_ptrs.queue_head]
             } else {
                 (*self.core.node_ptrs.get())[receive_ptrs.cursor]
             };
             let next_read_pos = (*read_ptr).next.load(Ordering::SeqCst);
-            if NIL_NODE == next_read_pos {
+            if NIL == next_read_pos {
                 Err(SeccErrors::Empty)
             } else {
                 // We can read something so we will pull the item out of the read pointer.
@@ -374,9 +374,9 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 // cursor, or from the queue head if there was no cursor. Then we have to place
                 // the released node on the pool tail.
                 let pool_tail_ptr = (*self.core.node_ptrs.get())[receive_ptrs.pool_tail];
-                (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                (*read_ptr).next.store(NIL, Ordering::SeqCst);
 
-                let new_pool_tail = if receive_ptrs.cursor == NIL_NODE {
+                let new_pool_tail = if receive_ptrs.cursor == NIL {
                     // If we aren't using a cursor then the queue_head becomes the pool tail
                     receive_ptrs.pool_tail = receive_ptrs.queue_head;
                     let old_queue_head = receive_ptrs.queue_head;
@@ -385,13 +385,13 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 } else {
                     // If the cursor is set we have to dequeue in the middle of the list and fix
                     // the node chain and then move the node that the cursor was pointing at to
-                    // the pool tail. Note that the `skipped` pointer will never be [`NIL_NODE`]
-                    // when the cursor is not [`NIL_NODE`]. The `skipped` pointer is only ever
+                    // the pool tail. Note that the `skipped` pointer will never be [`NIL`]
+                    // when the cursor is not [`NIL`]. The `skipped` pointer is only ever
                     // set to a skipped node that could be read and lags beind `cursor` by one
                     // node in the queue.
                     let skipped_ptr = (*self.core.node_ptrs.get())[receive_ptrs.skipped];
                     ((*skipped_ptr).next).store(next_read_pos, Ordering::SeqCst);
-                    (*read_ptr).next.store(NIL_NODE, Ordering::SeqCst);
+                    (*read_ptr).next.store(NIL, Ordering::SeqCst);
                     receive_ptrs.pool_tail = receive_ptrs.cursor;
                     let old_cursor = receive_ptrs.cursor;
                     receive_ptrs.cursor = next_read_pos;
@@ -411,7 +411,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
                 // Notify anyone waiting on messages to be available.
                 condvar.notify_all();
 
-                // Return the message associated.
+                // Return the message retreived earlier.
                 Ok(message)
             }
         }
@@ -424,7 +424,7 @@ impl<T: Sync + Send> SeccReceiver<T> {
         Ok(())
     }
 
-    /// A helper to call [`axiom::secc::SeccReceiver::receive`] and await receivable messages
+    /// A helper to call [`SeccReceiver::receive`] and await receivable messages
     /// until a specified optional timeout has expired.
     pub fn receive_await_timeout(&self, timeout_ms: u16) -> Result<T, SeccErrors<T>> {
         loop {
@@ -441,13 +441,14 @@ impl<T: Sync + Send> SeccReceiver<T> {
                         let pool_head_ptr = (*self.core.node_ptrs.get())[send_ptrs.pool_head];
                         (*pool_head_ptr).next.load(Ordering::SeqCst)
                     };
-                    if NIL_NODE != next_pool_head {
+                    if NIL != next_pool_head {
                         // In this case there is still nothing to read so we set up a Condvar
                         // and wait for the sender to notify us of new available messages.
                         let result = condvar.wait_timeout(send_ptrs, dur).unwrap();
                         self.core.awaited_messages.fetch_add(1, Ordering::SeqCst);
                         if result.1.timed_out() {
-                            // Try one more time at the end of the timeout.
+                            // Try one more time at the end of the timeout in case we missed
+                            // a notification.
                             return self.receive();
                         }
                     }
@@ -472,15 +473,15 @@ impl<T: Sync + Send> SeccReceiver<T> {
     /// Skips the next message to be received from the channel. If the skip succeeds than the
     /// number of receivable messages will drop by one. Calling this function will either set up
     /// a skip `cursor` in the channel or move an existing skip `cursor`. To receive skipped
-    /// messages the user will need to first call [`axiom::secc::SeccReceiver::reset_skip`] prior
-    /// to calling [`axiom::secc::SeccReceiver::receive`] thus clearing the skip cursor.
+    /// messages the user will need to first call [`SeccReceiver::reset_skip`] prior
+    /// to calling [`SeccReceiver::receive`] thus clearing the skip cursor.
     pub fn skip(&self) -> Result<(), SeccErrors<T>> {
         unsafe {
             // Retrieve receive pointers and the encoded indexes inside them.
             let (ref mutex, _) = &*self.core.receive_ptrs;
             let mut receive_ptrs = mutex.lock().unwrap();
 
-            let read_ptr = if receive_ptrs.cursor == NIL_NODE {
+            let read_ptr = if receive_ptrs.cursor == NIL {
                 (*self.core.node_ptrs.get())[receive_ptrs.queue_head]
             } else {
                 (*self.core.node_ptrs.get())[receive_ptrs.cursor]
@@ -489,15 +490,15 @@ impl<T: Sync + Send> SeccReceiver<T> {
 
             // If there is a single node in the queue then there are no messages in the channel
             // and therefore nothing to skip so we just return an empty error.
-            if NIL_NODE == next_read_pos {
+            if NIL == next_read_pos {
                 return Err(SeccErrors::Empty);
             }
-            if receive_ptrs.cursor == NIL_NODE {
+            if receive_ptrs.cursor == NIL {
                 // No current cursor; we need to establish one.
                 receive_ptrs.skipped = receive_ptrs.queue_head;
                 receive_ptrs.cursor = next_read_pos;
             } else {
-                // There is a cursor already so make sure we increment cursor and skipped.
+                // There is a cursor already so make sure we increment `cursor` and `skipped`.
                 receive_ptrs.skipped = receive_ptrs.cursor;
                 receive_ptrs.cursor = next_read_pos;
             }
@@ -507,14 +508,14 @@ impl<T: Sync + Send> SeccReceiver<T> {
     }
 
     /// Cancels skipping messages in the channel and resets the `skipped` and `cursor` pointers
-    /// to [`NIL_NODE`] allowing previously skipped messages to be received. Note that calling
+    /// to [`NIL`] allowing previously skipped messages to be received. Note that calling
     /// this method on a channel with no skip cursor will do nothing.
     pub fn reset_skip(&self) -> Result<(), SeccErrors<T>> {
         // Retrieve receive pointers and the encoded indexes inside them.
         let (ref mutex, ref condvar) = &*self.core.receive_ptrs;
         let mut receive_ptrs = mutex.lock().unwrap();
 
-        if receive_ptrs.cursor != NIL_NODE {
+        if receive_ptrs.cursor != NIL {
             unsafe {
                 // We start from queue head and count to the cursor to get the number of now
                 // receivable messages in the channel.
@@ -529,13 +530,28 @@ impl<T: Sync + Send> SeccReceiver<T> {
                         .load(Ordering::SeqCst);
                 }
                 self.core.receivable.fetch_add(count, Ordering::SeqCst);
-                receive_ptrs.cursor = NIL_NODE;
-                receive_ptrs.skipped = NIL_NODE;
+                receive_ptrs.cursor = NIL;
+                receive_ptrs.skipped = NIL;
             }
         }
         // Notify anyone waiting for receivable messages to be available.
         condvar.notify_all();
         Ok(())
+    }
+
+    /// Receive the message at the current cursor and then resets the skip cursor. If
+    /// there is currently no skip cursor this is the same as calling [`receive`].
+    pub fn receive_and_reset_skip(&self) -> Result<T, SeccErrors<T>> {
+        let result = self.receive()?;
+        self.reset_skip()?;
+        Ok(result)
+    }
+
+    /// Pops the message at the current cursor and then resets the skip cursor. If
+    /// there is currently no skip cursor this is the same as calling [`pop`].
+    pub fn pop_and_reset_skip(&self) -> Result<(), SeccErrors<T>> {
+        self.pop()?;
+        self.reset_skip()
     }
 }
 
@@ -549,9 +565,9 @@ unsafe impl<T: Send + Sync> Send for SeccReceiver<T> {}
 
 unsafe impl<T: Send + Sync> Sync for SeccReceiver<T> {}
 
-/// Creates the sender and receiver sides of this channel and returns them separately as
-/// a tuple. The user can pass both a channel `capacity` and a `poll_ms` which governs how long
-/// operations that wait on the channel will poll for new messages or capacity.
+/// Creates the sender and receiver sides of this channel and returns them as a tuple. The user
+/// can pass both a channel `capacity` and a `poll_ms` which govern how long operations that
+/// wait on the channel will poll.
 pub fn create<T: Sync + Send>(capacity: u16, poll_ms: u16) -> (SeccSender<T>, SeccReceiver<T>) {
     if capacity < 1 {
         panic!("capacity cannot be smaller than 1");
@@ -592,11 +608,11 @@ pub fn create<T: Sync + Send>(capacity: u16, poll_ms: u16) -> (SeccSender<T>, Se
     let receive_ptrs = SeccReceivePtrs {
         queue_head,
         pool_tail,
-        skipped: NIL_NODE,
-        cursor: NIL_NODE,
+        skipped: NIL,
+        cursor: NIL,
     };
 
-    // Create the channel structures
+    // Create the channel structures.
     let core = Arc::new(SeccCore {
         capacity: capacity as usize,
         poll_ms,
@@ -612,16 +628,16 @@ pub fn create<T: Sync + Send>(capacity: u16, poll_ms: u16) -> (SeccSender<T>, Se
         received: AtomicUsize::new(0),
     });
 
-    // Return the resulting sender and receiver as a tuple
+    // Return the resulting sender and receiver as a tuple.
     let sender = SeccSender { core: core.clone() };
     let receiver = SeccReceiver { core };
 
     (sender, receiver)
 }
 
-/// Creates the sender and receiver sides of the channel for multiple producers and
-/// multiple consumers by returning sender and receiver each wrapped in [`Arc`] instances. See
-/// the `create` function for more details about the arguments.
+/// Creates the sender and receiver sides of this channel, wrapping each in an [`Arc`] and
+/// returns them as a tuple. The user can pass both a channel `capacity` and a `poll_ms` which
+/// govern how long operations that wait on the channel will poll.
 pub fn create_with_arcs<T: Sync + Send>(
     capacity: u16,
     poll_ms: u16,
@@ -699,10 +715,10 @@ mod tests {
         };
     }
 
-    /// Asserts that the given node in the queue has the expected next pointing to `NIL_NODE`.
+    /// Asserts that the given node in the queue has the expected next pointing to `NIL`.
     macro_rules! assert_node_next_nil {
         ($pointers:expr, $node:expr) => {
-            unsafe { assert_eq!((*$pointers[$node]).next.load(Ordering::Relaxed), NIL_NODE,) }
+            unsafe { assert_eq!((*$pointers[$node]).next.load(Ordering::Relaxed), NIL,) }
         };
     }
 
@@ -718,7 +734,7 @@ mod tests {
                 .next
                 .load(Ordering::SeqCst);
             let mut count = 1;
-            while next_ptr != NIL_NODE {
+            while next_ptr != NIL {
                 count += 1;
                 pool.push(next_ptr);
                 next_ptr = (*(*core.node_ptrs.get())[next_ptr])
@@ -745,7 +761,7 @@ mod tests {
                 .load(Ordering::SeqCst);
             queue.push(receive_ptrs.queue_head);
             let mut count = 1;
-            while next_ptr != NIL_NODE {
+            while next_ptr != NIL {
                 count += 1;
                 queue.push(next_ptr);
                 next_ptr = (*(*core.node_ptrs.get())[next_ptr])
@@ -814,7 +830,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next!(pointers, 2, 1);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 0, 6, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 0, 6, 1, NIL, NIL);
 
         // Check that sending a message to the channel removes pool head and appends to queue
         // tail and changes nothing else in the node structure.
@@ -830,7 +846,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next!(pointers, 2, 1);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 6, 5, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 6, 5, 1, NIL, NIL);
 
         assert_eq!(Ok(()), sender.send(Items::B));
         assert_eq!(2, sender.pending());
@@ -844,7 +860,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next!(pointers, 2, 1);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 5, 4, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 5, 4, 1, NIL, NIL);
 
         assert_eq!(Ok(()), sender.send(Items::C));
         assert_eq!(3, sender.pending());
@@ -858,7 +874,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next!(pointers, 2, 1);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 4, 3, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 4, 3, 1, NIL, NIL);
 
         assert_eq!(Ok(()), sender.send(Items::D));
         assert_eq!(4, sender.pending());
@@ -872,7 +888,7 @@ mod tests {
         assert_node_next_nil!(pointers, 3);
         assert_node_next!(pointers, 2, 1);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 3, 2, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 3, 2, 1, NIL, NIL);
 
         assert_eq!(Ok(()), sender.send(Items::E));
         assert_eq!(5, sender.pending());
@@ -886,7 +902,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL, NIL);
 
         // Validate that we cannot fill the channel past its capacity and attempts do not
         // mangle the pointers in the channel.
@@ -909,7 +925,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL, NIL);
 
         // Peek at the first message in the channel which should change nothing.
         assert_eq!(Ok(&Items::A), receiver.peek());
@@ -924,7 +940,7 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
         assert_node_next_nil!(pointers, 1);
-        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 0, 2, 1, 1, NIL, NIL);
 
         // Validate that receiving from the channel performs the proper pointer operations.
         assert_eq!(Ok(Items::A), receiver.receive());
@@ -939,7 +955,7 @@ mod tests {
         assert_node_next_nil!(pointers, 2);
         assert_node_next!(pointers, 1, 0);
         assert_node_next_nil!(pointers, 0);
-        assert_pointer_nodes!(sender, receiver, 6, 2, 1, 0, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 6, 2, 1, 0, NIL, NIL);
 
         assert_eq!(Ok(Items::B), receiver.receive());
         assert_eq!(3, receiver.pending());
@@ -953,7 +969,7 @@ mod tests {
         assert_node_next!(pointers, 1, 0);
         assert_node_next!(pointers, 0, 6);
         assert_node_next_nil!(pointers, 6);
-        assert_pointer_nodes!(sender, receiver, 5, 2, 1, 6, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 5, 2, 1, 6, NIL, NIL);
 
         assert_eq!(Ok(Items::C), receiver.receive());
         assert_eq!(2, receiver.pending());
@@ -967,7 +983,7 @@ mod tests {
         assert_node_next!(pointers, 0, 6);
         assert_node_next!(pointers, 6, 5);
         assert_node_next_nil!(pointers, 5);
-        assert_pointer_nodes!(sender, receiver, 4, 2, 1, 5, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 4, 2, 1, 5, NIL, NIL);
 
         assert_eq!(Ok(Items::D), receiver.receive());
         assert_eq!(1, receiver.pending());
@@ -981,7 +997,7 @@ mod tests {
         assert_node_next!(pointers, 6, 5);
         assert_node_next!(pointers, 5, 4);
         assert_node_next_nil!(pointers, 4);
-        assert_pointer_nodes!(sender, receiver, 3, 2, 1, 4, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 3, 2, 1, 4, NIL, NIL);
 
         assert_eq!(Ok(Items::E), receiver.receive());
         assert_eq!(0, receiver.pending());
@@ -995,7 +1011,7 @@ mod tests {
         assert_node_next!(pointers, 5, 4);
         assert_node_next!(pointers, 4, 3);
         assert_node_next_nil!(pointers, 3);
-        assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL, NIL);
 
         // Validate that we cannot continue to receive from an empty channel and attempts
         // don't mangle the pointers.
@@ -1011,7 +1027,7 @@ mod tests {
         assert_node_next!(pointers, 5, 4);
         assert_node_next!(pointers, 4, 3);
         assert_node_next_nil!(pointers, 3);
-        assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL, NIL);
 
         assert_eq!(Err(SeccErrors::Empty), receiver.receive());
         assert_eq!(0, receiver.pending());
@@ -1025,7 +1041,7 @@ mod tests {
         assert_node_next!(pointers, 5, 4);
         assert_node_next!(pointers, 4, 3);
         assert_node_next_nil!(pointers, 3);
-        assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 2, 2, 1, 3, NIL, NIL);
 
         // Validate that after the channel is empty it can still be sent to and received from.
         assert_eq!(Ok(()), sender.send(Items::F));
@@ -1040,7 +1056,7 @@ mod tests {
         assert_node_next!(pointers, 5, 4);
         assert_node_next!(pointers, 4, 3);
         assert_node_next_nil!(pointers, 3);
-        assert_pointer_nodes!(sender, receiver, 2, 1, 0, 3, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 2, 1, 0, 3, NIL, NIL);
 
         assert_eq!(Ok(Items::F), receiver.receive());
         assert_eq!(0, receiver.pending());
@@ -1054,7 +1070,7 @@ mod tests {
         assert_node_next!(pointers, 4, 3);
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
-        assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL, NIL);
 
         // Skipping in empty queue should return empty and not mangle pointers.
         assert_eq!(Err(SeccErrors::Empty), receiver.skip());
@@ -1069,7 +1085,7 @@ mod tests {
         assert_node_next!(pointers, 4, 3);
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
-        assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 1, 1, 0, 2, NIL, NIL);
 
         // Send another value to the channel so we can test skipping.
         assert_eq!(Ok(()), sender.send(Items::A));
@@ -1084,7 +1100,7 @@ mod tests {
         assert_node_next!(pointers, 4, 3);
         assert_node_next!(pointers, 3, 2);
         assert_node_next_nil!(pointers, 2);
-        assert_pointer_nodes!(sender, receiver, 1, 0, 6, 2, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 1, 0, 6, 2, NIL, NIL);
 
         // Skipping sets the skip cursor.
         assert_eq!(Ok(()), receiver.skip());
@@ -1194,7 +1210,27 @@ mod tests {
         assert_node_next!(pointers, 3, 2);
         assert_node_next!(pointers, 2, 6);
         assert_node_next_nil!(pointers, 6);
-        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 6, NIL_NODE, NIL_NODE);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 6, NIL, NIL);
+
+        assert_eq!(Ok(()), receiver.skip());
+        assert_node_next!(pointers, 1, 0);
+        assert_node_next!(pointers, 0, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 6);
+        assert_node_next_nil!(pointers, 6);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 6, 1, 0);
+
+        assert_eq!(Ok(Items::B), receiver.receive_and_reset_skip());
+        assert_node_next!(pointers, 1, 5);
+        assert_node_next_nil!(pointers, 5);
+        assert_node_next!(pointers, 4, 3);
+        assert_node_next!(pointers, 3, 2);
+        assert_node_next!(pointers, 2, 6);
+        assert_node_next!(pointers, 6, 0);
+        assert_node_next_nil!(pointers, 0);
+        assert_pointer_nodes!(sender, receiver, 1, 5, 4, 0, NIL, NIL);
     }
 
     #[test]

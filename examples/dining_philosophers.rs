@@ -6,7 +6,7 @@ pub struct Data {}
 
 pub fn main() {
     // First we initialize the actor system using the default config.
-    let config = ActorSystemConfig::create();
+    let config = ActorSystemConfig::default();
     let system = ActorSystem::create(config);
 
     // Have to do this since we want to call from outside actor system.

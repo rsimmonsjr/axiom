@@ -37,7 +37,7 @@
 //! use axiom::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(ActorSystemConfig::create());
+//! let system = ActorSystem::create(ActorSystemConfig::default());
 //! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! let aid = system.spawn(
@@ -57,7 +57,7 @@
 //! use axiom::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(ActorSystemConfig::create());
+//! let system = ActorSystem::create(ActorSystemConfig::default());
 //! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! struct Data {
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_ping_pong() {
-        let system = ActorSystem::create(ActorSystemConfig::create());
+        let system = ActorSystem::create(ActorSystemConfig::default());
         system.init_current();
         system.spawn(0, ping);
         system.await_shutdown();
