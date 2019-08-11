@@ -11,18 +11,11 @@ re-implementation of either of the two aforementioned actor models but rather a 
 implementation deriving inspiration from the good parts of those models.
 
 ### What's New
-* 2019-??-??: 0.0.6 
+* 2019-08-11: 0.0.6 
   * Significant changes in API. Migration should be simple but see the examples for differences.
   * Implemented major serialization functionality for messages and ActorIds with serde.
   * Put in ground work for implementation of Remote actors.
   * Improved user ergonomics. 
-* 2019-07-23: 0.0.5 
-  * Various documentation and miscellaneous fixes.
-  * Issue 11: Actors shouldn't panic if they cant schedule the actor.
-  * Issue 16: Put in a means to allow an actor to monitor another actor.
-  * Issue 25: Implement a means to lookup an Actor by its UUID.
-  * Issue 27: Add the ability to register a local name for an actor.
-  * Issue 29: Implement monitors for actors.
 
 [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 
