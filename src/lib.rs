@@ -118,7 +118,6 @@
 
 pub mod actors;
 pub mod message;
-pub mod secc;
 
 pub use crate::actors::ActorError;
 pub use crate::actors::ActorId;
