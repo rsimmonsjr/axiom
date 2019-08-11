@@ -7,6 +7,8 @@ use axiom::*;
 pub struct Data {}
 
 pub fn main() {
+    // TODO Pending implementation.
+
     // First we initialize the actor system using the default config.
     let config = ActorSystemConfig::create();
     let system = ActorSystem::create(config);
