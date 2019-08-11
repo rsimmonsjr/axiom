@@ -13,10 +13,9 @@
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
 use crate::message::*;
-use crate::secc;
-use crate::secc::*;
 use log::{error, warn};
 use once_cell::sync::OnceCell;
+use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
