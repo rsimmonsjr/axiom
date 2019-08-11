@@ -1,7 +1,5 @@
-//! This is an example of a parallel processing implementation of a Monte-Carlo simulation
-//! to predict the outcome of soccer matches based on the [Dixon-Coles
-//! Model](http://web.math.ku.dk/~rolf/teaching/thesis/DixonColes.pdf).
-
+//! An implementation of the classic finite state machine (FSM) [Dining Philosophers]
+//! (https://en.wikipedia.org/wiki/Dining_philosophers_problem) problem using Axiom.
 use axiom::*;
 
 pub struct Data {}
