@@ -1243,7 +1243,6 @@ mod tests {
             let mut guard = rx_mutex.lock().unwrap();
             *guard = true;
             drop(guard);
-            println!("Receive Ready");
             match receiver2.receive_await_timeout(20) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),
@@ -1259,7 +1258,6 @@ mod tests {
         }
 
         let tx = thread::spawn(move || {
-            println!("Send Ready");
             match sender.send_await_timeout(1, 20) {
                 Ok(_) => assert!(true),
                 e => assert!(false, "Error {:?} when receive.", e),

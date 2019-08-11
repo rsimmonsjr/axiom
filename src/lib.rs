@@ -151,7 +151,6 @@ mod tests {
         if let Some(msg) = message.content_as::<PingPong>() {
             match &*msg {
                 PingPong::Pong => {
-                    println!("===> Got a Pong!");
                     ActorSystem::current().trigger_shutdown();
                     Status::Processed
                 }
@@ -162,7 +161,6 @@ mod tests {
             match &*msg {
                 SystemMsg::Start => {
                     let pong_aid = ActorSystem::current().spawn(0, pong);
-                    println!("===> Sending a Ping!");
                     pong_aid.send(Message::new(PingPong::Ping(aid.clone())));
                     Status::Processed
                 }
@@ -177,7 +175,6 @@ mod tests {
         if let Some(msg) = message.content_as::<PingPong>() {
             match &*msg {
                 PingPong::Ping(from) => {
-                    println!("++>> Ponging the Ping!");
                     from.send(Message::new(PingPong::Pong));
                     Status::Processed
                 }
