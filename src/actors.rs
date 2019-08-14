@@ -391,7 +391,7 @@ impl ActorId {
     /// A utility to look up an actor id set in the current thread's actor system with the given
     /// uuid.
     /// FIXME needs dedicated test
-    fn find_by_uuid(uuid: &Uuid) -> Option<ActorId> {
+    pub fn find_by_uuid(uuid: &Uuid) -> Option<ActorId> {
         ActorSystem::current().find_aid_by_uuid(uuid)
     }
 
@@ -662,10 +662,6 @@ pub struct ActorSystemConfig {
     /// CPU. However, larger values will impact performance and may lead to some threads never
     /// getting enough work to justify their existence. The default value is 10.
     pub thread_wait_time: u16,
-    /// The address and port string to bind the local TCP Listener to, e.g. `"0.0.0.0:7717"`. If
-    /// this is None, then the system will not start up its TCP listener and the actor system
-    /// will act as a single node stand-alone. The default is None.
-    pub bind_address: Option<String>,
 }
 
 impl ActorSystemConfig {
@@ -675,7 +671,6 @@ impl ActorSystemConfig {
             work_channel_size: 100,
             thread_pool_size: 4,
             thread_wait_time: 10,
-            bind_address: None,
         }
     }
 }
@@ -718,7 +713,7 @@ struct ActorSystemData {
     /// that the thread is connected to.
     connections: Arc<RwLock<HashMap<Uuid, ConnectionData>>>,
     /// Holds a join handle for the actor system's TCP listener thread.
-    tcp_listener: Mutex<Option<JoinHandle<()>>>,
+    tcp_listener: RwLock<Option<JoinHandle<()>>>,
 }
 
 /// An actor system that contains and manages the actors spawned inside it.
@@ -733,7 +728,8 @@ pub struct ActorSystem {
 impl ActorSystem {
     /// Creates an actor system with the given config. The user should benchmark how
     /// many slots in the work channel, the number of threads they need and so on in order
-    /// to satisfy the requirements of the software they are creating.
+    /// to satisfy the requirements of the software they are creating. Note that this will
+    /// be a standalone actor system unless [`start_tcp_listener`] or [`connect`] is called.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
             secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
@@ -751,12 +747,13 @@ impl ActorSystem {
                 thread_pool,
                 shutdown_triggered: AtomicBool::new(false),
                 running_thread_count,
+                // FIXME probably dont need the Arc around the RwLocks
                 actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
                 aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
                 aids_by_name: Arc::new(RwLock::new(HashMap::new())),
                 monitoring_by_monitored: Arc::new(RwLock::new(HashMap::new())),
                 connections: Arc::new(RwLock::new(HashMap::new())),
-                tcp_listener: Mutex::new(None),
+                tcp_listener: RwLock::new(None),
             }),
         };
 
@@ -769,12 +766,6 @@ impl ActorSystem {
                 let thread = system.start_dispatcher_thread();
                 guard.push(thread);
             }
-        }
-
-        if let Some(address) = &system.data.config.bind_address {
-            let mut guard = system.data.tcp_listener.lock().unwrap();
-            // FIXME Allow to be configurable or not even created if in standalone.
-            *guard = Some(system.start_tcp_listener_thread(address.clone()));
         }
 
         system
@@ -813,9 +804,9 @@ impl ActorSystem {
         })
     }
 
-    // Starts a thread that listens for incomming connections from other [`ActorSystem`]s and
-    // then creates a remote channel thread with the other actor system.
-    fn start_tcp_listener_thread(&self, address: String) -> JoinHandle<()> {
+    // Starts a TCP listener that listens for incomming connections from other [`ActorSystem`]s
+    // and then creates a remote channel thread with the other actor system.
+    pub fn start_tcp_listener(&self, address: SocketAddr) -> JoinHandle<()> {
         // FIXME We need to modify the condvar mechanism to include this when shutting down.
         let system = self.clone();
         thread::spawn(move || {
@@ -825,12 +816,29 @@ impl ActorSystem {
             while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, socket_addr)) => {
+                        println!("Accepting connection from {:?}", socket_addr);
                         system.start_tcp_threads(socket_addr, stream);
                     }
                     Err(e) => println!("couldn't get client: {:?}", e),
                 }
             }
         })
+    }
+
+    /// Returns whether or not this actor system is listening on TCP for connections.
+    pub fn is_tcp_listener_started(&self) -> bool {
+        let guard = self.data.tcp_listener.read().unwrap();
+        match *guard {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Connects to another actor system with TCP at the given socket address.
+    pub fn connect(&self, socket_addr: SocketAddr) -> std::io::Result<()> {
+        // FIXME Error handling needs to be improved.
+        let stream = TcpStream::connect(socket_addr)?;
+        Ok(self.start_tcp_threads(socket_addr, stream))
     }
 
     /// Connects this actor system to a remote actor system using the given string which contains
@@ -843,14 +851,11 @@ impl ActorSystem {
         let reader_stream = Arc::new(stream);
         let writer_stream = reader_stream.clone();
 
-        log::info!("New Connection from: {:?}", socket_addr);
-        let mut reader = BufReader::new(&*reader_stream);
-        let system_uuid = match bincode::deserialize_from(&mut reader).unwrap() {
-            WireMessage::Hello { system_uuid } => system_uuid,
-            // FIXME Don't panic just handle error.
-            _ => panic!("First message should be WireMessage::Hello"),
-        };
-
+        log::info!(
+            "{:?}: New Connection from: {:?}",
+            self.data.uuid,
+            socket_addr
+        );
         // This channel will be used to communicate with the transmitting thread.
         // FIXME: Allow channel size and poll to be configurable.
         let (sender, receiver) = secc::create_with_arcs::<WireMessage>(32, 10);
@@ -865,7 +870,11 @@ impl ActorSystem {
                 match receiver.receive_await_timeout(thread_timeout) {
                     Err(_) => (), // not an error, just loop and try again.
                     // FIXME Errors are not currently handled!
-                    Ok(message) => bincode::serialize_into(&mut writer, &message).unwrap(),
+                    Ok(message) => {
+                        println!("{}: Sending Message", tx_system.data.uuid);
+                        bincode::serialize_into(&mut writer, &message).unwrap();
+                        println!("{}: Sent Message", tx_system.data.uuid);
+                    }
                 }
             }
         });
@@ -874,6 +883,21 @@ impl ActorSystem {
             system_uuid: self.data.uuid,
         };
         sender.send(hello).unwrap();
+        println!("Sent hello! {:?}", self.data.uuid);
+
+        let mut reader = BufReader::new(&*reader_stream);
+        let system_uuid = match bincode::deserialize_from(&mut reader).unwrap() {
+            WireMessage::Hello { system_uuid } => {
+                println!("Read message");
+                system_uuid
+            }
+            // FIXME Don't panic just handle error.
+            _ => panic!("First message should be WireMessage::Hello"),
+        };
+        println!(
+            "{:?} Connecting to System UUID {:?}",
+            self.data.uuid, system_uuid
+        );
 
         // This thread manages receiving messages from the stream.
         let rx_handle = thread::spawn(move || {
@@ -901,7 +925,10 @@ impl ActorSystem {
     /// A helper function to process a wire message from another actor system.
     fn process_wire_message(&self, message: WireMessage) {
         match message {
-            WireMessage::Hello { .. } => panic!("Not Implemented"),
+            WireMessage::Hello { system_uuid } => {
+                println!("{:?} Got Hello from {:?}", self.data.uuid, system_uuid);
+                //panic!("Not Implemented"),
+            }
             WireMessage::ActorMsg {
                 actor_uuid,
                 system_uuid,
@@ -909,6 +936,7 @@ impl ActorSystem {
             } => {
                 if ActorSystem::current().uuid() == system_uuid {
                     // FIXME errors not handled
+                    println!("Got actor message {:?}", actor_uuid);
                     let aid = ActorId::find_by_uuid(&actor_uuid).unwrap();
                     aid.send(message);
                 } else {
@@ -1204,7 +1232,24 @@ mod tests {
     }
 
     #[test]
+    fn test_tcp_remote_connect() {
+        init_test_log();
+
+        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        system1.start_tcp_listener(SocketAddr::from(([0, 0, 0, 0], 7717)));
+        println!("Listener started");
+
+        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        println!("Connecting");
+        system2
+            .connect(SocketAddr::from(([0, 0, 0, 0], 7717)))
+            .unwrap();
+    }
+
+    #[test]
     fn test_actor_id_serialization() {
+        init_test_log();
+
         let system = ActorSystem::create(ActorSystemConfig::default());
         system.init_current();
         let aid = system.spawn(0 as usize, simple_handler);
