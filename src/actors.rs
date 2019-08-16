@@ -620,9 +620,9 @@ pub struct ActorSystemConfig {
     pub thread_wait_time: u16,
 }
 
-impl ActorSystemConfig {
+impl Default for ActorSystemConfig {
     /// Create the config with the default values.
-    pub fn default() -> ActorSystemConfig {
+    fn default() -> ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 100,
             thread_pool_size: 4,
