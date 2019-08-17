@@ -13,7 +13,7 @@
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
 use crate::message::*;
-use log::{error, warn};
+use log::{error, info, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::de::Deserializer;
@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
 use std::marker::{Send, Sync};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -811,15 +812,24 @@ impl ActorSystem {
         let system = self.clone();
         thread::spawn(move || {
             system.init_current();
+
             // FIXME Allow port to be configurable
             let listener = TcpListener::bind(address).unwrap();
+            info!(
+                "{:?}: Listening for connections on {:?}",
+                system.data.uuid, address
+            );
+
             while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, socket_addr)) => {
-                        println!("Accepting connection from {:?}", socket_addr);
+                        info!(
+                            "{:?}: Accepting new connection from: {:?}",
+                            system.data.uuid, socket_addr
+                        );
                         system.start_tcp_threads(socket_addr, stream);
                     }
-                    Err(e) => println!("couldn't get client: {:?}", e),
+                    Err(e) => panic!("couldn't get client: {:?}", e),
                 }
             }
         })
@@ -851,11 +861,6 @@ impl ActorSystem {
         let reader_stream = Arc::new(stream);
         let writer_stream = reader_stream.clone();
 
-        log::info!(
-            "{:?}: New Connection from: {:?}",
-            self.data.uuid,
-            socket_addr
-        );
         // This channel will be used to communicate with the transmitting thread.
         // FIXME: Allow channel size and poll to be configurable.
         let (sender, receiver) = secc::create_with_arcs::<WireMessage>(32, 10);
@@ -871,9 +876,9 @@ impl ActorSystem {
                     Err(_) => (), // not an error, just loop and try again.
                     // FIXME Errors are not currently handled!
                     Ok(message) => {
-                        println!("{}: Sending Message", tx_system.data.uuid);
                         bincode::serialize_into(&mut writer, &message).unwrap();
-                        println!("{}: Sent Message", tx_system.data.uuid);
+                        // FIXME no error handling.
+                        writer.flush().unwrap();
                     }
                 }
             }
@@ -883,21 +888,13 @@ impl ActorSystem {
             system_uuid: self.data.uuid,
         };
         sender.send(hello).unwrap();
-        println!("Sent hello! {:?}", self.data.uuid);
 
         let mut reader = BufReader::new(&*reader_stream);
         let system_uuid = match bincode::deserialize_from(&mut reader).unwrap() {
-            WireMessage::Hello { system_uuid } => {
-                println!("Read message");
-                system_uuid
-            }
+            WireMessage::Hello { system_uuid } => system_uuid,
             // FIXME Don't panic just handle error.
             _ => panic!("First message should be WireMessage::Hello"),
         };
-        println!(
-            "{:?} Connecting to System UUID {:?}",
-            self.data.uuid, system_uuid
-        );
 
         // This thread manages receiving messages from the stream.
         let rx_handle = thread::spawn(move || {
@@ -917,6 +914,11 @@ impl ActorSystem {
             tx_handle,
             rx_handle,
         };
+
+        info!(
+            "{:?}: Connected to {:?}@{:?}",
+            self.data.uuid, system_uuid, socket_addr
+        );
 
         let mut connections = self.data.connections.write().unwrap();
         connections.insert(data.system_uuid, data);
@@ -1231,19 +1233,55 @@ mod tests {
         Status::Processed
     }
 
-    #[test]
+    // #[test]
     fn test_tcp_remote_connect() {
         init_test_log();
 
+        let socket_addr1 = SocketAddr::from(([0, 0, 0, 0], 7717));
         let system1 = ActorSystem::create(ActorSystemConfig::default());
-        system1.start_tcp_listener(SocketAddr::from(([0, 0, 0, 0], 7717)));
-        println!("Listener started");
+        system1.start_tcp_listener(socket_addr1);
 
+        // FIXME be more clever about this.
+        thread::sleep(Duration::from_millis(1000));
+
+        let socket_addr2 = SocketAddr::from(([0, 0, 0, 0], 7727));
         let system2 = ActorSystem::create(ActorSystemConfig::default());
-        println!("Connecting");
-        system2
-            .connect(SocketAddr::from(([0, 0, 0, 0], 7717)))
-            .unwrap();
+        system2.start_tcp_listener(socket_addr2);
+        system2.connect(socket_addr1).unwrap();
+
+        let lock1 = system1.data.connections.read().unwrap();
+        assert_eq!(1, lock1.len());
+        drop(lock1);
+
+        // FIXME be more clever about this.
+        thread::sleep(Duration::from_millis(1000));
+
+        let lock2 = system2.data.connections.read().unwrap();
+        assert_eq!(1, lock2.len());
+        drop(lock2);
+
+        system1.connect(socket_addr2).unwrap();
+    }
+
+    // #[test]
+    fn test_tcp_remote_actor() {
+        init_test_log();
+
+        let socket_addr1 = SocketAddr::from(([0, 0, 0, 0], 7717));
+        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        system1.start_tcp_listener(socket_addr1);
+        let _aid1 = system1.spawn(
+            0 as i32,
+            |_state: &mut i32, _aid: ActorId, _msg: &Message| Status::Processed,
+        );
+
+        // FIXME be more clever about this.
+        thread::sleep(Duration::from_millis(1000));
+
+        let socket_addr2 = SocketAddr::from(([0, 0, 0, 0], 7727));
+        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        system2.start_tcp_listener(socket_addr2);
+        system2.connect(socket_addr1).unwrap();
     }
 
     #[test]
