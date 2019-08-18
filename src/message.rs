@@ -15,10 +15,8 @@ impl dyn ActorMessage {
     fn downcast<T: ActorMessage>(self: Arc<Self>) -> Option<Arc<T>> {
         if TypeId::of::<T>() == (*self).type_id() {
             unsafe {
-                let clone = self.clone();
-                let ptr = Arc::into_raw(clone) as *const T;
-                let converted: Arc<T> = Arc::from_raw(ptr);
-                Some(converted.clone())
+                let ptr = Arc::into_raw(self) as *const T;
+                Some(Arc::from_raw(ptr))
             }
         } else {
             None
@@ -164,7 +162,10 @@ impl Message {
     {
         // To make this fail fast we will first check against the hash of the type_id that the
         // user wants to convert the message content to.
-        if self.data.type_id_hash != Message::hash_type_id::<T>() {
+        let self_data = &self.data;
+        let self_type = self_data.type_id_hash;
+        let msg_type = Message::hash_type_id::<T>();
+        if self_type != msg_type {
             None
         } else {
             // We first have to figure out if the content is Local or Remote because they have
