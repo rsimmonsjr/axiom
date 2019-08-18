@@ -125,9 +125,7 @@ enum ActorSender {
 
     /// A sender that is used when an actor is on another actor system. The system will use
     /// networking and serialization to send messages to the actor.
-    ///
-    /// FIXME (Issue #9) Implement remote actors.
-    Remote,
+    Remote { sender: SeccSender<WireMessage> },
 }
 
 impl fmt::Debug for ActorSender {
@@ -137,7 +135,7 @@ impl fmt::Debug for ActorSender {
             "{}",
             match *self {
                 ActorSender::Local { .. } => "ActorSender::Local",
-                ActorSender::Remote => "ActorSender::Remote",
+                ActorSender::Remote { .. } => "ActorSender::Remote",
             }
         )
     }
@@ -205,14 +203,25 @@ impl<'de> Deserialize<'de> for ActorId {
         // it must be a remote aid.
         match system.find_aid_by_uuid(&serialized_form.uuid) {
             Some(aid) => Ok(aid.clone()),
-            None => Ok(ActorId {
-                data: Arc::new(ActorIdData {
-                    uuid: serialized_form.uuid,
-                    system_uuid: serialized_form.system_uuid,
-                    name: serialized_form.name,
-                    sender: ActorSender::Remote,
-                }),
-            }),
+            None => {
+                // The aid is remote so we instantiate it as such.
+                let connections = system.data.connections.read().unwrap();
+                if let Some(data) = connections.get(&serialized_form.system_uuid) {
+                    Ok(ActorId {
+                        data: Arc::new(ActorIdData {
+                            uuid: serialized_form.uuid,
+                            system_uuid: serialized_form.system_uuid,
+                            name: serialized_form.name,
+                            sender: ActorSender::Remote {
+                                sender: data.sender.clone(),
+                            },
+                        }),
+                    })
+                } else {
+                    // FIXME requires better error handling.
+                    panic!("Unknown actor system {:?}", serialized_form.system_uuid);
+                }
+            }
         }
     }
 }
@@ -618,7 +627,8 @@ impl Actor {
 }
 
 /// A type used for sending messages to other actor systems over TCP.
-#[derive(Serialize, Deserialize)]
+/// FIXME this shouldn't need to be cloneable
+#[derive(Clone, Serialize, Deserialize)]
 enum WireMessage {
     /// A message sent as a response to an actor system connecting to this actor system. The
     /// message contains the UUID of the actor system sending the message.
@@ -638,7 +648,7 @@ struct ConnectionData {
     /// The socket address of the connection.
     pub socket_addr: SocketAddr,
     /// The sender used to send wire messages to the connected actor system.
-    pub sender: Arc<SeccSender<WireMessage>>,
+    pub sender: SeccSender<WireMessage>,
     /// A join handle for the thread managing the transmitting.
     pub tx_handle: JoinHandle<()>,
     /// A join handle for the thread managing the receiving.
@@ -686,10 +696,10 @@ struct ActorSystemData {
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a message if it has more messages
     /// to process.
-    sender: Arc<SeccSender<Arc<Actor>>>,
+    sender: SeccSender<Arc<Actor>>,
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
-    receiver: Arc<SeccReceiver<Arc<Actor>>>,
+    receiver: SeccReceiver<Arc<Actor>>,
     /// Holds handles to the pool of threads processing the work channel.
     thread_pool: Mutex<Vec<JoinHandle<()>>>,
     /// A flag holding whether or not the system is currently shutting down.
@@ -733,7 +743,7 @@ impl ActorSystem {
     /// be a standalone actor system unless [`start_tcp_listener`] or [`connect`] is called.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
-            secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
+            secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
         let thread_pool = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
@@ -863,7 +873,7 @@ impl ActorSystem {
 
         // This channel will be used to communicate with the transmitting thread.
         // FIXME: Allow channel size and poll to be configurable.
-        let (sender, receiver) = secc::create_with_arcs::<WireMessage>(32, 10);
+        let (sender, receiver) = secc::create::<WireMessage>(32, 10);
 
         // This thread manages transmitting messages to the stream.
         let tx_handle = thread::spawn(move || {
@@ -1313,7 +1323,7 @@ mod tests {
             let deserialized: ActorId =
                 bincode::deserialize(&serialized).expect("Couldn't deserialize.");
             match deserialized.data.sender {
-                ActorSender::Remote => {
+                ActorSender::Remote { .. } => {
                     assert_eq!(aid.uuid(), deserialized.uuid());
                     assert_eq!(aid.system_uuid(), deserialized.system_uuid());
                     assert_eq!(aid.name(), deserialized.name());
