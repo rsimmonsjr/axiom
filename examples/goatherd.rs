@@ -280,9 +280,11 @@ fn main() {
         },
     );
     // Ask the herder for the list of subscribers
+    let target = h.received() + 1;
     let msg = Message::new(SubMsg::Subscribers(topic, testnode));
     h.send(msg);
 
+    while target > h.received() {}
     thread::sleep(time::Duration::from_secs(1));
     system.trigger_and_await_shutdown();
 }
