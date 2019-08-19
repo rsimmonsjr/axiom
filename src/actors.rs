@@ -170,7 +170,7 @@ struct ActorIdSerializedForm {
 /// deciding where the actor is and sending the message. However it is important that the user at
 /// least has some notion of where the actor is for developing an efficient actor architecture.
 /// This id can also be serialized to a remote system transparently.
-#[derive(Clone)]
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ActorId {
     /// Holds the Actual data for the actor id.
     data: Arc<ActorIdData>,
@@ -211,6 +211,46 @@ impl<'de> Deserialize<'de> for ActorId {
                 }),
             }),
         }
+    }
+}
+
+impl std::cmp::PartialEq for ActorIdData {
+    fn eq(&self, other: &Self) -> bool {
+        self.uuid == other.uuid && self.system_uuid == other.system_uuid
+    }
+}
+
+impl std::cmp::Eq for ActorIdData {}
+
+impl std::cmp::PartialOrd for ActorIdData {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        // Order by name, then by system, then by uuid.
+        // Also, sort None names before others.
+        match (&self.name, &other.name) {
+            (None, Some(_)) => Some(Ordering::Less),
+            (Some(_), None) => Some(Ordering::Greater),
+            (Some(a), Some(b)) if a != b => Some(a.cmp(b)),
+            (_, _) => {
+                // Names are equal, either both None or
+                // Some(thing) where thing1 == thing2.
+                // So, order by system
+                match self.system_uuid.cmp(&other.system_uuid) {
+                    Ordering::Equal => {
+                        // Order by actor uuid
+                        Some(self.uuid.cmp(&other.uuid))
+                    }
+                    x => Some(x),
+                }
+            }
+        }
+    }
+}
+
+impl std::cmp::Ord for ActorIdData {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other)
+            .expect("ActorIdData::partial_cmp() returned None; can't happen")
     }
 }
 
@@ -399,14 +439,6 @@ impl fmt::Debug for ActorId {
         )
     }
 }
-
-impl PartialEq for ActorId {
-    fn eq(&self, other: &ActorId) -> bool {
-        self.data.uuid == other.data.uuid && self.data.system_uuid == other.data.system_uuid
-    }
-}
-
-impl Eq for ActorId {}
 
 impl Hash for ActorId {
     fn hash<H: Hasher>(&self, state: &'_ mut H) {
