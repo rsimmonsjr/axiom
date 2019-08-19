@@ -558,6 +558,7 @@ impl Actor {
     /// Receive a message from the channel and process it with the actor. This function is the
     /// core of the processing pipeline.
     fn receive(actor: Arc<Actor>) {
+        let mut guard = actor.handler.lock().unwrap();
         match actor.receiver.peek() {
             Result::Err(err) => {
                 // This happening should be very rare but it would mean that the thread pool
@@ -572,8 +573,7 @@ impl Actor {
                 // the actor. We process the message and then we may override the actor's returned
                 // value if its a Stop message. This is an allows actors that don't need to do
                 // anything special when stopping to ignore processing `Stop`.
-                let mut guard = actor.handler.lock().unwrap();
-                let mut result = (&mut *guard)(actor.aid.clone(), message);
+                let mut result = (&mut *guard)(actor.aid.clone(), &message);
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         // Stop the actor anyway.
@@ -673,10 +673,10 @@ struct ActorSystemData {
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a message if it has more messages
     /// to process.
-    sender: Arc<SeccSender<Arc<Actor>>>,
+    sender: SeccSender<Arc<Actor>>,
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
-    receiver: Arc<SeccReceiver<Arc<Actor>>>,
+    receiver: SeccReceiver<Arc<Actor>>,
     /// Holds handles to the pool of threads processing the work channel.
     thread_pool: Mutex<Vec<JoinHandle<()>>>,
     /// A flag holding whether or not the system is currently shutting down.
@@ -714,7 +714,7 @@ impl ActorSystem {
     /// to satisfy the requirements of the software they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
-            secc::create_with_arcs::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
+            secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
         let thread_pool = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));

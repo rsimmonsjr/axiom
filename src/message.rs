@@ -15,10 +15,8 @@ impl dyn ActorMessage {
     fn downcast<T: ActorMessage>(self: Arc<Self>) -> Option<Arc<T>> {
         if TypeId::of::<T>() == (*self).type_id() {
             unsafe {
-                let clone = self.clone();
-                let ptr = Arc::into_raw(clone) as *const T;
-                let converted: Arc<T> = Arc::from_raw(ptr);
-                Some(converted.clone())
+                let ptr = Arc::into_raw(self) as *const T;
+                Some(Arc::from_raw(ptr))
             }
         } else {
             None
