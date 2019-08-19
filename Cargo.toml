@@ -49,7 +49,7 @@ num_cpus = "1.10.1"
 im = {version = "13", features = ["serde"]}
 
 [dependencies]
-secc = { git = "https://github.com/rsimmonsjr/secc", branch="issues/10_pop_after_peek"}
+secc = { version = "^0.0.9"}
 uuid = { version = "^0.7.4", features = ["serde", "v4"]}
 log ="^0.4"
 serde =  { version = "^1.0.97", features = ["derive", "rc"] }

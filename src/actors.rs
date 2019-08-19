@@ -526,6 +526,7 @@ impl Actor {
     /// Receive a message from the channel and process it with the actor. This function is the
     /// core of the processing pipeline.
     fn receive(actor: Arc<Actor>) {
+        let mut guard = actor.handler.lock().unwrap();
         match actor.receiver.peek() {
             Result::Err(err) => {
                 // This happening should be very rare but it would mean that the thread pool
@@ -540,8 +541,7 @@ impl Actor {
                 // the actor. We process the message and then we may override the actor's returned
                 // value if its a Stop message. This is an allows actors that don't need to do
                 // anything special when stopping to ignore processing `Stop`.
-                let mut guard = actor.handler.lock().unwrap();
-                let mut result = (&mut *guard)(actor.aid.clone(), message);
+                let mut result = (&mut *guard)(actor.aid.clone(), &message);
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         // Stop the actor anyway.
