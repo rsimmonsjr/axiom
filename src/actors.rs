@@ -216,8 +216,7 @@ impl<'de> Deserialize<'de> for ActorId {
 
 impl std::cmp::PartialEq for ActorIdData {
     fn eq(&self, other: &Self) -> bool {
-        self.uuid == other.uuid &&
-        self.system_uuid == other.system_uuid
+        self.uuid == other.uuid && self.system_uuid == other.system_uuid
     }
 }
 
@@ -229,15 +228,9 @@ impl std::cmp::PartialOrd for ActorIdData {
         // Order by name, then by system, then by uuid.
         // Also, sort None names before others.
         match (&self.name, &other.name) {
-            (None, Some(_)) => {
-                Some(Ordering::Less)
-            }
-            (Some(_), None) => {
-                Some(Ordering::Greater)
-            }
-            (Some(a), Some(b)) if a != b => {
-                Some(a.cmp(b))
-            }
+            (None, Some(_)) => Some(Ordering::Less),
+            (Some(_), None) => Some(Ordering::Greater),
+            (Some(a), Some(b)) if a != b => Some(a.cmp(b)),
             (_, _) => {
                 // Names are equal, either both None or
                 // Some(thing) where thing1 == thing2.
