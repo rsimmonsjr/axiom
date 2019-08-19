@@ -162,10 +162,7 @@ impl Message {
     {
         // To make this fail fast we will first check against the hash of the type_id that the
         // user wants to convert the message content to.
-        let self_data = &self.data;
-        let self_type = self_data.type_id_hash;
-        let msg_type = Message::hash_type_id::<T>();
-        if self_type != msg_type {
+        if self.data.type_id_hash != Message::hash_type_id::<T>() {
             None
         } else {
             // We first have to figure out if the content is Local or Remote because they have
