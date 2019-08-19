@@ -138,9 +138,9 @@ core principles:
 1. **At its core an actor is just an function that processes messages.** The simplest actor is a 
    function that takes a message and simply ignores it. The benefit to the functional approach 
    over the Akka model is that it allows the user to create actors easily and simply. This is 
-   the notion of _quantum programming_; the notion of building a complex system from the smallest 
-   components. Software based on the actor model can get complicated; keeping it simple at the 
-   core is fundamental to solid architecture.
+   the notion of _micro module programming_; the notion of building a complex system from the 
+   smallest components. Software based on the actor model can get complicated; keeping it simple
+   at the core is fundamental to solid architecture.
 2. **Actors can be a Finite State Machine (FSM).** Actors receive and process messages nominally
    in the order received. However, there are certain circumstances where an actor has to change
    to another state and process other messages, skipping certain messages to be processed later. 
@@ -152,7 +152,7 @@ core principles:
    channel is bounded, resulting in greater simplicity and an emphasis on good actor design.
 5. **Axiom should be kept as small as possible.** Axiom is the core of the actor model and 
    should not be expanded to include everything possible for actors. That should be the 
-   job of libraries that extend Axiom. Axiom itself should be an example of _quantum
+   job of libraries that extend Axiom. Axiom itself should be an example of _micro module
    programming_.
 6. **The tests are the best place for examples.** The tests of Axiom will be extensive and
    well maintained and should be a resource for those wanting to use Axiom. They should not
