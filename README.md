@@ -160,8 +160,3 @@ core principles:
    architected code.  
 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
-## Acknowledgements
-
-This product would not be possible without all the help and support I have received on the Rust
-discord server, especially from the user Talchas.
-
