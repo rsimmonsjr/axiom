@@ -171,7 +171,7 @@ struct ActorIdSerializedForm {
 /// deciding where the actor is and sending the message. However it is important that the user at
 /// least has some notion of where the actor is for developing an efficient actor architecture.
 /// This id can also be serialized to a remote system transparently.
-#[derive(Clone)]
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ActorId {
     /// Holds the Actual data for the actor id.
     data: Arc<ActorIdData>,
@@ -223,6 +223,46 @@ impl<'de> Deserialize<'de> for ActorId {
                 }
             }
         }
+    }
+}
+
+impl std::cmp::PartialEq for ActorIdData {
+    fn eq(&self, other: &Self) -> bool {
+        self.uuid == other.uuid && self.system_uuid == other.system_uuid
+    }
+}
+
+impl std::cmp::Eq for ActorIdData {}
+
+impl std::cmp::PartialOrd for ActorIdData {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+        // Order by name, then by system, then by uuid.
+        // Also, sort None names before others.
+        match (&self.name, &other.name) {
+            (None, Some(_)) => Some(Ordering::Less),
+            (Some(_), None) => Some(Ordering::Greater),
+            (Some(a), Some(b)) if a != b => Some(a.cmp(b)),
+            (_, _) => {
+                // Names are equal, either both None or
+                // Some(thing) where thing1 == thing2.
+                // So, order by system
+                match self.system_uuid.cmp(&other.system_uuid) {
+                    Ordering::Equal => {
+                        // Order by actor uuid
+                        Some(self.uuid.cmp(&other.uuid))
+                    }
+                    x => Some(x),
+                }
+            }
+        }
+    }
+}
+
+impl std::cmp::Ord for ActorIdData {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other)
+            .expect("ActorIdData::partial_cmp() returned None; can't happen")
     }
 }
 
@@ -426,14 +466,6 @@ impl fmt::Debug for ActorId {
     }
 }
 
-impl PartialEq for ActorId {
-    fn eq(&self, other: &ActorId) -> bool {
-        self.data.uuid == other.data.uuid && self.data.system_uuid == other.data.system_uuid
-    }
-}
-
-impl Eq for ActorId {}
-
 impl Hash for ActorId {
     fn hash<H: Hasher>(&self, state: &'_ mut H) {
         self.data.uuid.hash(state);
@@ -552,6 +584,7 @@ impl Actor {
     /// Receive a message from the channel and process it with the actor. This function is the
     /// core of the processing pipeline.
     fn receive(actor: Arc<Actor>) {
+        let mut guard = actor.handler.lock().unwrap();
         match actor.receiver.peek() {
             Result::Err(err) => {
                 // This happening should be very rare but it would mean that the thread pool
@@ -566,8 +599,7 @@ impl Actor {
                 // the actor. We process the message and then we may override the actor's returned
                 // value if its a Stop message. This is an allows actors that don't need to do
                 // anything special when stopping to ignore processing `Stop`.
-                let mut guard = actor.handler.lock().unwrap();
-                let mut result = (&mut *guard)(actor.aid.clone(), message);
+                let mut result = (&mut *guard)(actor.aid.clone(), &message);
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         // Stop the actor anyway.
@@ -675,9 +707,9 @@ pub struct ActorSystemConfig {
     pub thread_wait_time: u16,
 }
 
-impl ActorSystemConfig {
+impl Default for ActorSystemConfig {
     /// Create the config with the default values.
-    pub fn default() -> ActorSystemConfig {
+    fn default() -> ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 100,
             thread_pool_size: 4,

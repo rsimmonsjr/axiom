@@ -1,5 +1,8 @@
 # Release Notes
 
+* 2019-08-11: 0.0.7 
+  * Simplified some of the casts and cleaned up code. 
+  * Fixed issues related to major bug in fixed in `secc-0.0.9`
 * 2019-08-11: 0.0.6 
   * Significant changes in API. Migration should be simple but see the examples for differences.
   * Implemented major serialization functionality for messages and ActorIds with serde.
