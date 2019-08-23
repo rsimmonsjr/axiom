@@ -117,6 +117,7 @@
 //!
 
 pub mod actors;
+pub mod cluster_mgr;
 pub mod message;
 
 pub use crate::actors::ActorError;
@@ -125,6 +126,7 @@ pub use crate::actors::ActorSystem;
 pub use crate::actors::ActorSystemConfig;
 pub use crate::actors::Status;
 pub use crate::actors::SystemMsg;
+pub use crate::cluster_mgr::ClusterMgr;
 pub use crate::message::Message;
 
 #[cfg(test)]
