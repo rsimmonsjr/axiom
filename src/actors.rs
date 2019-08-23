@@ -491,12 +491,14 @@ impl Hash for ActorId {
 /// * `message` - The current message to process in a reference to an [`std::sync::Arc`]. Note
 ///               that messages are often shared amongst actors (sent to several actors at once)
 ///               but their contents must be immutable to comply with the rules of an actor system.
+/// FIXME aid should be passed by reference
 pub trait Processor<State: Send + Sync>:
     (FnMut(&mut State, ActorId, &Message) -> Status) + Send + Sync
 {
 }
 
 // Allows any function, static or closure, to be used as a processor.
+// FIXME aid should be passed by reference
 impl<F, State> Processor<State> for F
 where
     State: Send + Sync + 'static,
@@ -1770,72 +1772,74 @@ mod tests {
 
         let h1 = thread::spawn(move || {
             system1.init_current();
-            let aid = system1.spawn_named(
-                "A",
-                17 as i32,
-                |_state: &mut i32, _aid: ActorId, message: Message| {
-                    if let Some(msg) = message::content_as::<Op> {
-                        match msg {
-                            Op::Request => {
-                                // All is good, shut down.
-                                ActorSystem::current.trigger_shutdown();
-                                Status::Stop
+            system1
+                .spawn_named(
+                    "A",
+                    17 as i32,
+                    |_state: &mut i32, _aid: ActorId, message: &Message| {
+                        if let Some(msg) = message.content_as::<Op>() {
+                            match &*msg {
+                                Op::Request => {
+                                    // All is good, shut down.
+                                    ActorSystem::current().trigger_shutdown();
+                                    Status::Stop
+                                }
+                                _ => panic!("Unexpected message received!"),
                             }
-                            _ => panic!("Unexpected message received!"),
+                        } else {
+                            panic!("Unexpected message received!");
                         }
-                    } else {
-                        panic!("Unexpected message received!");
-                    }
-                },
-            );
+                    },
+                )
+                .unwrap();
 
-            system2.await_shutdown();
+            system1.await_shutdown();
         });
         let h2 = thread::spawn(move || {
             system2.init_current();
-            let aid = system1.spawn_named(
-                "B",
-                19 as i32,
-                |_state: &mut i32, _aid: ActorId, message: Message| {
-                    if let Some(msg) = message::content_as::<SystemActorMsg> {
-                        match msg {
-                            SystemActorMsg::FindByNameResult {
-                                system_uuid,
-                                name,
-                                aid,
-                            } => {
-                                if let Some(tgt) = aid {
-                                    aid.send(Message::new(Op::Request));
-                                    Status::Processed
-                                } else {
-                                    panic!("The aid returned was a None");
+            system2
+                .spawn_named(
+                    "B",
+                    19 as i32,
+                    |_state: &mut i32, _aid: ActorId, message: &Message| {
+                        if let Some(msg) = message.content_as::<SystemActorMsg>() {
+                            match &*msg {
+                                SystemActorMsg::FindByNameResult { aid, .. } => {
+                                    if let Some(tgt) = aid {
+                                        tgt.send(Message::new(Op::Request));
+                                        Status::Processed
+                                    } else {
+                                        panic!("The aid returned was a None");
+                                    }
                                 }
+                                _ => panic!("Unexpected message received!"),
                             }
-                            _ => panic!("Unexpected message received!"),
-                        }
-                    } else if let Some(msg) = message::content_as::<Op> {
-                        match msg {
-                            Op::Reply => {
-                                // All is good, shut down.
-                                ActorSystem::current.trigger_shutdown();
-                                Status::Stop
+                        } else if let Some(msg) = message.content_as::<Op>() {
+                            match &*msg {
+                                Op::Reply => {
+                                    // All is good, shut down.
+                                    ActorSystem::current().trigger_shutdown();
+                                    Status::Stop
+                                }
+                                _ => panic!("Unexpected message received!"),
                             }
-                            _ => panic!("Unexpected message received!"),
-                        }
-                    } else if let Some(msg) = message::content_as::<SystemMsg> {
-                        match msg {
-                            SystemMsg::Start => {
-                                // FIXME Need new name for cluster wide.
-                                let other = ActorSystem::current.find_aid_by_name("A").unwrap();
-                                other.send(Op::Request);
+                        } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                            match &*msg {
+                                SystemMsg::Start => {
+                                    // FIXME Need new name for cluster wide.
+                                    let other =
+                                        ActorSystem::current().find_aid_by_name("A").unwrap();
+                                    other.send(Message::new(Op::Request));
+                                    Status::Processed
+                                }
+                                _ => Status::Processed,
                             }
-                            _ => Status::Processed,
+                        } else {
+                            panic!("Unexpected message received!");
                         }
-                    } else {
-                        panic!("Unexpected message received!");
-                    }
-                },
-            );
+                    },
+                )
+                .unwrap();
 
             system2.await_shutdown();
         });
