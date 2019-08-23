@@ -662,6 +662,10 @@ pub enum WireMessage {
     /// A message sent as a response to an actor system connecting to this actor system. The
     /// message contains the UUID of the actor system sending the message.
     Hello { system_uuid: Uuid },
+    /// A wire message used to find an actor in another system by name.
+    FindAidByName(String),
+    /// A wire message which is a reply to messages trying to find an ActorId.
+    FindAidResult(Option<ActorId>),
     /// A message from one actor to another.
     ActorMsg {
         actor_uuid: Uuid,
@@ -749,7 +753,7 @@ pub struct RemoteInfo {
     sender: SeccSender<WireMessage>,
     /// The channel to use to receive messages from the remote system.
     _receiver: SeccReceiver<WireMessage>,
-    /// Handle to the thread processing incomming messages.
+    /// The handle returned by the thread processing remote messages.
     _handle: JoinHandle<()>,
 }
 
@@ -855,7 +859,7 @@ impl ActorSystem {
             })
             .unwrap();
         println!("Sending hello from {}", self.data.uuid);
-        // FIXME Add error handling.
+        // FIXME Add error handling and make timeout configurable.
         let uuid = match receiver.receive_await_timeout(100) {
             Ok(message) => match message {
                 WireMessage::Hello { system_uuid } => system_uuid,
@@ -868,13 +872,14 @@ impl ActorSystem {
         let system = self.clone();
         let receiver_clone = receiver.clone();
         let thread_timeout = self.data.config.thread_wait_time;
+        let sys_uuid = uuid.clone();
         let handle = thread::spawn(move || {
             system.init_current();
             // FIXME Add soft-close mechanism.
             loop {
                 match receiver_clone.receive_await_timeout(thread_timeout) {
                     Err(_) => (), // not an error, just loop and try again.
-                    Ok(wire_msg) => system.process_wire_message(wire_msg),
+                    Ok(wire_msg) => system.process_wire_message(&sys_uuid, &sender, &wire_msg),
                 }
             }
         });
@@ -892,13 +897,16 @@ impl ActorSystem {
         uuid
     }
 
-    /// A helper function to process a wire message from another actor system.
-    fn process_wire_message(&self, message: WireMessage) {
+    /// A helper function to process a wire message from another actor system. The passed uuid
+    /// is the uuid of the remote that sent the message and the sender is the sender to that
+    /// remote to facilitate replying to the remote.
+    fn process_wire_message(
+        &self,
+        uuid: &Uuid,
+        sender: &SeccSender<WireMessage>,
+        message: &WireMessage,
+    ) {
         match message {
-            WireMessage::Hello { system_uuid } => {
-                println!("{:?} Got Hello from {:?}", self.data.uuid, system_uuid);
-                //panic!("Not Implemented"),
-            }
             WireMessage::ActorMsg {
                 actor_uuid,
                 system_uuid,
@@ -912,6 +920,13 @@ impl ActorSystem {
                 } else {
                     panic!("Error not handled yet");
                 }
+            }
+            WireMessage::Hello { system_uuid } => {
+                println!("{:?} Got Hello from {:?}", self.data.uuid, system_uuid);
+                //panic!("Not Implemented"),
+            }
+            WireMessage::FindAidByName(name) => {
+                sender.send(WireMessage::FindAidResult(self.find_aid_by_name(name));
             }
         }
     }
@@ -1229,6 +1244,81 @@ mod tests {
                 .get(&system1.data.uuid)
                 .expect("Unable to find connection with system 1 in system 2");
         }
+    }
+
+    #[test]
+    fn test_remote_actors() {
+        // Tests the ability to find an aid on a remote system by name and then send that actors
+        // a message over the remote channel. This will test, by proxy, a lot of core remote
+        // actor functionality.
+        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        connect_systems_with_channels(system1.clone(), system2.clone());
+
+        enum Op {
+            Request,
+            Reply,
+        }
+
+        let h1 = thread::spawn(move || {
+            system1.init_current();
+            let aid = system1.spawn_named(
+                "A",
+                17 as i32,
+                |_state: &mut i32, _aid: ActorId, message: Message| {
+                    if let Some(msg) = message::content_as::<Op> {
+                        match msg {
+                            Op::Request => {
+                                // All is good, shut down.
+                                ActorSystem::current.trigger_shutdown();
+                                Status::Stop
+                            }
+                            _ => panic!("Unexpected message received!"),
+                        }
+                    } else {
+                        panic!("Unexpected message received!");
+                    }
+                },
+            );
+
+            system2.await_shutdown();
+        });
+        let h2 = thread::spawn(move || {
+            system2.init_current();
+            let aid = system1.spawn_named(
+                "B",
+                19 as i32,
+                |_state: &mut i32, _aid: ActorId, message: Message| {
+                    if let Some(msg) = message::content_as::<Op> {
+                        match msg {
+                            Op::Reply => {
+                                // All is good, shut down.
+                                ActorSystem::current.trigger_shutdown();
+                                Status::Stop
+                            }
+                            _ => panic!("Unexpected message received!"),
+                        }
+                    } else if let Some(msg) = message::content_as::<SystemMsg> {
+                        match msg {
+                            SystemMsg::Start => {
+                                // FIXME Need new name for cluster wide.
+                                let other = ActorSystem::current.find_aid_by_name("A").unwrap();
+                                other.send(Op::Request);
+                            }
+                            _ => Status::Processed,
+                        }
+                    } else {
+                        panic!("Unexpected message received!");
+                    }
+                },
+            );
+
+            system2.await_shutdown();
+        });
+
+        // Wait for the handles to be done.
+        h1.join().unwrap();
+        h2.join().unwrap();
     }
 
     #[test]
