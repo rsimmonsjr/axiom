@@ -13,18 +13,18 @@
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
 use crate::message::*;
+use ccl::dashmap::DashMap;
 use log::{error, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use uuid::Uuid;
@@ -688,15 +688,15 @@ struct ActorSystemData {
     /// locked for write only when a new actor is spawned but otherwise will be locked for read
     /// by the [`ActorId`] instances when they attempt to send an actor to the work channel for
     /// processing.
-    actors_by_aid: Arc<RwLock<HashMap<ActorId, Arc<Actor>>>>,
+    actors_by_aid: Arc<DashMap<ActorId, Arc<Actor>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
-    aids_by_uuid: Arc<RwLock<HashMap<Uuid, ActorId>>>,
+    aids_by_uuid: Arc<DashMap<Uuid, ActorId>>,
     /// Holds a map of user assigned names to actor ids set when the actors were spawned.
-    aids_by_name: Arc<RwLock<HashMap<String, ActorId>>>,
+    aids_by_name: Arc<DashMap<String, ActorId>>,
     /// Holds a map of monitors where the key is the `aid` of the actor being monitored and
     /// the value is a vector of `aid`s that are monitoring the actor.
-    monitoring_by_monitored: Arc<RwLock<HashMap<ActorId, Vec<ActorId>>>>,
+    monitoring_by_monitored: Arc<DashMap<ActorId, Vec<ActorId>>>,
 }
 
 /// An actor system that contains and manages the actors spawned inside it.
@@ -729,10 +729,10 @@ impl ActorSystem {
                 thread_pool,
                 shutdown_triggered: AtomicBool::new(false),
                 running_thread_count,
-                actors_by_aid: Arc::new(RwLock::new(HashMap::new())),
-                aids_by_uuid: Arc::new(RwLock::new(HashMap::new())),
-                aids_by_name: Arc::new(RwLock::new(HashMap::new())),
-                monitoring_by_monitored: Arc::new(RwLock::new(HashMap::new())),
+                actors_by_aid: Arc::new(DashMap::default()),
+                aids_by_uuid: Arc::new(DashMap::default()),
+                aids_by_name: Arc::new(DashMap::default()),
+                monitoring_by_monitored: Arc::new(DashMap::default()),
             }),
         };
 
@@ -841,9 +841,9 @@ impl ActorSystem {
 
     // A internal helper to register an actor in the actor system.
     fn register_actor(&self, actor: Arc<Actor>) -> Result<ActorId, ActorError> {
-        let mut actors_by_aid = self.data.actors_by_aid.write().unwrap();
-        let mut aids_by_uuid = self.data.aids_by_uuid.write().unwrap();
-        let mut aids_by_name = self.data.aids_by_name.write().unwrap();
+        let actors_by_aid = &self.data.actors_by_aid;
+        let aids_by_uuid = &self.data.aids_by_uuid;
+        let aids_by_name = &self.data.aids_by_name;
         let aid = actor.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
@@ -932,7 +932,7 @@ impl ActorSystem {
     ///
     /// TODO Put tests verifying the resend on multiple messages.
     fn schedule(&self, aid: ActorId) {
-        let actors_by_aid = self.data.actors_by_aid.read().unwrap();
+        let actors_by_aid = &self.data.actors_by_aid;
         match actors_by_aid.get(&aid) {
             Some(actor) => self
                 .data
@@ -961,9 +961,9 @@ impl ActorSystem {
     /// send the actor a [`SystemMsg::Stop`] message and allow it to stop gracefully.
     pub fn stop(&self, aid: ActorId) {
         {
-            let mut actors_by_aid = self.data.actors_by_aid.write().unwrap();
-            let mut aids_by_uuid = self.data.aids_by_uuid.write().unwrap();
-            let mut aids_by_name = self.data.aids_by_name.write().unwrap();
+            let actors_by_aid = &self.data.actors_by_aid;
+            let aids_by_uuid = &self.data.aids_by_uuid;
+            let aids_by_name = &self.data.aids_by_name;
             actors_by_aid.remove(&aid);
             aids_by_uuid.remove(&aid.uuid());
             if let Some(name_string) = aid.name() {
@@ -974,13 +974,7 @@ impl ActorSystem {
 
         // Notify all of the actors monitoring the actor that is stopped and remove the
         // actor from the map of monitors.
-        if let Some(monitoring) = self
-            .data
-            .monitoring_by_monitored
-            .write()
-            .unwrap()
-            .remove(&aid)
-        {
+        if let Some((_, monitoring)) = self.data.monitoring_by_monitored.remove(&aid) {
             for m_aid in monitoring {
                 ActorId::send(&m_aid, Message::new(SystemMsg::Stopped(aid.clone())));
             }
@@ -989,31 +983,35 @@ impl ActorSystem {
 
     /// Checks to see if the actor with the given [`ActorId`] is alive within this actor system.
     pub fn is_alive(&self, aid: &ActorId) -> bool {
-        let actors_by_aid = self.data.actors_by_aid.write().unwrap();
+        let actors_by_aid = &self.data.actors_by_aid;
         actors_by_aid.contains_key(aid)
     }
 
     /// Look up an [`ActorId`] by the unique UUID of the actor and either returns the located
     /// `aid` in a [`Option::Some`] or [`Option::None`] if not found.
     pub fn find_aid_by_uuid(&self, uuid: &Uuid) -> Option<ActorId> {
-        let aids_by_uuid = self.data.aids_by_uuid.read().unwrap();
+        let aids_by_uuid = &self.data.aids_by_uuid;
         aids_by_uuid.get(uuid).map(|aid| aid.clone())
     }
 
     /// Look up an [`ActorId`] by the user assigned name of the actor and either returns the
     /// located `aid` in a [`Option::Some`] or [`Option::None`] if not found.
     pub fn find_aid_by_name(&self, name: &str) -> Option<ActorId> {
-        let aids_by_name = self.data.aids_by_name.read().unwrap();
+        let aids_by_name = &self.data.aids_by_name;
         aids_by_name.get(&name.to_string()).map(|aid| aid.clone())
     }
 
     /// Adds a monitor so that `monitoring` will be informed if `monitored` stops.
     pub fn monitor(&self, monitoring: &ActorId, monitored: &ActorId) {
-        let mut monitoring_by_monitored = self.data.monitoring_by_monitored.write().unwrap();
-        let monitoring_vec = monitoring_by_monitored
-            .entry(monitored.clone())
-            .or_insert(Vec::new());
+        let monitoring_by_monitored = &self.data.monitoring_by_monitored;
+        // NOTE: `DashMap::get_or_insert` exists but doesn't always return a mutable reference
+        // to the value it retrieves. This might change in the future versions, but for now we
+        // have to manually remove the vec from the map, update it, then reinsert
+        let (monitored, mut monitoring_vec) = monitoring_by_monitored
+            .remove(&monitored)
+            .unwrap_or_else(|| (monitored.clone(), Vec::new()));
         monitoring_vec.push(monitoring.clone());
+        monitoring_by_monitored.insert(monitored, monitoring_vec);
     }
 }
 
@@ -1367,9 +1365,9 @@ mod tests {
 
         // Verify the actor is NOT in the maps.
         let sys_clone = system.clone();
-        let actors_by_aid = sys_clone.data.actors_by_aid.read().unwrap();
+        let actors_by_aid = &sys_clone.data.actors_by_aid;
         assert_eq!(false, actors_by_aid.contains_key(&aid));
-        let aids_by_uuid = sys_clone.data.aids_by_uuid.read().unwrap();
+        let aids_by_uuid = &sys_clone.data.aids_by_uuid;
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
 
         // Shut down the system and clean up test.
@@ -1403,9 +1401,9 @@ mod tests {
 
         // Verify the actor is NOT in the maps.
         let sys_clone = system.clone();
-        let actors_by_aid = sys_clone.data.actors_by_aid.read().unwrap();
+        let actors_by_aid = &sys_clone.data.actors_by_aid;
         assert_eq!(false, actors_by_aid.contains_key(&aid));
-        let aids_by_uuid = sys_clone.data.aids_by_uuid.read().unwrap();
+        let aids_by_uuid = &sys_clone.data.aids_by_uuid;
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
 
         // Wait for the message to get there because test is asynchronous.
@@ -1425,7 +1423,7 @@ mod tests {
 
         // We force remove the actor from the system so now it cannot be scheduled.
         let sys_clone = system.clone();
-        let mut actors_by_aid = (*sys_clone.data.actors_by_aid).write().unwrap();
+        let actors_by_aid = &sys_clone.data.actors_by_aid;
         actors_by_aid.remove(&aid);
         drop(actors_by_aid); // Give up the lock.
 
@@ -1559,7 +1557,7 @@ mod tests {
 
         {
             // Validate the monitors are there in a block to release mutex afterwards.
-            let monitoring_by_monitored = &system.data.monitoring_by_monitored.read().unwrap();
+            let monitoring_by_monitored = &system.data.monitoring_by_monitored;
             let m_vec = monitoring_by_monitored.get(&monitored).unwrap();
             assert!(m_vec.contains(&monitoring1));
             assert!(m_vec.contains(&monitoring2));
