@@ -116,8 +116,10 @@ enum ActorSender {
         /// Holds a boolean to indicate if the actor is stopped. A stopped actor will no longer
         /// accept further messages to be sent.
         stopped: AtomicBool,
-        // The send side of the actor's message channel.
+        /// The send side of the actor's message channel.
         sender: SeccSender<Message>,
+        /// The reference to the local ActorSystem.
+        system: ActorSystem,
     },
 
     /// A sender that is used when an actor is on another actor system. The system will use
@@ -202,6 +204,7 @@ impl<'de> Deserialize<'de> for ActorId {
         // it must be a remote aid.
         match system.find_aid_by_uuid(&serialized_form.uuid) {
             Some(aid) => Ok(aid.clone()),
+            // FIXME Add error if the ActorSystem UUID is the same but not found.
             None => Ok(ActorId {
                 data: Arc::new(ActorIdData {
                     uuid: serialized_form.uuid,
@@ -314,9 +317,14 @@ impl ActorId {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     /// ```
+    /// FIXME Make ActorError extend std::error::Error
     pub fn try_send(&self, message: Message) -> Result<(), ActorError> {
         match &self.data.sender {
-            ActorSender::Local { stopped, sender } => {
+            ActorSender::Local {
+                stopped,
+                sender,
+                system,
+            } => {
                 if stopped.load(Ordering::Relaxed) {
                     Err(ActorError::ActorStopped)
                 } else {
@@ -324,7 +332,7 @@ impl ActorId {
                     // FIXME Investigate if this could race the dispatcher threads.
                     if sender.receivable() == 1 {
                         // Schedule on the actor system set as current for this thread.
-                        ActorSystem::current().schedule(self.clone())
+                        system.schedule(self.clone())
                     };
 
                     Ok(())
@@ -361,56 +369,6 @@ impl ActorId {
             true
         } else {
             false
-        }
-    }
-
-    /// Returns the total number of messages that have been sent to the actor regardless of
-    /// whether or not they have been received or processed by the actor.
-    /// FIXME Move these metrics to be retreived by via a system message because this won't work remote.
-    pub fn sent(&self) -> usize {
-        match &self.data.sender {
-            ActorSender::Local { sender, .. } => sender.sent(),
-            _ => panic!("Only implemented for Local sender!"),
-        }
-    }
-
-    /// Returns the total number of messages that have been received by the actor. Note that this
-    /// doesn't mean that the actor did anything with the message, just that it was received and
-    /// handled.
-    /// FIXME Move to be retreived by via a system message because this won't work remote.
-    pub fn received(&self) -> usize {
-        match &self.data.sender {
-            ActorSender::Local { sender, .. } => sender.received(),
-            _ => panic!("Only implemented for Local sender!"),
-        }
-    }
-
-    /// Returns the number of messages that are currently receivable by the actor. This count
-    /// will not include any messages that have been skipped until the skip is reset.
-    /// FIXME Move to be retreived by via a system message because this won't work remote.
-    pub fn receivable(&self) -> usize {
-        match &self.data.sender {
-            ActorSender::Local { sender, .. } => sender.receivable(),
-            _ => panic!("Only implemented for Local sender!"),
-        }
-    }
-
-    /// Returns the total number of messages that are pending in the actor's channel. This should
-    /// include messages that have been skipped by the actor as well as those that are receivable.
-    /// FIXME Move to be retreived by via a system message because this won't work remote.
-    pub fn pending(&self) -> usize {
-        match &self.data.sender {
-            ActorSender::Local { sender, .. } => sender.pending(),
-            _ => panic!("Only implemented for Local sender!"),
-        }
-    }
-
-    /// Checks to see if the actor referenced by this [`ActorId`] is stopped.
-    /// FIXME Move to be retreived by via a system message because this won't work remote.
-    pub fn is_stopped(&self) -> bool {
-        match &self.data.sender {
-            ActorSender::Local { stopped, .. } => stopped.load(Ordering::Relaxed),
-            _ => panic!("Only implemented for Local sender!"),
         }
     }
 
@@ -452,13 +410,10 @@ impl Hash for ActorId {
 /// This will be passed to a spawn function to specify the handler used for managing the state of
 /// the actor based on the messages passed to the actor. The processor takes three arguments:
 /// * `state`   - A mutable reference to the current state of the actor.
-/// * `aid`     - The [`ActorId`] for this actor enclosed in an [`std::sync::Arc`]
-///               to allow access to the actor system for spawning, sending to self and so on.  
-/// * `message` - The current message to process in a reference to an [`std::sync::Arc`]. Note
-///               that messages are often shared amongst actors (sent to several actors at once)
-///               but their contents must be immutable to comply with the rules of an actor system.
+/// * `aid`     - The reference to the [`ActorId`] for this actor.
+/// * `message` - The reference to the current message to process in a reference.
 pub trait Processor<State: Send + Sync>:
-    (FnMut(&mut State, ActorId, &Message) -> Status) + Send + Sync
+    (FnMut(&mut State, &ActorId, &Message) -> Status) + Send + Sync
 {
 }
 
@@ -466,15 +421,15 @@ pub trait Processor<State: Send + Sync>:
 impl<F, State> Processor<State> for F
 where
     State: Send + Sync + 'static,
-    F: (FnMut(&mut State, ActorId, &Message) -> Status) + Send + Sync + 'static,
+    F: (FnMut(&mut State, &ActorId, &Message) -> Status) + Send + Sync + 'static,
 {
 }
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
-trait Handler: (FnMut(ActorId, &Message) -> Status) + Send + Sync + 'static {}
+trait Handler: (FnMut(&Message) -> Status) + Send + Sync + 'static {}
 
-impl<F> Handler for F where F: (FnMut(ActorId, &Message) -> Status) + Send + Sync + 'static {}
+impl<F> Handler for F where F: (FnMut(&Message) -> Status) + Send + Sync + 'static {}
 
 /// An actual actor in the system. Please see overview and library documentation for more detail.
 struct Actor {
@@ -482,6 +437,8 @@ struct Actor {
     aid: ActorId,
     /// Receiver for the actor channel.
     receiver: SeccReceiver<Message>,
+    /// The actor system that this actor is running on.
+    system: ActorSystem,
     /// The function that processes messages that are sent to the actor wrapped in a closure to
     /// erase the state type that the actor is managing. Note that this is in a mutex because the
     /// handler itself is `FnMut` and we also don't want there to be any possibility of two
@@ -495,6 +452,7 @@ impl Actor {
     /// process messages sent to the actor. The system and node id are passed separately because
     /// of restrictions on mutex guards not being re-entrant in Rust.
     pub fn new<F, State>(
+        system: ActorSystem,
         system_uuid: Uuid,
         name: Option<String>,
         mut state: State,
@@ -515,6 +473,7 @@ impl Actor {
                 system_uuid,
                 name,
                 sender: ActorSender::Local {
+                    system: system.clone(),
                     stopped: AtomicBool::new(false),
                     sender,
                 },
@@ -522,14 +481,15 @@ impl Actor {
         };
 
         // This handler will manage the state for the actor.
-        let handler = Box::new({
-            move |aid: ActorId, message: &Message| processor(&mut state, aid, message)
-        });
+        let aid_clone = aid.clone();
+        let handler =
+            Box::new({ move |message: &Message| processor(&mut state, &aid_clone, message) });
 
         // This is the receiving side of the actor which holds the processor wrapped in the
         // handler type.
         let actor = Actor {
-            aid: aid.clone(),
+            aid: aid,
+            system: system.clone(),
             receiver,
             handler: Mutex::new(handler),
         };
@@ -547,11 +507,7 @@ impl Actor {
         // for work at the back of the work channel. This prevents actors that get tons of
         // messages from starving out actors that get few messages.
         if actor.receiver.receivable() > 0 {
-            ActorSystem::current()
-                .data
-                .sender
-                .send_await(actor.clone())
-                .unwrap();
+            actor.system.reschedule(actor.clone());
         }
     }
 
@@ -924,6 +880,14 @@ impl ActorSystem {
         Ok(result)
     }
 
+    /// Reschedules an actor on the actor system.
+    fn reschedule(&self, actor: Arc<Actor>) {
+        self.data
+            .sender
+            .send(actor)
+            .expect("Unable to Schedule actor: ")
+    }
+
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
     /// lookup table. This function gets called when an actor goes from 0 receivable messages to
     /// 1 receivable message. If the actor has more receivable messages then this will not be
@@ -1036,12 +1000,20 @@ mod tests {
     use crate::tests::*;
     use std::time::Duration;
 
+    /// Determines how many messages the actor with the id has received.
+    fn received(aid: &ActorId) -> usize {
+        match aid.data.sender {
+            ActorSender::Local { sender, .. } => sender.received(),
+            _ => panic!("Works only with Local actors."),
+        }
+    }
+
     /// A test helper to assert that a certain number of messages arrived in a certain time.
     fn assert_await_received(aid: &ActorId, count: u8, timeout_ms: u64) {
         use std::time::Instant;
         let start = Instant::now();
         let duration = Duration::from_millis(timeout_ms);
-        while aid.received() < count as usize {
+        while received(&aid) < count as usize {
             if Instant::elapsed(&start) > duration {
                 assert!(
                     false,
@@ -1212,9 +1184,8 @@ mod tests {
                 Status::Processed
             } else if let Some(msg) = message.content_as::<i32>() {
                 assert_eq!(expected[*state - 1], *msg);
-                assert_eq!(*state, aid.received());
+                assert_eq!(*state, received(&aid));
                 *state += 1;
-                assert_eq!(aid.pending(), aid.sent() - aid.received());
                 Status::Processed
             } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                 // Note that we put this last because it only is ever received once, we
@@ -1357,7 +1328,6 @@ mod tests {
         assert_await_received(&aid, 3, 1000);
 
         // Make sure that the actor is actually stopped and cant get more messages.
-        assert!(true, aid.is_stopped());
         match aid.try_send(Message::new(42 as i32)) {
             Err(ActorError::ActorStopped) => assert!(true), // all OK!
             Ok(_) => assert!(false, "Expected the actor to be shut down!"),
@@ -1393,7 +1363,6 @@ mod tests {
         system.stop(aid.clone());
 
         // Make sure the actor is out of the maps and cant be sent to.
-        assert!(true, aid.is_stopped());
         match aid.try_send(Message::new(42)) {
             Err(ActorError::ActorStopped) => assert!(true), // all OK!
             Ok(_) => assert!(false, "Expected the actor to be shut down!"),

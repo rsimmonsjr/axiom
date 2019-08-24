@@ -11,6 +11,9 @@ re-implementation of either of the two aforementioned actor models but rather a 
 implementation deriving inspiration from the good parts of those models.
 
 ### What's New
+* 2019-??-??: 0.0.8 
+  * Changed `Processor` to take a `&ActorId` rather than `ActorId` of it. Which will break users.
+  * 
 * 2019-08-11: 0.0.7 
   * Simplified some of the casts and cleaned up code. 
   * Fixed issues related to major bug in fixed in `secc-0.0.9`
