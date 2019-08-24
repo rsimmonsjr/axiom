@@ -1003,15 +1003,14 @@ impl ActorSystem {
 
     /// Adds a monitor so that `monitoring` will be informed if `monitored` stops.
     pub fn monitor(&self, monitoring: &ActorId, monitored: &ActorId) {
-        let monitoring_by_monitored = &self.data.monitoring_by_monitored;
-        // NOTE: `DashMap::get_or_insert` exists but doesn't always return a mutable reference
-        // to the value it retrieves. This might change in the future versions, but for now we
-        // have to manually remove the vec from the map, update it, then reinsert
-        let (monitored, mut monitoring_vec) = monitoring_by_monitored
-            .remove(&monitored)
-            .unwrap_or_else(|| (monitored.clone(), Vec::new()));
+        let mut monitoring_by_monitored = self
+            .data
+            .monitoring_by_monitored
+            .get_raw_mut_from_key(&monitored);
+        let monitoring_vec = monitoring_by_monitored
+            .entry(monitored.clone())
+            .or_insert(Vec::new());
         monitoring_vec.push(monitoring.clone());
-        monitoring_by_monitored.insert(monitored, monitoring_vec);
     }
 }
 
