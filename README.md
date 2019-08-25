@@ -13,10 +13,10 @@ implementation deriving inspiration from the good parts of those models.
 ### What's New
 * 2019-??-??: 0.0.8 
   * Changed `Processor` to take a `&ActorId` rather than `ActorId` of it. Which will break users.
-  * You no longer have to do `system.init_current()` unless you are serializing or deserializing.
+  * You no longer have to call `system.init_current()` unless you are deserializing `ActorId`s.
   * `ActorSystem` reference is now baked into `Actor` and `ActorId` structure variables.
   * Broken metrics methods like `received()` in `ActorId` have been removed. 
-  *
+  * Not that the broken metrics will be replaced with a message in later versions. 
 * 2019-08-11: 0.0.7 
   * Simplified some of the casts and cleaned up code. 
   * Fixed issues related to major bug in fixed in `secc-0.0.9`
@@ -60,7 +60,6 @@ use axiom::*;
 use std::sync::Arc;
 
 let system = ActorSystem::create(ActorSystemConfig::default());
-system.init_current(); // Needed to call from outside of actor system threads.
 
 let aid = system.spawn(
     0 as usize,
@@ -82,7 +81,6 @@ use axiom::*;
 use std::sync::Arc;
 
 let system = ActorSystem::create(ActorSystemConfig::default());
-system.init_current(); // Needed to call from outside of actor system threads.
 
 struct Data {
     value: i32,

@@ -20,6 +20,7 @@ use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
@@ -106,6 +107,18 @@ pub enum ActorError {
     /// Error returned when an ActorId is not local and a user is trying to do operations that
     /// only work on local ActorId instances.
     ActorIdNotLocal,
+}
+
+impl fmt::Display for ActorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for ActorError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
 }
 
 /// An enum that holds a sender for an actor.
@@ -277,7 +290,6 @@ impl ActorId {
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
-    /// system.init_current();
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
@@ -309,7 +321,6 @@ impl ActorId {
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
-    /// system.init_current();
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
@@ -740,8 +751,8 @@ impl ActorSystem {
     }
 
     /// Initialises this actor system to use for the current thread which is necessary if the
-    /// user wishes to call into the actor system from another thread. Note that this can be
-    /// called only once per thread; on the second call it will panic.
+    /// user wishes to serialize and deserialize [`ActorId`]s. Note that this can be called only
+    /// once per thread; on the second call it will panic.
     pub fn init_current(&self) {
         ACTOR_SYSTEM.with(|actor_system| {
             actor_system
@@ -750,12 +761,13 @@ impl ActorSystem {
         });
     }
 
-    /// Fetches a clone of a reference of the actor system for the current thread.
+    /// Fetches a clone of a reference of the actor system set in a threadlocal for the current
+    /// thread.
     pub fn current() -> ActorSystem {
         ACTOR_SYSTEM.with(|actor_system| {
             actor_system
                 .get()
-                .expect("Thread local actor system not set!")
+                .expect("Thread local ACTOR_SYSTEM not set! See `ActorSystem::init_current()`")
                 .clone()
         })
     }
@@ -829,7 +841,6 @@ impl ActorSystem {
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
-    /// system.init_current();
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
@@ -1089,7 +1100,6 @@ mod tests {
         // This test verifies that an ActorId can be used as a message and inside other
         // structs used as a message.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         #[derive(Serialize, Deserialize)]
         enum Op {
@@ -1123,7 +1133,6 @@ mod tests {
         // This test shows how the simplest actor can be built and used. This actor uses a closure
         // that simply returns that the message is processed.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
@@ -1148,7 +1157,6 @@ mod tests {
         // This test shows how the simplest struct-based actor can be built and used. This actor
         // merely returns that the message was processed.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         // We declare a basic struct that has a handle method that does basically nothing.
         // Subsequently we will create that struct when we spawn the actor and then send the
@@ -1179,7 +1187,6 @@ mod tests {
         // messages and mutate the actor's state based upon the messages passed. Note that the
         // state of the actor is not available outside the actor itself.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
@@ -1235,7 +1242,6 @@ mod tests {
         // messages and mutate the actor's state based upon the messages passed. Note that the
         // state of the actor is not available outside the actor itself.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         // We create a basic struct with a handler and use that handler to dispatch to other
         // inherent methods in the struct. Note that we don't have to implement any traits here
@@ -1297,7 +1303,6 @@ mod tests {
         // This test verifies functionality around stopping actors though means of the actor
         // returning a stop status.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types
@@ -1364,7 +1369,6 @@ mod tests {
         // that does not exist in the map. This can happen if the actor is stopped before
         // the system notifies the actor id that it is dead.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
         let aid = system.spawn(0, simple_handler);
         aid.send(Message::new(11));
         assert_await_received(&aid, 2, 1000);
@@ -1399,7 +1403,6 @@ mod tests {
         // that does not exist in the map. This can happen if the actor is stopped before
         // the system notifies the actor id that it is dead.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
         let aid = system.spawn(0, simple_handler);
 
         // We force remove the actor from the system so now it cannot be scheduled.
@@ -1421,7 +1424,6 @@ mod tests {
 
         // This test checks that we can look up an actor id by the UUID of the actor id.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
         let aid = system.spawn(0 as usize, simple_handler);
 
         // Send a message to the actor verifying it is up.
@@ -1449,7 +1451,6 @@ mod tests {
         // to declare a named actor they cannot register the same name twice and when the actor
         // stops the name should be removed from the registered names and be available again.
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
 
         let aid1 = system
             .spawn_named("alpha", 0 as usize, simple_handler)
@@ -1528,7 +1529,6 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
         let monitored = system.spawn(0 as usize, simple_handler);
         let not_monitoring = system.spawn(0 as usize, simple_handler);
         let monitoring1 = system.spawn(monitored.clone(), monitor_handler);
