@@ -102,6 +102,10 @@ pub enum ActorError {
     /// Error Used for when an attempt is made to send a message to a remote actor. **This
     /// error will be removed when remote actors are implemented.**
     RemoteNotImplemented,
+
+    /// Error returned when an ActorId is not local and a user is trying to do operations that
+    /// only work on local ActorId instances.
+    ActorIdNotLocal,
 }
 
 /// An enum that holds a sender for an actor.
@@ -277,7 +281,7 @@ impl ActorId {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: ActorId, _message: &Message| Status::Processed,
+    ///     |_state: &mut usize, _aid: &ActorId, _message: &Message| Status::Processed,
     ///  );
     ///
     /// aid.send(Message::new(11));
@@ -309,7 +313,7 @@ impl ActorId {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
+    ///     |_state: &mut usize, _aid: &ActorId, message: &Message| Status::Processed,
     ///  );
     ///
     /// match aid.try_send(Message::new(11)) {
@@ -372,15 +376,24 @@ impl ActorId {
         }
     }
 
+    /// Fetches the system that the actor is on if the actor is a local actor.
+    pub fn system(&self) -> Result<ActorSystem, ActorError> {
+        match &self.data.sender {
+            ActorSender::Local { system, .. } => Ok(system.clone()),
+            _ => Err(ActorError::ActorIdNotLocal),
+        }
+    }
+
     /// Marks the actor referenced by the [`ActorId`] as stopped and puts mechanisms in place to
     /// cause no more messages to be sent to the actor. Note that once stopped, an actor id can
     /// never be started again.
-    fn stop(&self) {
+    fn stop(&self) -> Result<(), ActorError> {
         match &self.data.sender {
             ActorSender::Local { stopped, .. } => {
                 stopped.fetch_or(true, Ordering::AcqRel);
+                Ok(())
             }
-            _ => panic!("Only implemented for Local sender!"),
+            _ => Err(ActorError::ActorIdNotLocal),
         }
     }
 }
@@ -427,18 +440,16 @@ where
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
-trait Handler: (FnMut(&Message) -> Status) + Send + Sync + 'static {}
+trait Handler: (FnMut(&ActorId, &Message) -> Status) + Send + Sync + 'static {}
 
-impl<F> Handler for F where F: (FnMut(&Message) -> Status) + Send + Sync + 'static {}
+impl<F> Handler for F where F: (FnMut(&ActorId, &Message) -> Status) + Send + Sync + 'static {}
 
 /// An actual actor in the system. Please see overview and library documentation for more detail.
 struct Actor {
-    /// Id of the associated actor.
+    /// The AID associated with this actor.
     aid: ActorId,
     /// Receiver for the actor channel.
     receiver: SeccReceiver<Message>,
-    /// The actor system that this actor is running on.
-    system: ActorSystem,
     /// The function that processes messages that are sent to the actor wrapped in a closure to
     /// erase the state type that the actor is managing. Note that this is in a mutex because the
     /// handler itself is `FnMut` and we also don't want there to be any possibility of two
@@ -453,7 +464,6 @@ impl Actor {
     /// of restrictions on mutex guards not being re-entrant in Rust.
     pub fn new<F, State>(
         system: ActorSystem,
-        system_uuid: Uuid,
         name: Option<String>,
         mut state: State,
         mut processor: F,
@@ -470,7 +480,7 @@ impl Actor {
         let aid = ActorId {
             data: Arc::new(ActorIdData {
                 uuid: Uuid::new_v4(),
-                system_uuid,
+                system_uuid: system.uuid(),
                 name,
                 sender: ActorSender::Local {
                     system: system.clone(),
@@ -481,15 +491,14 @@ impl Actor {
         };
 
         // This handler will manage the state for the actor.
-        let aid_clone = aid.clone();
-        let handler =
-            Box::new({ move |message: &Message| processor(&mut state, &aid_clone, message) });
+        let handler = Box::new({
+            move |aid: &ActorId, message: &Message| processor(&mut state, aid, message)
+        });
 
         // This is the receiving side of the actor which holds the processor wrapped in the
         // handler type.
         let actor = Actor {
-            aid: aid,
-            system: system.clone(),
+            aid,
             receiver,
             handler: Mutex::new(handler),
         };
@@ -507,7 +516,7 @@ impl Actor {
         // for work at the back of the work channel. This prevents actors that get tons of
         // messages from starving out actors that get few messages.
         if actor.receiver.receivable() > 0 {
-            actor.system.reschedule(actor.clone());
+            actor.aid.system().unwrap().reschedule(actor.clone());
         }
     }
 
@@ -529,7 +538,7 @@ impl Actor {
                 // the actor. We process the message and then we may override the actor's returned
                 // value if its a Stop message. This is an allows actors that don't need to do
                 // anything special when stopping to ignore processing `Stop`.
-                let mut result = (&mut *guard)(actor.aid.clone(), &message);
+                let mut result = (&mut *guard)(&actor.aid, &message);
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         // Stop the actor anyway.
@@ -540,46 +549,37 @@ impl Actor {
                 // Handle the result of the processing.
                 match result {
                     Status::Processed => {
-                        match actor.receiver.pop() {
-                            Ok(_) => (),
-                            Err(e) => {
-                                error!("Error on pop(): {:?}.", e);
-                                ActorSystem::current().stop(actor.aid.clone())
-                            }
+                        if let Err(e) = actor.receiver.pop() {
+                            error!("Error on pop(): {:?}.", e);
+                            actor.aid.system().unwrap().stop(actor.aid.clone())
+                        } else {
+                            Actor::post_message_process(&actor);
                         }
-                        Actor::post_message_process(&actor);
                     }
                     Status::Skipped => {
-                        match actor.receiver.skip() {
-                            Ok(_) => (),
-                            Err(e) => {
-                                error!("Error on skip(): {:?}.", e);
-                                ActorSystem::current().stop(actor.aid.clone())
-                            }
+                        if let Err(e) = actor.receiver.skip() {
+                            error!("Error on skip(): {:?}.", e);
+                            actor.aid.system().unwrap().stop(actor.aid.clone())
+                        } else {
+                            Actor::post_message_process(&actor);
                         }
-                        Actor::post_message_process(&actor);
                     }
                     Status::ResetSkip => {
-                        match actor.receiver.pop_and_reset_skip() {
-                            Ok(_) => (),
-                            Err(e) => {
-                                error!("Error on pop_and_reset_skip(): {:?}.", e);
-                                ActorSystem::current().stop(actor.aid.clone())
-                            }
+                        if let Err(e) = actor.receiver.pop_and_reset_skip() {
+                            error!("Error on pop_and_reset_skip(): {:?}.", e);
+                            actor.aid.system().unwrap().stop(actor.aid.clone())
+                        } else {
+                            Actor::post_message_process(&actor);
                         }
-                        Actor::post_message_process(&actor);
                     }
                     Status::Stop => {
-                        ActorSystem::current().stop(actor.aid.clone());
+                        actor.aid.system().unwrap().stop(actor.aid.clone());
                         // Even though the actor is stopping we want to pop the message to make
                         // sure that the metrics on the actor's channel are correct. Then we will
                         // stop the actor in the actor system.
-                        match actor.receiver.pop() {
-                            Ok(_) => (),
-                            Err(e) => {
-                                error!("Error on pop(): {:?}.", e);
-                                ActorSystem::current().stop(actor.aid.clone())
-                            }
+                        if let Err(e) = actor.receiver.pop() {
+                            error!("Error on pop(): {:?}.", e);
+                            actor.aid.system().unwrap().stop(actor.aid.clone())
                         }
                     }
                 };
@@ -780,6 +780,11 @@ impl ActorSystem {
         self.await_shutdown();
     }
 
+    /// Returns a clone of the UUID for this actor system.
+    pub fn uuid(&self) -> Uuid {
+        self.data.uuid.clone()
+    }
+
     /// Returns the total number of times actors have been sent to the work channel.
     pub fn sent(&self) -> usize {
         self.data.receiver.sent()
@@ -828,7 +833,7 @@ impl ActorSystem {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: ActorId, _message: &Message| Status::Processed,
+    ///     |_state: &mut usize, _aid: &ActorId, _message: &Message| Status::Processed,
     /// );
     /// aid.send(Message::new(11));
     /// ```
@@ -837,7 +842,7 @@ impl ActorSystem {
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        let actor = Actor::new(self.data.uuid, None, state, processor);
+        let actor = Actor::new(self.clone(), None, state, processor);
         let result = self.register_actor(actor).unwrap();
         result.send(Message::new(SystemMsg::Start));
         result
@@ -861,7 +866,7 @@ impl ActorSystem {
     /// let aid = system.spawn_named(
     ///     "alpha",
     ///     0 as usize,
-    ///     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
+    ///     |_state: &mut usize, _aid: &ActorId, message: &Message| Status::Processed,
     /// );
     /// ```
     pub fn spawn_named<F, State>(
@@ -874,7 +879,7 @@ impl ActorSystem {
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        let actor = Actor::new(self.data.uuid, Some(name.to_string()), state, processor);
+        let actor = Actor::new(self.clone(), Some(name.to_string()), state, processor);
         let result = self.register_actor(actor)?;
         result.send(Message::new(SystemMsg::Start));
         Ok(result)
@@ -933,7 +938,7 @@ impl ActorSystem {
             if let Some(name_string) = aid.name() {
                 aids_by_name.remove(&name_string);
             }
-            aid.stop();
+            aid.stop().unwrap();
         }
 
         // Notify all of the actors monitoring the actor that is stopped and remove the
@@ -998,8 +1003,16 @@ mod tests {
     use std::time::Duration;
 
     /// Determines how many messages the actor with the id has received.
+    fn sent(aid: &ActorId) -> usize {
+        match &aid.data.sender {
+            ActorSender::Local { sender, .. } => sender.sent(),
+            _ => panic!("Works only with Local actors."),
+        }
+    }
+
+    /// Determines how many messages the actor with the id has received.
     fn received(aid: &ActorId) -> usize {
-        match aid.data.sender {
+        match &aid.data.sender {
             ActorSender::Local { sender, .. } => sender.received(),
             _ => panic!("Works only with Local actors."),
         }
@@ -1023,7 +1036,7 @@ mod tests {
 
     /// A function that just returns [`Status::Processed`] which can be used as a handler for
     /// a simple actor.
-    fn simple_handler(_state: &mut usize, _aid: ActorId, _message: &Message) -> Status {
+    fn simple_handler(_state: &mut usize, _aid: &ActorId, _message: &Message) -> Status {
         Status::Processed
     }
 
@@ -1084,7 +1097,7 @@ mod tests {
         }
 
         // The user will send our own ActorId to us.
-        let aid = system.spawn(0, |_state: &mut i32, aid: ActorId, message: &Message| {
+        let aid = system.spawn(0, |_state: &mut i32, aid: &ActorId, message: &Message| {
             if let Some(msg) = message.content_as::<ActorId>() {
                 assert_eq!(aid.uuid(), msg.uuid());
             } else if let Some(msg) = message.content_as::<Op>() {
@@ -1117,7 +1130,7 @@ mod tests {
         // but when that bug goes away this will be even simpler.
         let aid = system.spawn(
             0 as usize,
-            |_state: &mut usize, _aid: ActorId, _message: &Message| Status::Processed,
+            |_state: &mut usize, _aid: &ActorId, _message: &Message| Status::Processed,
         );
 
         // Send a message to the actor.
@@ -1143,7 +1156,7 @@ mod tests {
         struct Data {}
 
         impl Data {
-            fn handle(&mut self, _aid: ActorId, _message: &Message) -> Status {
+            fn handle(&mut self, _aid: &ActorId, _message: &Message) -> Status {
                 Status::Processed
             }
         }
@@ -1172,7 +1185,7 @@ mod tests {
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
         let starting_state: usize = 0 as usize;
-        let closure = |state: &mut usize, aid: ActorId, message: &Message| {
+        let closure = |state: &mut usize, aid: &ActorId, message: &Message| {
             // Expected messages in the expected order.
             let expected: Vec<i32> = vec![11, 13, 17];
             // Attempt to downcast to expected message.
@@ -1197,17 +1210,17 @@ mod tests {
         let aid = system.spawn(starting_state, closure);
 
         // First message will always be the SystemMsg::Start
-        assert_eq!(1, aid.sent());
+        assert_eq!(1, sent(&aid));
 
         // Send some messages to the actor in the order required in the test. In a real actor
         // its unlikely any order restriction would be needed. However this test makes sure that
         // the messages are processed correctly.
         aid.send(Message::new(11 as i32));
-        assert_eq!(2, aid.sent());
+        assert_eq!(2, sent(&aid));
         aid.send(Message::new(13 as i32));
-        assert_eq!(3, aid.sent());
+        assert_eq!(3, sent(&aid));
         aid.send(Message::new(17 as i32));
-        assert_eq!(4, aid.sent());
+        assert_eq!(4, sent(&aid));
 
         // Wait for all of the messages to get there because test is asynchronous.
         assert_await_received(&aid, 4, 1000);
@@ -1232,7 +1245,7 @@ mod tests {
         }
 
         impl Data {
-            fn handle_bool(&mut self, _aid: ActorId, message: &bool) -> Status {
+            fn handle_bool(&mut self, _aid: &ActorId, message: &bool) -> Status {
                 if *message {
                     self.value += 1;
                 } else {
@@ -1241,12 +1254,12 @@ mod tests {
                 Status::Processed // This assertion will fail but we still have to return.
             }
 
-            fn handle_i32(&mut self, _aid: ActorId, message: &i32) -> Status {
+            fn handle_i32(&mut self, _aid: &ActorId, message: &i32) -> Status {
                 self.value += *message;
                 Status::Processed // This assertion will fail but we still have to return.
             }
 
-            fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
+            fn handle(&mut self, aid: &ActorId, message: &Message) -> Status {
                 if let Some(msg) = message.content_as::<bool>() {
                     self.handle_bool(aid, &*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
@@ -1291,7 +1304,7 @@ mod tests {
         // manually but when that bug goes away this will be even simpler.
         let aid = system.spawn(
             0 as usize,
-            |state: &mut usize, _aid: ActorId, message: &Message| {
+            |state: &mut usize, _aid: &ActorId, message: &Message| {
                 if let Some(_msg) = message.content_as::<i32>() {
                     assert_eq!(1 as usize, *state);
                     *state += 1;
@@ -1491,7 +1504,7 @@ mod tests {
 
     /// A helper handler used by `test_monitors` that expects to get a stopped message for the
     /// `aid` that was being monitored.
-    fn monitor_handler(state: &mut ActorId, _aid: ActorId, message: &Message) -> Status {
+    fn monitor_handler(state: &mut ActorId, _aid: &ActorId, message: &Message) -> Status {
         if let Some(msg) = message.content_as::<SystemMsg>() {
             match &*msg {
                 SystemMsg::Stopped(aid) => {
