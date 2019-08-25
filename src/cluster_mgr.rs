@@ -12,6 +12,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Encapsulates information on a connection to another actor system.
@@ -100,9 +101,9 @@ impl ClusterMgr {
     }
 
     /// Connects to another [`ClusterMgr`] with TCP at the given socket address.
-    pub fn connect(&self, address: SocketAddr) -> std::io::Result<()> {
+    pub fn connect(&self, address: SocketAddr, timeout: Duration) -> std::io::Result<()> {
         // FIXME Error handling needs to be improved.
-        let stream = TcpStream::connect(address)?;
+        let stream = TcpStream::connect_timeout(&address, timeout)?;
         Ok(self.start_tcp_threads(stream, address))
     }
 
@@ -195,14 +196,16 @@ mod tests {
     fn test_tcp_remote_connect() {
         init_test_log();
 
-        let socket_addr1 = SocketAddr::from(([0, 0, 0, 0], 7717));
+        let socket_addr1 = SocketAddr::from(([127, 0, 0, 1], 7717));
         let system1 = ActorSystem::create(ActorSystemConfig::default());
         let cluster_mgr1 = ClusterMgr::create(system1, socket_addr1);
 
-        let socket_addr2 = SocketAddr::from(([0, 0, 0, 0], 7727));
+        let socket_addr2 = SocketAddr::from(([127, 0, 0, 1], 7727));
         let system2 = ActorSystem::create(ActorSystemConfig::default());
         let _cluster_mgr2 = ClusterMgr::create(system2, socket_addr2);
 
-        cluster_mgr1.connect(socket_addr2).unwrap();
+        cluster_mgr1
+            .connect(socket_addr2, Duration::from_millis(2000))
+            .unwrap();
     }
 }

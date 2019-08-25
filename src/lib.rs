@@ -38,11 +38,10 @@
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
-//! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! let aid = system.spawn(
 //!     0 as usize,
-//!     |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
+//!     |_state: &mut usize, _aid: &ActorId, message: &Message| Status::Processed,
 //!  );
 //!
 //! aid.send(Message::new(11));
@@ -58,14 +57,13 @@
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
-//! system.init_current(); // Needed to call from outside of actor system threads.
 //!
 //! struct Data {
 //!     value: i32,
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(&mut self, _aid: ActorId, message: &bool) -> Status {
+//!     fn handle_bool(&mut self, _aid: &ActorId, message: &bool) -> Status {
 //!         if *message {
 //!             self.value += 1;
 //!         } else {
@@ -74,12 +72,12 @@
 //!         Status::Processed // This assertion will fail but we still have to return.
 //!     }
 //!
-//!     fn handle_i32(&mut self, _aid: ActorId, message: &i32) -> Status {
+//!     fn handle_i32(&mut self, _aid: &ActorId, message: &i32) -> Status {
 //!         self.value += *message;
 //!         Status::Processed // This assertion will fail but we still have to return.
 //!     }
 //!
-//!     fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
+//!     fn handle(&mut self, aid: &ActorId, message: &Message) -> Status {
 //!         if let Some(msg) = message.content_as::<bool>() {
 //!             self.handle_bool(aid, &*msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
@@ -148,7 +146,7 @@ mod tests {
         Pong,
     }
 
-    fn ping(_state: &mut usize, aid: ActorId, message: &Message) -> Status {
+    fn ping(_state: &mut usize, aid: &ActorId, message: &Message) -> Status {
         if let Some(msg) = message.content_as::<PingPong>() {
             match &*msg {
                 PingPong::Pong => {
@@ -172,7 +170,7 @@ mod tests {
         }
     }
 
-    fn pong(_state: &mut usize, _aid: ActorId, message: &Message) -> Status {
+    fn pong(_state: &mut usize, _aid: &ActorId, message: &Message) -> Status {
         if let Some(msg) = message.content_as::<PingPong>() {
             match &*msg {
                 PingPong::Ping(from) => {
@@ -189,7 +187,6 @@ mod tests {
     #[test]
     fn test_ping_pong() {
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.init_current();
         system.spawn(0, ping);
         system.await_shutdown();
 
