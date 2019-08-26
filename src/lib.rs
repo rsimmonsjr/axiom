@@ -45,6 +45,11 @@
 //!  );
 //!
 //! aid.send(Message::new(11));
+//! aid.send_new(17); // This will wrap the value in a Message for you!
+//!
+//! // We can also create and send separately, but use just send, not send_new
+//! let m = Message::new(19);
+//! aid.send(m);
 //! ```
 //!
 //! This code creates an actor system, spawns an actor and finally sends the actor a message.
@@ -69,12 +74,12 @@
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Status::Processed // This assertion will fail but we still have to return.
+//!         Status::Processed
 //!     }
 //!
 //!     fn handle_i32(&mut self, _context: &Context, message: &i32) -> Status {
 //!         self.value += *message;
-//!         Status::Processed // This assertion will fail but we still have to return.
+//!         Status::Processed
 //!     }
 //!
 //!     fn handle(&mut self, context: &Context, message: &Message) -> Status {
@@ -84,7 +89,7 @@
 //!             self.handle_i32(context, &*msg)
 //!         } else {
 //!             assert!(false, "Failed to dispatch properly");
-//!             Status::Stop // This assertion will fail but we still have to return.
+//!             Status::Stop
 //!         }
 //!     }
 //! }
@@ -92,10 +97,9 @@
 //! let data = Data { value: 0 };
 //! let aid = system.spawn( data, Data::handle);
 //!
-//! aid.send(Message::new(11));
-//! aid.send(Message::new(true));
-//! aid.send(Message::new(true));
-//! aid.send(Message::new(false));
+//! aid.send_new(11);
+//! aid.send_new(true);
+//! aid.send_new(false);
 //! ```
 //!
 //! This code creates an actor out of an arbitrary struct. Since the only requirement to make
@@ -115,24 +119,24 @@
 //!
 
 pub mod actors;
-pub mod cluster_mgr;
 pub mod message;
+pub mod system;
 
 pub use crate::actors::ActorError;
 pub use crate::actors::ActorId;
-pub use crate::actors::ActorSystem;
-pub use crate::actors::ActorSystemConfig;
 pub use crate::actors::Context;
 pub use crate::actors::Status;
-pub use crate::actors::SystemMsg;
-pub use crate::cluster_mgr::ClusterMgr;
 pub use crate::message::Message;
+pub use crate::system::ActorSystem;
+pub use crate::system::ActorSystemConfig;
+pub use crate::system::SystemMsg;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use log::LevelFilter;
     use serde::{Deserialize, Serialize};
+    use std::time::Duration;
 
     pub fn init_test_log() {
         let _ = env_logger::builder()
@@ -141,24 +145,233 @@ mod tests {
             .try_init();
     }
 
+    /// A function that just returns [`Status::Processed`] which can be used as a handler for
+    /// a simple actor.
+    pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> Status {
+        Status::Processed
+    }
+
+    /// A that waits for a certain number of messages arrived in a certain time and returns
+    /// an `Ok<()>` when they do or an `Err<String>` when not.
+    pub fn await_received(aid: &ActorId, count: u8, timeout_ms: u64) -> Result<(), String> {
+        use std::time::Instant;
+        let start = Instant::now();
+        let duration = Duration::from_millis(timeout_ms);
+        while aid.received().unwrap() < count as usize {
+            if Instant::elapsed(&start) > duration {
+                return Err(format!(
+                    "Timed out! count: {} timeout_ms: {}",
+                    count, timeout_ms
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Asserts that the required amount of messages arrived in the specified maximum time.
+    macro_rules! assert_await_received {
+        ($aid:expr, $count:expr, $timeout_ms:expr) => {
+            assert_eq!(Ok(()), await_received($aid, $count, $timeout_ms));
+        };
+    }
+
+    /// Asserts that the two passed [`ActorId`]s are identical, pointing to the samedata.
+    macro_rules! assert_same_aid {
+        ($aid1:expr, $aid2:expr) => {
+            assert!(Arc::ptr_eq(&$aid1.data, &$aid2.data));
+        };
+    }
+
     // ----------------- Test Cases -----------------
 
-    // ----------------- Full Example -----------------
-
-    /// Tests an example of two actors talking to each other.
     #[test]
-    fn test_ping_pong() {
-        #[derive(Serialize, Deserialize)]
-        enum PingPong {
-            Ping(ActorId),
-            Pong,
+    fn test_simplest_actor() {
+        init_test_log();
+
+        // This test shows how the simplest actor can be built and used. This actor uses a closure
+        // that simply returns that the message is processed.
+        let system = ActorSystem::create(ActorSystemConfig::default());
+
+        // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
+        // as of 2019-07-12 regarding type inference we have to specify all of the types manually
+        // but when that bug goes away this will be even simpler.
+        let aid = system.spawn(
+            0 as usize,
+            |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
+        );
+
+        // Send a message to the actor.
+        aid.send_new(11);
+
+        // Wait for the message to get there because test is asynchronous.
+        assert_await_received!(&aid, 1, 1000);
+        system.trigger_and_await_shutdown();
+    }
+
+    #[test]
+    fn test_simplest_struct_actor() {
+        init_test_log();
+
+        // This test shows how the simplest struct-based actor can be built and used. This actor
+        // merely returns that the message was processed.
+        let system = ActorSystem::create(ActorSystemConfig::default());
+
+        // We declare a basic struct that has a handle method that does basically nothing.
+        // Subsequently we will create that struct when we spawn the actor and then send the
+        // actor a message.
+        struct Data {}
+
+        impl Data {
+            fn handle(&mut self, _context: &Context, _message: &Message) -> Status {
+                Status::Processed
+            }
         }
 
+        let aid = system.spawn(Data {}, Data::handle);
+
+        // Send a message to the actor.
+        aid.send_new(11);
+
+        // Wait for the message to get there because test is asynchronous.
+        assert_await_received!(&aid, 1, 1000);
+        system.trigger_and_await_shutdown();
+    }
+
+    #[test]
+    fn test_dispatching_with_closure() {
+        init_test_log();
+
+        // This test shows how a closure based actor can be used and process different kinds of
+        // messages and mutate the actor's state based upon the messages passed. Note that the
+        // state of the actor is not available outside the actor itself.
+        let system = ActorSystem::create(ActorSystemConfig::default());
+
+        // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
+        // as of 2019-07-12 regarding type inference we have to specify all of the types manually
+        // but when that bug goes away this will be even simpler.
+        let starting_state: usize = 0 as usize;
+        let closure = |state: &mut usize, context: &Context, message: &Message| {
+            // Expected messages in the expected order.
+            let expected: Vec<i32> = vec![11, 13, 17];
+            // Attempt to downcast to expected message.
+            if let Some(_msg) = message.content_as::<SystemMsg>() {
+                *state += 1;
+                Status::Processed
+            } else if let Some(msg) = message.content_as::<i32>() {
+                assert_eq!(expected[*state - 1], *msg);
+                assert_eq!(*state, context.aid.received().unwrap());
+                *state += 1;
+                Status::Processed
+            } else if let Some(_msg) = message.content_as::<SystemMsg>() {
+                // Note that we put this last because it only is ever received once, we
+                // want the most frequently received messages first.
+                Status::Processed
+            } else {
+                assert!(false, "Failed to dispatch properly");
+                Status::Processed // This assertion will fail but we still have to return.
+            }
+        };
+
+        let aid = system.spawn(starting_state, closure);
+
+        // First message will always be the SystemMsg::Start.
+        assert_eq!(1, aid.sent().unwrap());
+
+        // Send some messages to the actor in the order required in the test. In a real actor
+        // its unlikely any order restriction would be needed. However this test makes sure that
+        // the messages are processed correctly.
+        aid.send_new(11 as i32);
+        assert_eq!(2, aid.sent().unwrap());
+        aid.send_new(13 as i32);
+        assert_eq!(3, aid.sent().unwrap());
+        aid.send_new(17 as i32);
+        assert_eq!(4, aid.sent().unwrap());
+
+        // Wait for all of the messages to get there because test is asynchronous.
+        assert_await_received!(&aid, 4, 1000);
+        system.trigger_and_await_shutdown();
+    }
+
+    #[test]
+    fn test_dispatching_with_struct() {
+        init_test_log();
+
+        // This test shows how a struct-based actor can be used and process different kinds of
+        // messages and mutate the actor's state based upon the messages passed. Note that the
+        // state of the actor is not available outside the actor itself.
+        let system = ActorSystem::create(ActorSystemConfig::default());
+
+        // We create a basic struct with a handler and use that handler to dispatch to other
+        // inherent methods in the struct. Note that we don't have to implement any traits here
+        // and there is nothing forcing the handler to be an inherent method.
+        struct Data {
+            value: i32,
+        }
+
+        impl Data {
+            fn handle_bool(&mut self, _context: &Context, message: &bool) -> Status {
+                if *message {
+                    self.value += 1;
+                } else {
+                    self.value -= 1;
+                }
+                Status::Processed // This assertion will fail but we still have to return.
+            }
+
+            fn handle_i32(&mut self, _context: &Context, message: &i32) -> Status {
+                self.value += *message;
+                Status::Processed // This assertion will fail but we still have to return.
+            }
+
+            fn handle(&mut self, context: &Context, message: &Message) -> Status {
+                if let Some(msg) = message.content_as::<bool>() {
+                    self.handle_bool(context, &*msg)
+                } else if let Some(msg) = message.content_as::<i32>() {
+                    self.handle_i32(context, &*msg)
+                } else if let Some(_msg) = message.content_as::<SystemMsg>() {
+                    // Note that we put this last because it only is ever received once, we
+                    // want the most frequently received messages first.
+                    Status::Processed
+                } else {
+                    assert!(false, "Failed to dispatch properly");
+                    Status::Stop // This assertion will fail but we still have to return.
+                }
+            }
+        }
+
+        let data = Data { value: 0 };
+
+        let aid = system.spawn(data, Data::handle);
+
+        // Send some messages to the actor.
+        aid.send_new(11);
+        aid.send_new(true);
+        aid.send_new(true);
+        aid.send_new(false);
+
+        // Wait for all of the messages to get there because this test is asynchronous.
+        assert_await_received!(&aid, 4, 1000);
+        system.trigger_and_await_shutdown();
+    }
+
+    #[derive(Serialize, Deserialize)]
+    pub enum PingPong {
+        Ping(ActorId),
+        Pong,
+    }
+
+    /// Tests an example of two actors where one starts another actor, the actors exchange
+    /// a simple ping-pong message and then the first actor triggers a shutdown when the
+    /// pong message is received. Note that these actors just use simple functions to accomplish
+    /// the task. They could have used functions on structures, closures, and even had a
+    /// multiple methods to handle the messages.
+    #[test]
+    fn test_ping_pong() {
         fn ping(_state: &mut usize, context: &Context, message: &Message) -> Status {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Pong => {
-                        ActorSystem::current().trigger_shutdown();
+                        context.system.trigger_shutdown();
                         Status::Processed
                     }
                     _ => panic!("Unexpected message"),
@@ -167,8 +380,9 @@ mod tests {
                 // start messages happen only once so we keep them last.
                 match &*msg {
                     SystemMsg::Start => {
-                        let pong_aid = ActorSystem::current().spawn(0, pong);
-                        pong_aid.send(Message::new(PingPong::Ping(context.aid.clone())));
+                        // Now we will spawn a new actor to handle our pong and send to it.
+                        let pong_aid = context.system.spawn(0, pong);
+                        pong_aid.send_new(PingPong::Ping(context.aid.clone()));
                         Status::Processed
                     }
                     _ => Status::Processed,
@@ -182,7 +396,7 @@ mod tests {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
-                        from.send(Message::new(PingPong::Pong));
+                        from.send_new(PingPong::Pong);
                         Status::Processed
                     }
                     _ => panic!("Unexpected message"),

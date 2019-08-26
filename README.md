@@ -16,7 +16,7 @@ implementation deriving inspiration from the good parts of those models.
   * You no longer have to call `system.init_current()` unless you are deserializing `ActorId`s.
   * `Processor` now takes a `&Context` instead of an `&ActorId`; the `aid` is now in the context.
   * `ActorSystem` reference is now baked into `Actor` and `ActorId` structure variables.
-  * Broken metrics methods like `received()` in `ActorId` have been removed. 
+  * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`. 
   * Not that the broken metrics will be replaced with a message in later versions. 
   * Changed internal maps to use `ccl` which expands dependencies.
 * 2019-08-11: 0.0.7 
