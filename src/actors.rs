@@ -457,6 +457,7 @@ impl fmt::Debug for ActorId {
 
 impl fmt::Display for ActorId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // For brevity sake we will use only last few letters of UUID
         match &self.data.name {
             Some(name) => write!(f, "{}:{}", name, self.data.uuid),
             None => write!(f, "{}", self.data.uuid),
@@ -477,12 +478,6 @@ impl Hash for ActorId {
 pub struct Context {
     pub aid: ActorId,
     pub system: ActorSystem,
-}
-
-impl fmt::Display for Context {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
-    }
 }
 
 /// A type for a function that processes messages for an actor.
