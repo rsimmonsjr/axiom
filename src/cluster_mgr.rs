@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
@@ -41,6 +42,8 @@ struct ClusterMgrData {
     listener: RwLock<Option<JoinHandle<()>>>,
     /// A map containing the data for all of the connections to this server.
     connections: RwLock<HashMap<Uuid, ConnectionData>>,
+    /// A flag to exit the loops.
+    running: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -56,6 +59,7 @@ impl ClusterMgr {
                 system,
                 listener: RwLock::new(None),
                 connections: RwLock::new(HashMap::new()),
+                running: AtomicBool::new(true),
             }),
         };
 
@@ -83,7 +87,7 @@ impl ClusterMgr {
             info!("{}: Listening for connections on {}.", sys_uuid, address);
 
             // FIXME Create a Shutdown Mechanism
-            loop {
+            while manager.data.running.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, socket_address)) => {
                         info!(
@@ -147,6 +151,7 @@ impl ClusterMgr {
     ) -> JoinHandle<()> {
         // This thread manages transmitting messages to the stream.
         let system = self.data.system.clone();
+        let manager = self.clone();
         thread::spawn(move || {
             system.init_current();
             let mut writer = BufWriter::new(&*stream);
@@ -154,7 +159,7 @@ impl ClusterMgr {
             // FIXME Put in a mechanism for soft shutdown.
             // FIXME Allow configurable timeout.
             // FIXME Errors are not currently handled!
-            loop {
+            while manager.data.running.load(Ordering::Relaxed) {
                 if let Ok(message) = receiver.receive_await_timeout(10) {
                     bincode::serialize_into(&mut writer, &message).unwrap();
                     writer.flush().unwrap();
@@ -171,6 +176,7 @@ impl ClusterMgr {
         sender: SeccSender<WireMessage>,
     ) -> JoinHandle<()> {
         let system = self.data.system.clone();
+        let manager = self.clone();
 
         // This thread manages receiving messages from the stream.
         // FIXME Errors are not currently handled!
@@ -178,7 +184,7 @@ impl ClusterMgr {
         thread::spawn(move || {
             system.init_current();
             let mut reader = BufReader::new(&*stream);
-            loop {
+            while manager.data.running.load(Ordering::Relaxed) {
                 let msg: WireMessage = bincode::deserialize_from(&mut reader).unwrap();
                 sender.send(msg).unwrap();
             }
@@ -204,6 +210,7 @@ mod tests {
         let system2 = ActorSystem::create(ActorSystemConfig::default());
         let _cluster_mgr2 = ClusterMgr::create(system2, socket_addr2);
 
+        thread::sleep(Duration::from_millis(5000));
         cluster_mgr1
             .connect(socket_addr2, Duration::from_millis(2000))
             .unwrap();

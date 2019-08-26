@@ -1210,8 +1210,20 @@ fn system_actor_processor(_: &mut bool, aid: &ActorId, message: &Message) -> Sta
                 }));
                 Status::Processed
             }
+            SystemActorMsg::FindByNameResult { .. } => {
+                println!("Got FindByNameResult");
+                Status::Processed
+            }
             // This actor only handles messages above
-            _ => Status::Processed,
+            // _ => Status::Processed,
+        }
+    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+        match &*msg {
+            SystemMsg::Start => Status::Processed,
+            _ => {
+                println!("Got {:?}", msg);
+                Status::Processed
+            }
         }
     } else {
         error!("Unhandled message received.");
