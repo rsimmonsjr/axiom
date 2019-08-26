@@ -14,6 +14,7 @@ implementation deriving inspiration from the good parts of those models.
 * 2019-??-??: 0.0.8 
   * Changed `Processor` to take a `&ActorId` rather than `ActorId` of it. Which will break users.
   * You no longer have to call `system.init_current()` unless you are deserializing `ActorId`s.
+  * `Processor` now takes a `&Context` instead of an `&ActorId`; the `aid` is now in the context.
   * `ActorSystem` reference is now baked into `Actor` and `ActorId` structure variables.
   * Broken metrics methods like `received()` in `ActorId` have been removed. 
   * Not that the broken metrics will be replaced with a message in later versions. 

@@ -41,7 +41,7 @@
 //!
 //! let aid = system.spawn(
 //!     0 as usize,
-//!     |_state: &mut usize, _aid: &ActorId, message: &Message| Status::Processed,
+//!     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
 //!  );
 //!
 //! aid.send(Message::new(11));
@@ -63,7 +63,7 @@
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(&mut self, _aid: &ActorId, message: &bool) -> Status {
+//!     fn handle_bool(&mut self, _context: &Context, message: &bool) -> Status {
 //!         if *message {
 //!             self.value += 1;
 //!         } else {
@@ -72,16 +72,16 @@
 //!         Status::Processed // This assertion will fail but we still have to return.
 //!     }
 //!
-//!     fn handle_i32(&mut self, _aid: &ActorId, message: &i32) -> Status {
+//!     fn handle_i32(&mut self, _context: &Context, message: &i32) -> Status {
 //!         self.value += *message;
 //!         Status::Processed // This assertion will fail but we still have to return.
 //!     }
 //!
-//!     fn handle(&mut self, aid: &ActorId, message: &Message) -> Status {
+//!     fn handle(&mut self, context: &Context, message: &Message) -> Status {
 //!         if let Some(msg) = message.content_as::<bool>() {
-//!             self.handle_bool(aid, &*msg)
+//!             self.handle_bool(context, &*msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
-//!             self.handle_i32(aid, &*msg)
+//!             self.handle_i32(context, &*msg)
 //!         } else {
 //!             assert!(false, "Failed to dispatch properly");
 //!             Status::Stop // This assertion will fail but we still have to return.
@@ -122,6 +122,7 @@ pub use crate::actors::ActorError;
 pub use crate::actors::ActorId;
 pub use crate::actors::ActorSystem;
 pub use crate::actors::ActorSystemConfig;
+pub use crate::actors::Context;
 pub use crate::actors::Status;
 pub use crate::actors::SystemMsg;
 pub use crate::cluster_mgr::ClusterMgr;
@@ -140,52 +141,57 @@ mod tests {
             .try_init();
     }
 
-    #[derive(Serialize, Deserialize)]
-    enum PingPong {
-        Ping(ActorId),
-        Pong,
-    }
+    // ----------------- Test Cases -----------------
 
-    fn ping(_state: &mut usize, aid: &ActorId, message: &Message) -> Status {
-        if let Some(msg) = message.content_as::<PingPong>() {
-            match &*msg {
-                PingPong::Pong => {
-                    ActorSystem::current().trigger_shutdown();
-                    Status::Processed
-                }
-                _ => panic!("Unexpected message"),
-            }
-        } else if let Some(msg) = message.content_as::<SystemMsg>() {
-            // start messages happen only once so we keep them last.
-            match &*msg {
-                SystemMsg::Start => {
-                    let pong_aid = ActorSystem::current().spawn(0, pong);
-                    pong_aid.send(Message::new(PingPong::Ping(aid.clone())));
-                    Status::Processed
-                }
-                _ => Status::Processed,
-            }
-        } else {
-            Status::Processed
-        }
-    }
+    // ----------------- Full Example -----------------
 
-    fn pong(_state: &mut usize, _aid: &ActorId, message: &Message) -> Status {
-        if let Some(msg) = message.content_as::<PingPong>() {
-            match &*msg {
-                PingPong::Ping(from) => {
-                    from.send(Message::new(PingPong::Pong));
-                    Status::Processed
-                }
-                _ => panic!("Unexpected message"),
-            }
-        } else {
-            Status::Processed
-        }
-    }
-
+    /// Tests an example of two actors talking to each other.
     #[test]
     fn test_ping_pong() {
+        #[derive(Serialize, Deserialize)]
+        enum PingPong {
+            Ping(ActorId),
+            Pong,
+        }
+
+        fn ping(_state: &mut usize, context: &Context, message: &Message) -> Status {
+            if let Some(msg) = message.content_as::<PingPong>() {
+                match &*msg {
+                    PingPong::Pong => {
+                        ActorSystem::current().trigger_shutdown();
+                        Status::Processed
+                    }
+                    _ => panic!("Unexpected message"),
+                }
+            } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                // start messages happen only once so we keep them last.
+                match &*msg {
+                    SystemMsg::Start => {
+                        let pong_aid = ActorSystem::current().spawn(0, pong);
+                        pong_aid.send(Message::new(PingPong::Ping(context.aid.clone())));
+                        Status::Processed
+                    }
+                    _ => Status::Processed,
+                }
+            } else {
+                Status::Processed
+            }
+        }
+
+        fn pong(_state: &mut usize, _context: &Context, message: &Message) -> Status {
+            if let Some(msg) = message.content_as::<PingPong>() {
+                match &*msg {
+                    PingPong::Ping(from) => {
+                        from.send(Message::new(PingPong::Pong));
+                        Status::Processed
+                    }
+                    _ => panic!("Unexpected message"),
+                }
+            } else {
+                Status::Processed
+            }
+        }
+
         let system = ActorSystem::create(ActorSystemConfig::default());
         system.spawn(0, ping);
         system.await_shutdown();
