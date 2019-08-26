@@ -1849,6 +1849,9 @@ mod tests {
                                 }
                                 _ => panic!("Unexpected message received!"),
                             }
+                        } else if let Some(_) = message.content_as::<SystemMsg>() {
+                            // We dont care about these.
+                            Status::Processed
                         } else {
                             panic!("Unexpected message received!");
                         }
@@ -1864,7 +1867,7 @@ mod tests {
                 .spawn_named(
                     "B",
                     19 as i32,
-                    |_state: &mut i32, _aid: &ActorId, message: &Message| {
+                    |_state: &mut i32, aid: &ActorId, message: &Message| {
                         if let Some(msg) = message.content_as::<SystemActorMsg>() {
                             match &*msg {
                                 SystemActorMsg::FindByNameResult { aid, .. } => {
@@ -1890,8 +1893,7 @@ mod tests {
                             match &*msg {
                                 SystemMsg::Start => {
                                     // FIXME Need new name for cluster wide.
-                                    let other =
-                                        ActorSystem::current().find_aid_by_name("A").unwrap();
+                                    let other = aid.system().find_aid_by_name("A").unwrap();
                                     other.send(Message::new(Op::Request));
                                     Status::Processed
                                 }
