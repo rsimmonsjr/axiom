@@ -866,6 +866,28 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
+    /// Helper to wait for 2 actor systems to shutdown or panic if they dont do so within
+    /// 2000 milliseconds.
+    fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
+        let timeout = Duration::from_millis(2000);
+
+        let h1 = thread::spawn(move || {
+            let timed_out = system1.await_shutdown_with_timeout(timeout).timed_out();
+            assert!(false, timed_out);
+            println!("System 1 Shutdown");
+        });
+
+        let h2 = thread::spawn(move || {
+            let timed_out = system2.await_shutdown_with_timeout(timeout).timed_out();
+            assert!(false, timed_out);
+            println!("System 2 Shutdown");
+        });
+
+        // Wait for the handles to be done.
+        h1.join().unwrap();
+        h2.join().unwrap();
+    }
+
     /// Tests that remote actors can send and recieve messages from each other.
     #[test]
     fn test_remote_actors() {
@@ -921,17 +943,7 @@ mod tests {
             },
         );
 
-        let h1 = thread::spawn(move || {
-            system1.await_shutdown();
-        });
-
-        let h2 = thread::spawn(move || {
-            system2.await_shutdown();
-        });
-
-        // Wait for the handles to be done.
-        h1.join().unwrap();
-        h2.join().unwrap();
+        await_two_system_shutdown(system1, system2);
     }
 
     /// Tests the ability to find an aid on a remote system by name using a SystemActor. This
@@ -998,22 +1010,6 @@ mod tests {
             },
         );
 
-        let timeout = Duration::from_millis(2000);
-
-        let h1 = thread::spawn(move || {
-            let timed_out = system1.await_shutdown_with_timeout(timeout).timed_out();
-            assert!(false, timed_out);
-            println!("System 1 Shutdown");
-        });
-
-        let h2 = thread::spawn(move || {
-            let timed_out = system2.await_shutdown_with_timeout(timeout).timed_out();
-            assert!(false, timed_out);
-            println!("System 2 Shutdown");
-        });
-
-        // Wait for the handles to be done.
-        h1.join().unwrap();
-        h2.join().unwrap();
+        await_two_system_shutdown(system1, system2);
     }
 }
