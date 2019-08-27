@@ -857,11 +857,79 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
+    /// Tests that remote actors can send and recieve messages from each other.
+    #[test]
+    fn test_remote_actors() {
+        // In this test our messages are just structs.
+        #[derive(Serialize, Deserialize, Debug)]
+        struct Request {
+            reply_to: ActorId,
+        }
+
+        #[derive(Serialize, Deserialize, Debug)]
+        struct Reply {}
+
+        init_test_log();
+
+        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        system1.init_current();
+        let aid = system1.spawn((), |_: &mut (), context: &Context, message: &Message| {
+            if let Some(msg) = message.content_as::<Request>() {
+                msg.reply_to.send_new(Reply {});
+                context.system.trigger_shutdown();
+                Status::Stop
+            } else if let Some(_) = message.content_as::<SystemMsg>() {
+                Status::Processed
+            } else {
+                panic!("Unexpected message received!");
+            }
+        });
+
+        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
+
+        let serialized = bincode::serialize(&aid).unwrap();
+        system2.spawn(
+            (),
+            move |_: &mut (), context: &Context, message: &Message| {
+                if let Some(_) = message.content_as::<Reply>() {
+                    context.system.trigger_shutdown();
+                    Status::Stop
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Start => {
+                            let target_aid: ActorId = bincode::deserialize(&serialized).unwrap();
+                            target_aid.send_new(Request {
+                                reply_to: context.aid.clone(),
+                            });
+                            Status::Processed
+                        }
+                        _ => Status::Processed,
+                    }
+                } else {
+                    panic!("Unexpected message received!");
+                }
+            },
+        );
+
+        let h1 = thread::spawn(move || {
+            system1.await_shutdown();
+        });
+
+        let h2 = thread::spawn(move || {
+            system2.await_shutdown();
+        });
+
+        // Wait for the handles to be done.
+        h1.join().unwrap();
+        h2.join().unwrap();
+    }
+
     /// Tests the ability to find an aid on a remote system by name and then send that actors
     /// a message over the remote channel. This will test, by proxy, a lot of core remote
     /// actor functionality.
-    #[test]
-    fn test_remote_actors() {
+    // #[test] FIXME NOT FINISHED
+    fn test_system_actor_find_by_name() {
         #[derive(Serialize, Deserialize, Debug)]
         enum Op {
             Request(ActorId),
@@ -872,7 +940,6 @@ mod tests {
             if let Some(msg) = message.content_as::<SystemActorMsg>() {
                 match &*msg {
                     SystemActorMsg::FindByNameResult { aid: found_aid, .. } => {
-                        println!("{} Processing: {:?}", context.aid, msg);
                         if let Some(tgt) = found_aid {
                             tgt.send(Message::new(Op::Request(context.aid.clone())));
                             Status::Processed
@@ -883,7 +950,6 @@ mod tests {
                     _ => panic!("Unexpected message received!"),
                 }
             } else if let Some(msg) = message.content_as::<Op>() {
-                println!("{} Processing: {:?}", context.aid, msg);
                 match &*msg {
                     Op::Reply => {
                         // All is good, shut down.
@@ -893,10 +959,8 @@ mod tests {
                     _ => panic!("Unexpected message received!"),
                 }
             } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                println!("{} Processing: {:?}", context.aid, msg);
                 match &*msg {
                     SystemMsg::Start => {
-                        println!("Sending FindByName");
                         context.system.send_to_system_actors(Message::new(
                             SystemActorMsg::FindByName {
                                 reply_to: context.aid.clone(),
@@ -912,21 +976,17 @@ mod tests {
             }
         }
 
-        fn replyer(_state: &mut (), context: &Context, message: &Message) -> Status {
+        fn replyer(_state: &mut (), _: &Context, message: &Message) -> Status {
             if let Some(msg) = message.content_as::<Op>() {
-                println!("{} Processing: {:?}", context.aid, msg);
                 match &*msg {
                     Op::Request(reply_to) => {
-                        // All is good, shut down.
                         reply_to.send_new(Op::Reply);
                         ActorSystem::current().trigger_shutdown();
                         Status::Stop
                     }
                     _ => panic!("Unexpected message received!"),
                 }
-            } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                println!("{} Processing: {:?}", context.aid, msg);
-                // We dont care about these.
+            } else if let Some(_) = message.content_as::<SystemMsg>() {
                 Status::Processed
             } else {
                 panic!("Unexpected message received!");

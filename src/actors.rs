@@ -72,10 +72,6 @@ pub enum ActorError {
     /// to be registered.
     NameAlreadyUsed(String),
 
-    /// Error Used for when an attempt is made to send a message to a remote actor. **This
-    /// error will be removed when remote actors are implemented.**
-    RemoteNotImplemented,
-
     /// Error returned when an ActorId is not local and a user is trying to do operations that
     /// only work on local ActorId instances.
     ActorIdNotLocal,
@@ -343,6 +339,7 @@ impl ActorId {
                 system,
             } => {
                 if stopped.load(Ordering::Relaxed) {
+                    // FIXME Add logging
                     Err(ActorError::ActorStopped)
                 } else {
                     sender.send_await(message).unwrap();
@@ -355,7 +352,17 @@ impl ActorId {
                     Ok(())
                 }
             }
-            _ => Err(ActorError::RemoteNotImplemented),
+            ActorSender::Remote { sender } => {
+                println!("Using remote sender");
+                sender
+                    .send_await(WireMessage::ActorMsg {
+                        actor_uuid: self.data.uuid,
+                        system_uuid: self.data.system_uuid,
+                        message,
+                    })
+                    .unwrap();
+                Ok(())
+            }
         }
     }
 
