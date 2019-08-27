@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Duration;
 use uuid::Uuid;
 
 // This holds the actor system in a threadlocal so that the user can obtain a clone of it
@@ -372,6 +373,15 @@ impl ActorSystem {
         let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
         let guard = mutex.lock().unwrap();
         let _condvar_guard = condvar.wait(guard).unwrap();
+    }
+
+    /// Awaits for the actor system to be shutdown using a relatively CPU minimal condvar as
+    /// a signalling mechanism. This function will block until all actor system threads have
+    /// stopped or the timeout has expired.
+    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> WaitTimeoutResult {
+        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
+        let guard = mutex.lock().unwrap();
+        condvar.wait_timeout(guard, timeout).unwrap().1
     }
 
     /// Triggers a shutdown of the system and returns only when all threads have joined.
@@ -988,13 +998,17 @@ mod tests {
             },
         );
 
+        let timeout = Duration::from_millis(2000);
+
         let h1 = thread::spawn(move || {
-            system1.await_shutdown();
+            let timed_out = system1.await_shutdown_with_timeout(timeout).timed_out();
+            assert!(false, timed_out);
             println!("System 1 Shutdown");
         });
 
         let h2 = thread::spawn(move || {
-            system2.await_shutdown();
+            let timed_out = system2.await_shutdown_with_timeout(timeout).timed_out();
+            assert!(false, timed_out);
             println!("System 2 Shutdown");
         });
 
