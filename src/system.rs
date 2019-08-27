@@ -665,6 +665,8 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[macro_use]
+    use crate::tests;
     use crate::tests::*;
     use std::thread;
     use std::time::Duration;

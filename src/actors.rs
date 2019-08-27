@@ -700,8 +700,9 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[macro_use]
+    use crate::tests;
     use crate::tests::*;
-    use crate::*;
     use std::thread;
 
     /// This test verifies that an actor's functions that retrieve basic info are working for

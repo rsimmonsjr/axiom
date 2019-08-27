@@ -169,8 +169,6 @@ mod tests {
     }
 
     /// Asserts that the required amount of messages arrived in the specified maximum time.
-    #[cfg(test)]
-    #[macro_export]
     macro_rules! assert_await_received {
         ($aid:expr, $count:expr, $timeout_ms:expr) => {
             assert_eq!(Ok(()), await_received($aid, $count, $timeout_ms));
@@ -178,8 +176,6 @@ mod tests {
     }
 
     /// Asserts that the two passed [`ActorId`]s are identical, pointing to the samedata.
-    #[cfg(test)]
-    #[macro_export]
     macro_rules! assert_same_aid {
         ($aid1:expr, $aid2:expr) => {
             assert!(Arc::ptr_eq(&$aid1.data, &$aid2.data));
