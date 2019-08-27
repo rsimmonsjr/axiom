@@ -132,6 +132,7 @@ pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
 
 #[cfg(test)]
+#[macro_use]
 mod tests {
     use super::*;
     use log::LevelFilter;
