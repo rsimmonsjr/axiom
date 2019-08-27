@@ -398,13 +398,13 @@ impl ActorId {
     /// The unique UUID for this actor within the entire cluster.
     #[inline]
     pub fn uuid(&self) -> Uuid {
-        self.data.uuid
+        self.data.uuid.clone()
     }
 
     /// The unique UUID for the actor system that this actor lives on.
     #[inline]
     pub fn system_uuid(&self) -> Uuid {
-        self.data.system_uuid
+        self.data.system_uuid.clone()
     }
 
     /// The name of the actor as assigned by the user at spawn time if any. Note that this name

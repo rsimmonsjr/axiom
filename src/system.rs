@@ -629,10 +629,14 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
     if let Some(msg) = message.content_as::<SystemActorMsg>() {
         match &*msg {
             SystemActorMsg::FindByName { reply_to, name } => {
-                println!("{} Processing: {:?}", context.aid, msg);
-                println!("AID: {:?}" , context.aid);
+                println!(
+                    "{} @ {} => Processing: {:?}",
+                    context.aid,
+                    context.system.uuid(),
+                    msg
+                );
                 let found = context.system.find_aid_by_name(&name);
-                println!("Found: {:?}" , found);
+                println!("{} => Found: {:?}", context.aid, found);
 
                 reply_to.send(Message::new(SystemActorMsg::FindByNameResult {
                     system_uuid: context.system.uuid(),
@@ -641,12 +645,7 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
                 }));
                 Status::Processed
             }
-            SystemActorMsg::FindByNameResult { .. } => {
-                println!("{} Processing: {:?}", context.aid, msg);
-                Status::Processed
-            }
-            // This actor only handles messages above
-            // _ => Status::Processed,
+            _ => Status::Processed,
         }
     } else if let Some(msg) = message.content_as::<SystemMsg>() {
         match &*msg {
@@ -925,42 +924,54 @@ mod tests {
         h2.join().unwrap();
     }
 
-    /// Tests the ability to find an aid on a remote system by name and then send that actors
-    /// a message over the remote channel. This will test, by proxy, a lot of core remote
-    /// actor functionality.
-    // #[test] FIXME NOT FINISHED
+    /// Tests the ability to find an aid on a remote system by name using a SystemActor. This
+    /// also
+    #[test]
     fn test_system_actor_find_by_name() {
-        #[derive(Serialize, Deserialize, Debug)]
-        enum Op {
-            Request(ActorId),
-            Reply,
-        }
+        init_test_log();
+        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        println!("System 1 ======> {}", system1.uuid());
+        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        println!("System 2 ======> {}", system2.uuid());
+        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
 
-        fn requestor(_: &mut (), context: &Context, message: &Message) -> Status {
-            if let Some(msg) = message.content_as::<SystemActorMsg>() {
-                match &*msg {
-                    SystemActorMsg::FindByNameResult { aid: found_aid, .. } => {
-                        if let Some(tgt) = found_aid {
-                            tgt.send(Message::new(Op::Request(context.aid.clone())));
-                            Status::Processed
-                        } else {
-                            panic!("The aid returned was a None");
+        let aid1 = system1
+            .spawn_named("A", (), |_: &mut (), context: &Context, _: &Message| {
+                println!(
+                    "system1 ==> {} @ {}",
+                    context.aid.uuid(),
+                    context.system.uuid()
+                );
+                context.system.trigger_shutdown();
+                Status::Processed
+            })
+            .unwrap();
+        system2.spawn(
+            (),
+            move |_: &mut (), context: &Context, message: &Message| {
+                println!(
+                    "system2 ==> {} @ {}",
+                    context.aid.uuid(),
+                    context.system.uuid()
+                );
+                if let Some(msg) = message.content_as::<SystemActorMsg>() {
+                    match &*msg {
+                        SystemActorMsg::FindByNameResult { aid: found, .. } => {
+                            if let Some(target) = found {
+                                println!("Processing FindByNameResult: {:?}", target);
+                                assert_eq!(target.uuid(), aid1.uuid());
+                                assert_eq!(false, target.is_local());
+                                target.send_new(true);
+                                context.system.trigger_shutdown();
+                                Status::Processed
+                            } else {
+                                panic!("Didn't find AID.");
+                            }
                         }
+                        _ => panic!("Unexpected message received!"),
                     }
-                    _ => panic!("Unexpected message received!"),
-                }
-            } else if let Some(msg) = message.content_as::<Op>() {
-                match &*msg {
-                    Op::Reply => {
-                        // All is good, shut down.
-                        ActorSystem::current().trigger_shutdown();
-                        Status::Stop
-                    }
-                    _ => panic!("Unexpected message received!"),
-                }
-            } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                match &*msg {
-                    SystemMsg::Start => {
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    if let SystemMsg::Start = &*msg {
                         context.system.send_to_system_actors(Message::new(
                             SystemActorMsg::FindByName {
                                 reply_to: context.aid.clone(),
@@ -968,46 +979,23 @@ mod tests {
                             },
                         ));
                         Status::Processed
+                    } else {
+                        panic!("Unexpected message received!");
                     }
-                    _ => Status::Processed,
+                } else {
+                    panic!("Unexpected message received!");
                 }
-            } else {
-                panic!("Unexpected message received!");
-            }
-        }
-
-        fn replyer(_state: &mut (), _: &Context, message: &Message) -> Status {
-            if let Some(msg) = message.content_as::<Op>() {
-                match &*msg {
-                    Op::Request(reply_to) => {
-                        reply_to.send_new(Op::Reply);
-                        ActorSystem::current().trigger_shutdown();
-                        Status::Stop
-                    }
-                    _ => panic!("Unexpected message received!"),
-                }
-            } else if let Some(_) = message.content_as::<SystemMsg>() {
-                Status::Processed
-            } else {
-                panic!("Unexpected message received!");
-            }
-        }
-
-        init_test_log();
-        let system1 = ActorSystem::create(ActorSystemConfig::default());
-        let system2 = ActorSystem::create(ActorSystemConfig::default());
-        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
+            },
+        );
 
         let h1 = thread::spawn(move || {
-            system1.init_current();
-            system1.spawn_named("A", (), replyer).unwrap();
             system1.await_shutdown();
+            println!("System 1 Shutdown");
         });
 
         let h2 = thread::spawn(move || {
-            system2.init_current();
-            system2.spawn_named("B", (), requestor).unwrap();
             system2.await_shutdown();
+            println!("System 2 Shutdown");
         });
 
         // Wait for the handles to be done.
