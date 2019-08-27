@@ -113,7 +113,7 @@ enum ActorSender {
 
     /// A sender that is used when an actor is on another actor system. The system will use
     /// networking and serialization to send messages to the actor.
-    Remote { _sender: SeccSender<WireMessage> },
+    Remote { sender: SeccSender<WireMessage> },
 }
 
 impl fmt::Debug for ActorSender {
@@ -196,15 +196,13 @@ impl<'de> Deserialize<'de> for ActorId {
             Some(aid) => Ok(aid.clone()),
             None => {
                 // The aid is remote so we instantiate it as such.
-                if let Some(remote) = system.remote_info(&serialized_form.system_uuid) {
+                if let Some(sender) = system.remote_sender(&serialized_form.system_uuid) {
                     Ok(ActorId {
                         data: Arc::new(ActorIdData {
                             uuid: serialized_form.uuid,
                             system_uuid: serialized_form.system_uuid,
                             name: serialized_form.name,
-                            sender: ActorSender::Remote {
-                                _sender: remote.sender.clone(),
-                            },
+                            sender: ActorSender::Remote { sender: sender },
                         }),
                     })
                 } else {
@@ -557,7 +555,7 @@ impl<F> Handler for F where F: (FnMut(&Context, &Message) -> Status) + Send + Sy
 /// An actual actor in the system. Please see overview and library documentation for more detail.
 pub(crate) struct Actor {
     /// The AID associated with this actor.
-    context: Context,
+    pub context: Context,
     /// Receiver for the actor channel.
     receiver: SeccReceiver<Message>,
     /// The function that processes messages that are sent to the actor wrapped in a closure to
@@ -663,7 +661,7 @@ impl Actor {
                     Status::Processed => {
                         if let Err(e) = actor.receiver.pop() {
                             error!("Error on pop(): {:?}.", e);
-                            actor.context.system.stop_actor(actor.context.aid.clone());
+                            actor.context.system.stop_actor(&actor.context.aid);
                         } else {
                             Actor::post_message_process(&actor);
                         }
@@ -671,7 +669,7 @@ impl Actor {
                     Status::Skipped => {
                         if let Err(e) = actor.receiver.skip() {
                             error!("Error on skip(): {:?}.", e);
-                            actor.context.system.stop(actor.context.aid.clone());
+                            actor.context.system.stop_actor(&actor.context.aid);
                         } else {
                             Actor::post_message_process(&actor);
                         }
@@ -679,13 +677,13 @@ impl Actor {
                     Status::ResetSkip => {
                         if let Err(e) = actor.receiver.pop_and_reset_skip() {
                             error!("Error on pop_and_reset_skip(): {:?}.", e);
-                            actor.context.system.stop(actor.context.aid.clone());
+                            actor.context.system.stop_actor(&actor.context.aid);
                         } else {
                             Actor::post_message_process(&actor);
                         }
                     }
                     Status::Stop => {
-                        actor.context.system.stop(actor.context.aid.clone());
+                        actor.context.system.stop_actor(&actor.context.aid);
                         // Even though the actor is stopping we want to pop the message to make
                         // sure that the metrics on the actor's channel are correct. Then we will
                         // stop the actor in the actor system.
@@ -702,9 +700,8 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::assert_await_received;
-    use crate::tests::assert_same_aid;
     use crate::tests::*;
+    use crate::*;
     use std::thread;
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
@@ -899,7 +896,4 @@ mod tests {
 
         system.trigger_and_await_shutdown();
     }
-
-    //----> Audit here
-
 }

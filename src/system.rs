@@ -6,7 +6,6 @@ use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::hash::Hasher;
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -230,9 +229,12 @@ impl ActorSystem {
         })
     }
 
-    /// Locates the [`RemoteInfo`] for a remote system uuid if it exists.
-    pub fn remote_info(&self, system_uuid: &Uuid) -> Option<RemoteInfo> {
-        self.data.remotes.get(system_uuid);
+    /// Locates the sender for the remote actor system with the given Uuid.
+    pub(crate) fn remote_sender(&self, system_uuid: &Uuid) -> Option<SeccSender<WireMessage>> {
+        self.data
+            .remotes
+            .get(system_uuid)
+            .map(|info| info.sender.clone())
     }
 
     /// Adds a connection to a remote actor system. The remote info contains the information
@@ -279,7 +281,7 @@ impl ActorSystem {
         let info = RemoteInfo {
             system_uuid: system_actor_aid.system_uuid().clone(),
             sender,
-            _receiver: receiver,
+            receiver: receiver,
             _handle: handle,
             system_actor_aid,
         };
@@ -663,8 +665,6 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::assert_await_received;
-    use crate::tests::assert_same_aid;
     use crate::tests::*;
     use std::thread;
     use std::time::Duration;
@@ -790,10 +790,10 @@ mod tests {
                         Status::Processed
                     }
                     SystemMsg::Start => Status::Processed,
-                    _ => panic!(false, "Received some other message!"),
+                    _ => panic!("Received some other message!"),
                 }
             } else {
-                panic!(false, "Received some other message!");
+                panic!("Received some other message!");
             }
         }
 
@@ -872,7 +872,7 @@ mod tests {
             Reply,
         }
 
-        fn requestor(_: &mut (), context: &Context, message: &Message) {
+        fn requestor(_: &mut (), context: &Context, message: &Message) -> Status {
             if let Some(msg) = message.content_as::<SystemActorMsg>() {
                 match &*msg {
                     SystemActorMsg::FindByNameResult { aid: found_aid, .. } => {
