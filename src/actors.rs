@@ -265,8 +265,7 @@ impl ActorId {
     ///
     /// # Examples
     /// ```
-    /// use axiom::actors::*;
-    /// use axiom::message::*;
+    /// use axiom::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
@@ -291,8 +290,7 @@ impl ActorId {
     /// call send.
     /// # Examples
     /// ```
-    /// use axiom::actors::*;
-    /// use axiom::message::*;
+    /// use axiom::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
@@ -302,7 +300,7 @@ impl ActorId {
     ///     |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
     ///  );
     ///
-    /// aid.send(11);
+    /// aid.send_new(11);
     /// ```
     pub fn send_new<T>(&self, value: T)
     where
@@ -322,8 +320,7 @@ impl ActorId {
     ///
     /// # Examples
     /// ```
-    /// use axiom::actors::*;
-    /// use axiom::message::*;
+    /// use axiom::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
@@ -369,8 +366,7 @@ impl ActorId {
     ///
     /// # Examples
     /// ```
-    /// use axiom::actors::*;
-    /// use axiom::message::*;
+    /// use axiom::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());

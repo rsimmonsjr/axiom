@@ -422,8 +422,7 @@ impl ActorSystem {
     ///
     /// # Examples
     /// ```
-    /// use axiom::actors::*;
-    /// use axiom::message::*;
+    /// use axiom::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
@@ -453,8 +452,7 @@ impl ActorSystem {
     ///
     /// # Examples
     /// ```
-    /// use axiom::actors::*;
-    /// use axiom::message::*;
+    /// use axiom::*;
     /// use std::sync::Arc;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
@@ -866,7 +864,7 @@ mod tests {
     fn test_remote_actors() {
         #[derive(Serialize, Deserialize, Debug)]
         enum Op {
-            Request,
+            Request(ActorId),
             Reply,
         }
 
@@ -876,7 +874,7 @@ mod tests {
                     SystemActorMsg::FindByNameResult { aid: found_aid, .. } => {
                         println!("{} Processing: {:?}", context.aid, msg);
                         if let Some(tgt) = found_aid {
-                            tgt.send(Message::new(Op::Request));
+                            tgt.send(Message::new(Op::Request(context.aid.clone())));
                             Status::Processed
                         } else {
                             panic!("The aid returned was a None");
@@ -918,8 +916,9 @@ mod tests {
             if let Some(msg) = message.content_as::<Op>() {
                 println!("{} Processing: {:?}", context.aid, msg);
                 match &*msg {
-                    Op::Request => {
+                    Op::Request(reply_to) => {
                         // All is good, shut down.
+                        reply_to.send_new(Op::Reply);
                         ActorSystem::current().trigger_shutdown();
                         Status::Stop
                     }
