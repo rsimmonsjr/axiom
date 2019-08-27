@@ -109,7 +109,7 @@ impl Data {
         } else if let Some(msg) = message.content_as::<i32>() {
             self.handle_i32(aid, &*msg)
         } else {
-            assert!(false, "Failed to dispatch properly");
+            panic!("Failed to dispatch properly");
             Status::Stop // This assertion will fail but we still have to return.
         }
     }

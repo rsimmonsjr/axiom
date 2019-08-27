@@ -233,7 +233,7 @@ mod tests {
         let msg = Message::new(value);
         let read_guard = msg.data.content.read().unwrap();
         match &*read_guard {
-            MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
+            MessageContent::Remote(_) => panic!("Expected a Local variant."),
             MessageContent::Local(content) => {
                 assert_eq!(value, *content.clone().downcast::<i32>().unwrap());
             }
@@ -247,13 +247,11 @@ mod tests {
         let msg = Message::from_arc(arc.clone());
         let read_guard = msg.data.content.read().unwrap();
         match &*read_guard {
-            MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
+            MessageContent::Remote(_) => panic!("Expected a Local variant."),
             MessageContent::Local(content) => {
-                assert_eq!(value, *content.clone().downcast::<i32>().unwrap());
-                assert!(Arc::ptr_eq(
-                    &arc,
-                    &content.clone().downcast::<i32>().unwrap()
-                ));
+                let downcasted = content.clone().downcast::<i32>().unwrap();
+                assert_eq!(value, *downcasted);
+                assert!(Arc::ptr_eq(&arc, &downcasted));
             }
         }
     }
@@ -299,7 +297,7 @@ mod tests {
             let read_guard = msg.data.content.read().unwrap();
             assert_eq!(hash, msg.data.type_id_hash);
             match &*read_guard {
-                MessageContent::Local(_) => assert!(false, "Expected a Remote variant."),
+                MessageContent::Local(_) => panic!("Expected a Remote variant."),
                 MessageContent::Remote(content) => {
                     assert_eq!(bincode::serialize(&value).unwrap(), *content);
                 }
@@ -315,7 +313,7 @@ mod tests {
             let read_guard = msg.data.content.read().unwrap();
             assert_eq!(hash, msg.data.type_id_hash);
             match &*read_guard {
-                MessageContent::Remote(_) => assert!(false, "Expected a Local variant."),
+                MessageContent::Remote(_) => panic!("Expected a Local variant."),
                 MessageContent::Local(content) => {
                     assert_eq!(value, *content.clone().downcast::<i32>().unwrap());
                 }

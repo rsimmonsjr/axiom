@@ -651,7 +651,6 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
             // _ => Status::Processed,
         }
     } else if let Some(msg) = message.content_as::<SystemMsg>() {
-        println!("{} Processing: {:?}", context.aid, msg);
         match &*msg {
             SystemMsg::Start => Status::Processed,
             _ => Status::Processed,
@@ -665,11 +664,8 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[macro_use]
-    use crate::tests;
     use crate::tests::*;
     use std::thread;
-    use std::time::Duration;
 
     /// This test verifies that an actor can be found by its uuid.
     #[test]
@@ -679,11 +675,11 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn(0, simple_handler);
         aid.send_new(11);
-        assert_await_received!(&aid, 2, 1000);
+        await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_uuid(&aid.uuid()).unwrap();
-        assert_same_aid!(&aid, found);
+        assert!(ActorId::ptr_eq(&aid, &found));
 
-        assert_eq!(None, system.find_aid_by_uuid(Uuid::new_v4()));
+        assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
         system.trigger_and_await_shutdown();
     }
@@ -694,11 +690,11 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn_named("A", 0, simple_handler);
+        let aid = system.spawn_named("A", 0, simple_handler).unwrap();
         aid.send_new(11);
-        assert_await_received!(&aid, 2, 1000);
+        await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_name(&aid.name().unwrap()).unwrap();
-        assert_same_aid!(&aid, found);
+        assert!(ActorId::ptr_eq(&aid, &found));
 
         assert_eq!(None, system.find_aid_by_name("B"));
 
@@ -713,12 +709,12 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn_named("A", 0, simple_handler);
+        let aid = system.spawn_named("A", 0, simple_handler).unwrap();
         aid.send_new(11);
-        assert_await_received!(&aid, 2, 1000);
+        await_received(&aid, 2, 1000).unwrap();
 
         // Now we stop the actor.
-        system.stop_actor(aid.clone());
+        system.stop_actor(&aid);
         assert_eq!(false, system.is_actor_alive(&aid));
 
         // Verify the actor is NOT in the maps.
@@ -742,7 +738,7 @@ mod tests {
 
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn(0, simple_handler);
-        assert_await_received!(&aid, 1, 1000); // Now it is started for sure.
+        await_received(&aid, 1, 1000).unwrap(); // Now it is started for sure.
 
         // We force remove the actor from the system without calling stop so now it cannot
         // be scheduled.
@@ -788,7 +784,7 @@ mod tests {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
-                        assert_same_aid!(state, aid);
+                        assert!(ActorId::ptr_eq(state, aid));
                         Status::Processed
                     }
                     SystemMsg::Start => Status::Processed,
@@ -816,10 +812,10 @@ mod tests {
         }
 
         // Stop the actor and it should be out of the map.
-        system.stop(monitored.clone());
-        assert_await_received!(&monitoring1, 2, 1000);
-        assert_await_received!(&monitoring2, 2, 1000);
-        assert_await_received!(&not_monitoring, 1, 1000);
+        system.stop_actor(&monitored);
+        await_received(&monitoring1, 2, 1000).unwrap();
+        await_received(&monitoring2, 2, 1000).unwrap();
+        await_received(&not_monitoring, 1, 1000).unwrap();
 
         system.trigger_and_await_shutdown();
     }
@@ -834,10 +830,10 @@ mod tests {
         let state = 0 as usize;
 
         let aid1 = system.spawn_named("A", state, simple_handler).unwrap();
-        assert_await_received!(&aid1, 1, 1000);
+        await_received(&aid1, 1, 1000).unwrap();
 
         let aid2 = system.spawn_named("B", state, simple_handler).unwrap();
-        assert_await_received!(&aid2, 1, 1000);
+        await_received(&aid2, 1, 1000).unwrap();
 
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
         // attempt returns an error to be handled.
@@ -846,19 +842,19 @@ mod tests {
 
         // Verify that the same actor has "A" name and is still up.
         let found1 = system.find_aid_by_name("A").unwrap();
-        assert!(true, system.is_actor_alive(aid1));
-        assert_same_aid!(&aid1, &found1);
+        assert_eq!(true, system.is_actor_alive(&aid1));
+        assert!(ActorId::ptr_eq(&aid1, &found1));
 
         // Stop "B" and verify that the actor system's maps are cleaned up.
         system.stop_actor(&aid2);
         assert_eq!(None, system.find_aid_by_name("B"));
-        assert_eq!(None, system.find_aid_by_uuid(&aid2.data.uuid));
+        assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid()));
 
         // Now we should be able to crate a new actor with the name bravo.
         let aid3 = system.spawn_named("B", state, simple_handler).unwrap();
-        assert_await_received!(&aid3, 1, 1000);
+        await_received(&aid3, 1, 1000).unwrap();
         let found2 = system.find_aid_by_name("B").unwrap();
-        assert_same_aid!(&aid1, &found2);
+        assert!(ActorId::ptr_eq(&aid3, &found2));
 
         system.trigger_and_await_shutdown();
     }

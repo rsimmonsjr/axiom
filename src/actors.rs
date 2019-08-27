@@ -485,6 +485,11 @@ impl ActorId {
     pub fn send_to_system_actors(message: Message) {
         ActorSystem::current().send_to_system_actors(message);
     }
+
+    /// Checks to see if the first and second aid actually point at the exact same data.
+    pub fn ptr_eq(left: &ActorId, right: &ActorId) -> bool {
+        Arc::ptr_eq(&left.data, &right.data)
+    }
 }
 
 impl fmt::Debug for ActorId {
@@ -700,8 +705,6 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[macro_use]
-    use crate::tests;
     use crate::tests::*;
     use std::thread;
 
@@ -713,7 +716,7 @@ mod tests {
 
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn(0, simple_handler);
-        assert_await_received!(&aid, 1, 1000);
+        await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
         assert_eq!(aid.data.uuid, aid.uuid());
@@ -730,13 +733,13 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn_named("A", 0, simple_handler);
-        assert_await_received!(&aid, 1, 1000);
+        let aid = system.spawn_named("A", 0, simple_handler).unwrap();
+        await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
         assert_eq!(aid.data.uuid, aid.uuid());
         assert_eq!(Some("A".to_string()), aid.data.name);
-        assert_eq!(aid.data.name, aid.name().unwrap());
+        assert_eq!(aid.data.name, aid.name());
 
         system.trigger_and_await_shutdown();
     }
@@ -764,7 +767,7 @@ mod tests {
 
         // In this case the resulting aid should be identical to the serialized one because
         // we have the same actor system in a threadlocal.
-        assert_same_aid!(&aid, &deserialized);
+        assert!(ActorId::ptr_eq(&aid, &deserialized));
 
         // If we deserialize on another actor system in another thread it should be a remote aid.
         let handle = thread::spawn(move || {
@@ -806,10 +809,10 @@ mod tests {
             0,
             |_state: &mut i32, context: &Context, message: &Message| {
                 if let Some(msg) = message.content_as::<ActorId>() {
-                    assert_same_aid!(context.aid, msg);
+                    assert!(ActorId::ptr_eq(&context.aid, &msg));
                 } else if let Some(msg) = message.content_as::<Op>() {
                     match &*msg {
-                        Op::Aid(a) => assert_same_aid!(context.aid, msg),
+                        Op::Aid(a) => assert!(ActorId::ptr_eq(&context.aid, &a)),
                     }
                 }
                 Status::Processed
@@ -821,7 +824,7 @@ mod tests {
         aid.send_new(Op::Aid(aid.clone()));
 
         // Wait for the start and our message to get there because test is asynchronous.
-        assert_await_received!(&aid, 2, 1000);
+        await_received(&aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
@@ -830,8 +833,8 @@ mod tests {
     fn test_cant_send_to_stopped() {
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn(0 as usize, simple_handler);
-        system.stop(aid.clone());
-        assert_eq!(false, system.is_alive(&aid));
+        system.stop_actor(&aid);
+        assert_eq!(false, system.is_actor_alive(&aid));
 
         // Make sure that the actor is actually stopped and cant get more messages.
         match aid.try_send(Message::new(42 as i32)) {
@@ -862,10 +865,10 @@ mod tests {
         });
 
         // Send a message to the actor.
-        assert!(true, system.is_actor_alive(&aid));
+        assert_eq!(true, system.is_actor_alive(&aid));
         aid.send_new(11 as i32);
-        assert_await_received!(&aid, 2, 1000); // Remember they always get Start!
-        assert!(false, system.is_actor_alive(&aid));
+        await_received(&aid, 2, 1000).unwrap(); // Remember they always get Start!
+        assert_eq!(false, system.is_actor_alive(&aid));
 
         system.trigger_and_await_shutdown();
     }
@@ -890,10 +893,10 @@ mod tests {
         });
 
         // Send a message to the actor.
-        assert!(true, system.is_actor_alive(&aid));
+        assert_eq!(true, system.is_actor_alive(&aid));
         aid.send_new(SystemMsg::Stop);
-        assert_await_received!(&aid, 2, 1000); // Remember they always get Start!
-        assert!(false, system.is_actor_alive(&aid));
+        await_received(&aid, 2, 1000).unwrap(); // Remember they always get Start!
+        assert_eq!(false, system.is_actor_alive(&aid));
 
         system.trigger_and_await_shutdown();
     }

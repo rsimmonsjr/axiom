@@ -88,7 +88,7 @@
 //!         } else if let Some(msg) = message.content_as::<i32>() {
 //!             self.handle_i32(context, &*msg)
 //!         } else {
-//!             assert!(false, "Failed to dispatch properly");
+//!             panic!("Failed to dispatch properly");
 //!             Status::Stop
 //!         }
 //!     }
@@ -132,7 +132,6 @@ pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
 
 #[cfg(test)]
-#[macro_use]
 mod tests {
     use super::*;
     use log::LevelFilter;
@@ -168,23 +167,6 @@ mod tests {
         }
         Ok(())
     }
-
-    /// Asserts that the required amount of messages arrived in the specified maximum time.
-    macro_rules! assert_await_received {
-        ($aid:expr, $count:expr, $timeout_ms:expr) => {
-            assert_eq!(Ok(()), await_received($aid, $count, $timeout_ms));
-        };
-    }
-
-    /// Asserts that the two passed [`ActorId`]s are identical, pointing to the samedata.
-    macro_rules! assert_same_aid {
-        ($aid1:expr, $aid2:expr) => {
-            assert!(Arc::ptr_eq(&$aid1.data, &$aid2.data));
-        };
-    }
-
-    // ----------------- Test Cases -----------------
-
     #[test]
     fn test_simplest_actor() {
         init_test_log();
@@ -205,7 +187,7 @@ mod tests {
         aid.send_new(11);
 
         // Wait for the message to get there because test is asynchronous.
-        assert_await_received!(&aid, 1, 1000);
+        await_received(&aid, 1, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
@@ -234,7 +216,7 @@ mod tests {
         aid.send_new(11);
 
         // Wait for the message to get there because test is asynchronous.
-        assert_await_received!(&aid, 1, 1000);
+        await_received(&aid, 1, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
@@ -268,8 +250,7 @@ mod tests {
                 // want the most frequently received messages first.
                 Status::Processed
             } else {
-                assert!(false, "Failed to dispatch properly");
-                Status::Processed // This assertion will fail but we still have to return.
+                panic!("Failed to dispatch properly");
             }
         };
 
@@ -289,7 +270,7 @@ mod tests {
         assert_eq!(4, aid.sent().unwrap());
 
         // Wait for all of the messages to get there because test is asynchronous.
-        assert_await_received!(&aid, 4, 1000);
+        await_received(&aid, 4, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
@@ -334,8 +315,7 @@ mod tests {
                     // want the most frequently received messages first.
                     Status::Processed
                 } else {
-                    assert!(false, "Failed to dispatch properly");
-                    Status::Stop // This assertion will fail but we still have to return.
+                    panic!("Failed to dispatch properly");
                 }
             }
         }
@@ -351,7 +331,7 @@ mod tests {
         aid.send_new(false);
 
         // Wait for all of the messages to get there because this test is asynchronous.
-        assert_await_received!(&aid, 4, 1000);
+        await_received(&aid, 4, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
