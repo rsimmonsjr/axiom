@@ -377,11 +377,19 @@ impl ActorSystem {
 
     /// Awaits for the actor system to be shutdown using a relatively CPU minimal condvar as
     /// a signalling mechanism. This function will block until all actor system threads have
-    /// stopped or the timeout has expired.
-    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> WaitTimeoutResult {
+    /// stopped or the timeout has expired. This function will return true if the system
+    /// shutdown without the timeout expiring and false if the system failed to shutdown before
+    /// the timeout expired or an error occurred.
+    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> bool {
         let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
         let guard = mutex.lock().unwrap();
-        condvar.wait_timeout(guard, timeout).unwrap().1
+        match condvar.wait_timeout(guard, timeout) {
+            Ok((_, timeout)) => timeout.timed_out(),
+            Err(err) => {
+                error!("Error while waiting for system to shitdown: {}", err);
+                false
+            }
+        }
     }
 
     /// Triggers a shutdown of the system and returns only when all threads have joined.
@@ -674,6 +682,34 @@ mod tests {
     use crate::tests::*;
     use std::thread;
 
+    // A helper to start two actor systems and connect them.
+    fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {
+        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        println!("System 1 ======> {}", system1.uuid());
+        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        println!("System 2 ======> {}", system2.uuid());
+        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
+        (system1, system2)
+    }
+
+    /// Helper to wait for 2 actor systems to shutdown or panic if they dont do so within
+    /// 2000 milliseconds.
+    fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
+        let timeout = Duration::from_millis(2000);
+
+        let h1 = thread::spawn(move || {
+            assert_eq!(true, system1.await_shutdown_with_timeout(timeout));
+        });
+
+        let h2 = thread::spawn(move || {
+            assert_eq!(true, system2.await_shutdown_with_timeout(timeout));
+        });
+
+        // Wait for the handles to be done.
+        h1.join().unwrap();
+        h2.join().unwrap();
+    }
+
     /// This test verifies that an actor can be found by its uuid.
     #[test]
     fn test_find_by_uuid() {
@@ -866,28 +902,6 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// Helper to wait for 2 actor systems to shutdown or panic if they dont do so within
-    /// 2000 milliseconds.
-    fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
-        let timeout = Duration::from_millis(2000);
-
-        let h1 = thread::spawn(move || {
-            let timed_out = system1.await_shutdown_with_timeout(timeout).timed_out();
-            assert!(false, timed_out);
-            println!("System 1 Shutdown");
-        });
-
-        let h2 = thread::spawn(move || {
-            let timed_out = system2.await_shutdown_with_timeout(timeout).timed_out();
-            assert!(false, timed_out);
-            println!("System 2 Shutdown");
-        });
-
-        // Wait for the handles to be done.
-        h1.join().unwrap();
-        h2.join().unwrap();
-    }
-
     /// Tests that remote actors can send and recieve messages from each other.
     #[test]
     fn test_remote_actors() {
@@ -901,8 +915,8 @@ mod tests {
         struct Reply {}
 
         init_test_log();
+        let (system1, system2) = start_and_connect_two_systems();
 
-        let system1 = ActorSystem::create(ActorSystemConfig::default());
         system1.init_current();
         let aid = system1.spawn((), |_: &mut (), context: &Context, message: &Message| {
             if let Some(msg) = message.content_as::<Request>() {
@@ -915,9 +929,6 @@ mod tests {
                 panic!("Unexpected message received!");
             }
         });
-
-        let system2 = ActorSystem::create(ActorSystemConfig::default());
-        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
 
         let serialized = bincode::serialize(&aid).unwrap();
         system2.spawn(
@@ -951,11 +962,7 @@ mod tests {
     #[test]
     fn test_system_actor_find_by_name() {
         init_test_log();
-        let system1 = ActorSystem::create(ActorSystemConfig::default());
-        println!("System 1 ======> {}", system1.uuid());
-        let system2 = ActorSystem::create(ActorSystemConfig::default());
-        println!("System 2 ======> {}", system2.uuid());
-        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
+        let (system1, system2) = start_and_connect_two_systems();
 
         let aid1 = system1
             .spawn_named("A", (), |_: &mut (), context: &Context, _: &Message| {
@@ -968,6 +975,7 @@ mod tests {
                 Status::Processed
             })
             .unwrap();
+
         system2.spawn(
             (),
             move |_: &mut (), context: &Context, message: &Message| {
