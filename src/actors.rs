@@ -1,7 +1,7 @@
-//! Implements actors and the actor system which are the core of Axiom.
+//! Implements actors and related types of Axiom.
 //!
 //! These are the core components that make up the features of Axiom. The actor model is designed
-//! to allow the user maximum flexibility. It makes use of [`axiom::secc`] as a channel for
+//! to allow the user maximum flexibility. It makes use of [`secc`] as a channel for
 //! messages to the actor as well as for the work channel for the worker threads. The actors
 //! can skip messages if they choose, enabling them to work as a *finite state machine* without
 //! having to move messages around. When the actor system starts up, a number of worker threads

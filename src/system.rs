@@ -1,3 +1,13 @@
+//! Implements actors system of Axiom.
+//!
+//! When the actor system starts up, a number of worker threads will be spawned that will
+//! constantly try to pull work from the work channel and process messages with the actor. The
+//! actor will then be re-sent to the work channel if there are more messages for that actor
+//! to process. This continues constantly until the actor system is shutdown and all actors
+//! are stopped.
+//!
+//! The user should refer to test cases and examples as "how-to" guides for using Axiom.
+
 use crate::actors::*;
 use crate::message::*;
 use ccl::dashmap::DashMap;
@@ -8,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, WaitTimeoutResult};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;

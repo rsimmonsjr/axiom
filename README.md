@@ -12,13 +12,12 @@ implementation deriving inspiration from the good parts of those models.
 
 ### What's New
 * 2019-??-??: 0.0.8 
-  * Changed `Processor` to take a `&ActorId` rather than `ActorId` of it. Which will break users.
+  * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
+  * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`. 
   * You no longer have to call `system.init_current()` unless you are deserializing `ActorId`s.
-  * `Processor` now takes a `&Context` instead of an `&ActorId`; the `aid` is now in the context.
-  * `ActorSystem` reference is now baked into `Actor` and `ActorId` structure variables.
   * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`. 
-  * Not that the broken metrics will be replaced with a message in later versions. 
-  * Changed internal maps to use `ccl` which expands dependencies.
+  * Changed internal maps to use `dashmap` which expands dependencies.
+  * New methods `send_new` and `try_send_new` are available to shorten boilerplate. 
 * 2019-08-11: 0.0.7 
   * Simplified some of the casts and cleaned up code. 
   * Fixed issues related to major bug in fixed in `secc-0.0.9`
@@ -65,18 +64,21 @@ let system = ActorSystem::create(ActorSystemConfig::default());
 
 let aid = system.spawn(
     0 as usize,
-    |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
+    |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
  );
 
 aid.send(Message::new(11));
+aid.send_new(17); // This will wrap the value in a Message for you!
+
+// We can also create and send separately using just `send`, not `send_new`.
+let m = Message::new(19);
+aid.send(m);
 ```
 
 This code creates an actor system, spawns an actor and finally sends the actor a message.
-This example uses a closure but any static function with the right signature will work 
-as well. 
-
-If you want to create an actor with a struct that is simple as well. Let's create one that 
-handles a couple of different message types:
+That is really all there is to it but of course it doesn't end there. If you want to create
+an actor with a struct that is simple as well. Let's create one that handles a couple of
+different message types:
 
 ```rust
 use axiom::*;
@@ -89,28 +91,28 @@ struct Data {
 }
 
 impl Data {
-    fn handle_bool(&mut self, _aid: ActorId, message: &bool) -> Status {
+    fn handle_bool(&mut self, message: &bool) -> Status {
         if *message {
             self.value += 1;
         } else {
             self.value -= 1;
         }
-        Status::Processed // This assertion will fail but we still have to return.
+        Status::Processed
     }
 
-    fn handle_i32(&mut self, _aid: ActorId, message: &i32) -> Status {
+    fn handle_i32(&mut self, message: &i32) -> Status {
         self.value += *message;
-        Status::Processed // This assertion will fail but we still have to return.
+        Status::Processed
     }
 
-    fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
+    fn handle(&mut self, _context: &Context, message: &Message) -> Status {
         if let Some(msg) = message.content_as::<bool>() {
-            self.handle_bool(aid, &*msg)
+            self.handle_bool(&*msg)
         } else if let Some(msg) = message.content_as::<i32>() {
-            self.handle_i32(aid, &*msg)
+            self.handle_i32(&*msg)
         } else {
             panic!("Failed to dispatch properly");
-            Status::Stop // This assertion will fail but we still have to return.
+            Status::Stop
         }
     }
 }
@@ -118,10 +120,9 @@ impl Data {
 let data = Data { value: 0 };
 let aid = system.spawn( data, Data::handle);
 
-aid.send(Message::new(11));
-aid.send(Message::new(true));
-aid.send(Message::new(true));
-aid.send(Message::new(false));
+aid.send_new(11);
+aid.send_new(true);
+aid.send_new(false);
 ```
 
 This code creates an actor out of an arbitrary struct. Since the only requirement to make
