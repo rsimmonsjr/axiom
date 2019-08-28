@@ -14,10 +14,16 @@ implementation deriving inspiration from the good parts of those models.
 * 2019-??-??: 0.0.8 
   * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
   * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`. 
-  * You no longer have to call `system.init_current()` unless you are deserializing `ActorId`s.
+  * `Processor` functions can get a reference to the `ActorId` of the actor from `Context`.
+  * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
+  * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
+  * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId`.
+  * Calling `system.init_current()` is unneeded unless deserializing `aid`s outside a `Processor`.
   * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`. 
-  * Changed internal maps to use `dashmap` which expands dependencies.
+  * Changed internal maps to use `dashmap` which expands dependencies but increases performance.
   * New methods `send_new` and `try_send_new` are available to shorten boilerplate. 
+  * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
+  * Added a method `system_actor_aid` to easily look up the `System` actor. 
 * 2019-08-11: 0.0.7 
   * Simplified some of the casts and cleaned up code. 
   * Fixed issues related to major bug in fixed in `secc-0.0.9`

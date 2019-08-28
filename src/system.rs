@@ -1,4 +1,4 @@
-//! Implements actors system of Axiom.
+//! Implements the [`ActorsSystem`] and related types of Axiom.
 //!
 //! When the actor system starts up, a number of worker threads will be spawned that will
 //! constantly try to pull work from the work channel and process messages with the actor. The
@@ -24,8 +24,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use uuid::Uuid;
 
-// This holds the actor system in a threadlocal so that the user can obtain a clone of it
-// if needed at any time.
+// Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`ActorId`] deserializer and
+// other types can obtain a clone if needed at any time. This will be automatically set for all
+// dispatcher threads that are processing messages with the actors.
 std::thread_local! {
     static ACTOR_SYSTEM: OnceCell<ActorSystem> = OnceCell::new();
 }
@@ -46,20 +47,25 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
+    /// FIXME Allow Actors to return stop reason values that must be serializable.
     Stopped(ActorId),
 }
 
-/// A type used for sending messages to other actor systems over TCP.
-/// FIXME this shouldn't need to be cloneable
+/// A type used for sending messages to other actor systems.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum WireMessage {
-    /// A message sent as a response to an actor system connecting to this actor system. The
-    /// message contains the UUID of the actor system sending the message.
-    Hello { system_actor_aid: ActorId },
-    /// A message from one actor to another.
+    /// A message sent as a response to another actor system connecting to this actor system.
+    Hello {
+        /// The `aid` for the system actor on the actor system sending the message.
+        system_actor_aid: ActorId,
+    },
+    /// A container for a message from one actor on one system to an actor on another system.
     ActorMsg {
+        /// The UUID of the [`ActorId`] that the message is being sent to.
         actor_uuid: Uuid,
+        /// The UUID of the system that the destination [`ActorId`] is local to.
         system_uuid: Uuid,
+        /// The message to be sent.
         message: Message,
     },
 }
@@ -71,7 +77,7 @@ pub enum WireMessage {
 pub struct ActorSystemConfig {
     /// The number of slots to allocate for the work channel. This is the channel that the worker
     /// threads use to schedule work on actors. The more traffic the actor system takes and the
-    /// longer the messages take to process, the bigger this should be. The default value is 100.
+    /// longer the messages take to process, the bigger this should be. The default value is 16.
     pub work_channel_size: u16,
     /// The size of the thread pool which governs how many worker threads there are in the system.
     /// The number of threads should be carefully considered to have sufficient concurrency but
@@ -88,7 +94,7 @@ impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
-            work_channel_size: 100,
+            work_channel_size: 16,
             thread_pool_size: 4,
             thread_wait_time: 10,
         }
@@ -116,22 +122,18 @@ struct ActorSystemData {
     // Stores the number of running threads with a Condvar that will be used to notify anyone
     // waiting on the condvar that all threads have exited.
     running_thread_count: Arc<(Mutex<u16>, Condvar)>,
-    /// Holds the [`Actor`] objects keyed by the [`ActorId`]. The [`std::sync::RwLock`] will be
-    /// locked for write only when a new actor is spawned but otherwise will be locked for read
-    /// by the [`ActorId`] instances when they attempt to send an actor to the work channel for
-    /// processing.
+    /// Holds the [`Actor`] objects keyed by the [`ActorId`].
     actors_by_aid: Arc<DashMap<ActorId, Arc<Actor>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
     aids_by_uuid: Arc<DashMap<Uuid, ActorId>>,
-    /// Holds a map of user assigned names to actor ids set when the actors were spawned.
+    /// Holds a map of user assigned names to actor ids set when the actors were spawned. Note
+    /// that only actors with an assigned name will be in this map.
     aids_by_name: Arc<DashMap<String, ActorId>>,
     /// Holds a map of monitors where the key is the `aid` of the actor being monitored and
     /// the value is a vector of `aid`s that are monitoring the actor.
     monitoring_by_monitored: Arc<DashMap<ActorId, Vec<ActorId>>>,
-    /// Holds a map of information objects about links to remote actor systems. The values in
-    /// this map hold the remote info combined with the join handle of the thread that is reading
-    /// from the receiver side of the channel.
+    /// Holds a map of information objects about links to remote actor systems.
     remotes: Arc<DashMap<Uuid, RemoteInfo>>,
 }
 
@@ -155,15 +157,14 @@ pub struct RemoteInfo {
 pub struct ActorSystem {
     /// This field means the user doesnt have to worry about declaring `Arc<ActorSystem>` all
     /// over the place but can just use `ActorSystem` instead. Wrapping the data also allows
-    /// `&self` semantics on the methods which feels more natural.
+    /// `&self` semantics on the methods which feels more ergonomic.
     data: Arc<ActorSystemData>,
 }
 
 impl ActorSystem {
     /// Creates an actor system with the given config. The user should benchmark how
     /// many slots in the work channel, the number of threads they need and so on in order
-    /// to satisfy the requirements of the software they are creating. Note that this will
-    /// be a standalone actor system unless [`start_tcp_listener`] or [`connect`] is called.
+    /// to satisfy the requirements of the software they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
             secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
@@ -201,6 +202,7 @@ impl ActorSystem {
         }
 
         // The system actor is a unique actor on the system registered with the name "System".
+        // This actor provides core functionality that other actors will utilize.
         system
             .spawn_named(&"System", false, system_actor_processor)
             .unwrap();
@@ -209,14 +211,15 @@ impl ActorSystem {
     }
 
     /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
-    /// threads constantly grab at the work channel trying to get the next actor off the channel.
-    /// When they get an actor they will process the message using the actor and then check to see
-    /// if the actor has more receivable messages. If it does then the actor will be re-sent to
-    /// the work channel to process the next message. This process allows thousands of actors to
-    /// run and not take up resources if they have no messages to process but also prevents one
+    /// threads constantly grab at the work channel trying to get the next [`ActorId`] off the
+    /// channel.  When they get an [`ActorId`] they will process the message using the actor
+    /// registed for that [`ActorId`] and then check to see if the actor has more receivable
+    /// messages. If the actor has more message then the [`ActorId`] for the actor will be re-sent
+    /// to the work channel to process the next message. This process allows thousands of actors
+    /// to run and not take up resources if they have no messages to process but also prevents one
     /// super busy actor from starving out other actors that get messages only occasionally.
     fn start_dispatcher_thread(&self) -> JoinHandle<()> {
-        // FIXME Issue #32: Add metrics to this to log a warning if messages or actors are spending too
+        // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
         // long in the channel.
         let system = self.clone();
         let receiver = self.data.receiver.clone();
@@ -249,7 +252,7 @@ impl ActorSystem {
     }
 
     /// Adds a connection to a remote actor system. The remote info contains the information
-    /// about the remote and when the connection is established the actor system will announce
+    /// about the remote. When the connection is established the actor system will announce
     /// itself to the the remote system with a [`WireMessage::Hello`].
     pub fn connect(
         &self,
@@ -309,7 +312,7 @@ impl ActorSystem {
         let (tx2, rx2) = secc::create::<WireMessage>(32, 10);
 
         // We will do this in 2 threads because one connect would block waiting on a message
-        // from another and deadlock.
+        // from the other actor system, causing a deadlock.
         let h1 = thread::spawn(move || system1.connect(tx1, rx2));
         let h2 = thread::spawn(move || system2.connect(tx2, rx1));
 
@@ -330,7 +333,7 @@ impl ActorSystem {
             } => {
                 if ActorSystem::current().uuid() == *system_uuid {
                     // FIXME errors not handled
-                    let aid = ActorId::find_by_uuid(&actor_uuid).unwrap();
+                    let aid = self.find_aid_by_uuid(&actor_uuid).unwrap();
                     aid.send(message.clone());
                 } else {
                     panic!("Error not handled yet");
@@ -342,9 +345,10 @@ impl ActorSystem {
         }
     }
 
-    /// Initialises this actor system to use for the current thread which is necessary if the
+    /// Initializes this actor system to use for the current thread which is necessary if the
     /// user wishes to serialize and deserialize [`ActorId`]s. Note that this can be called only
-    /// once per thread; on the second call it will panic.
+    /// once per thread; on the second call it will panic. This is automatically called for all
+    /// dispatcher threads that process actor messages.
     pub fn init_current(&self) {
         ACTOR_SYSTEM.with(|actor_system| {
             actor_system
@@ -353,7 +357,7 @@ impl ActorSystem {
         });
     }
 
-    /// Fetches a clone of a reference of the actor system for the current thread.
+    /// Fetches a clone of a reference to the actor system for the current thread.
     #[inline]
     pub fn current() -> ActorSystem {
         ACTOR_SYSTEM.with(|actor_system| {
@@ -545,7 +549,7 @@ impl ActorSystem {
     }
 
     /// Stops an actor by shutting down its channels and removing it from the actors list and
-    /// telling the actor id to not allow messages to be sent to the actor since the receiving
+    /// telling the [`ActorId`] to not allow messages to be sent to the actor since the receiving
     /// side of the actor is gone.
     ///
     /// This is something that should rarely be called from the outside as it is much better to
@@ -594,9 +598,9 @@ impl ActorSystem {
         aids_by_name.get(&name.to_string()).map(|aid| aid.clone())
     }
 
-    /// Returns the aid to the "System" actor for this actor system. The actor for the returned
-    /// aid is started when the actor system is started and provides additional actor system
-    /// functionality.
+    /// Returns the [`ActorId`] to the "System" actor for this actor system. The actor for
+    /// the returned `aid` is started when the actor system is started and provides additional
+    /// actor system functionality.
     pub fn system_actor_aid(&self) -> ActorId {
         self.find_aid_by_name(&"System").unwrap()
     }
@@ -640,7 +644,7 @@ enum SystemActorMsg {
     /// Finds an actor by name.
     FindByName { reply_to: ActorId, name: String },
 
-    /// A message sent as a result of calling [`ActorSystem::cluster_find_by_name()`].
+    /// A message sent as a reply to a [`SystemActorMsg::FindByName`] request.
     FindByNameResult {
         /// The UUID of the system that is responding.
         system_uuid: Uuid,
@@ -704,7 +708,6 @@ mod tests {
             assert_eq!(true, system2.await_shutdown_with_timeout(timeout));
         });
 
-        // Wait for the handles to be done.
         h1.join().unwrap();
         h2.join().unwrap();
     }
@@ -743,9 +746,8 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// This test verifies that the system does not panic if we schedule to an actor
-    /// that does not exist in the map. This can happen if the actor is stopped before
-    /// the system notifies the actor id that it is dead.
+    /// Tests that actors that are stopped are removed from all relevant lookup maps and
+    /// are reported as not being alive.
     #[test]
     fn test_stop_actor() {
         init_test_log();
@@ -771,9 +773,10 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// This test verifies that the system does not panic if we schedule to an actor
-    /// that does not exist in the map. This can happen if the actor is stopped before
-    /// the system notifies the actor id that it is dead.
+    /// This test verifies that the system does not panic if we schedule to an actor that does
+    /// not exist in the lookup map. This can happen if a message is sent to an actor after the
+    /// actor is stopped but before the system notifies the [`ActorId`] that the actor has been
+    /// stopped.
     #[test]
     fn test_actor_not_in_map() {
         init_test_log();
@@ -816,7 +819,7 @@ mod tests {
         }
     }
 
-    // Tests that monitors work in the actor system and send a message to monitorign actors
+    // Tests that monitors work in the actor system and send a message to monitoring actors
     // when monitored actors stop.
     #[test]
     fn test_monitors() {
@@ -853,7 +856,7 @@ mod tests {
             assert!(m_vec.contains(&monitoring2));
         }
 
-        // Stop the actor and it should be out of the map.
+        // Stop the actor and it should be out of the monitors map.
         system.stop_actor(&monitored);
         await_received(&monitoring1, 2, 1000).unwrap();
         await_received(&monitoring2, 2, 1000).unwrap();
@@ -887,7 +890,7 @@ mod tests {
         assert_eq!(true, system.is_actor_alive(&aid1));
         assert!(ActorId::ptr_eq(&aid1, &found1));
 
-        // Stop "B" and verify that the actor system's maps are cleaned up.
+        // Stop "B" and verify that the ActorSystem's maps are cleaned up.
         system.stop_actor(&aid2);
         assert_eq!(None, system.find_aid_by_name("B"));
         assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid()));
@@ -901,7 +904,7 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// Tests that remote actors can send and recieve messages from each other.
+    /// Tests that remote actors can send and recieve messages between each other.
     #[test]
     fn test_remote_actors() {
         // In this test our messages are just structs.

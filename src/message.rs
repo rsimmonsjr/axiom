@@ -1,3 +1,5 @@
+//! Defines the types associated with messages sent to actors.
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::{Any, TypeId};
@@ -7,7 +9,7 @@ use std::hash::Hasher;
 use std::sync::{Arc, RwLock};
 
 pub trait ActorMessage: Send + Sync + Any {
-    /// Get a JSON representation of `self`.
+    /// Gets a bincode serialized version of the message.
     fn to_bincode(&self) -> Vec<u8>;
 }
 
@@ -121,6 +123,8 @@ impl Message {
     /// let arc = Arc::new(11);
     /// let msg = Message::new(arc);
     /// ```
+    ///
+    /// FIXME Support this in `ActorId::send_new()` and `ActorId::try_send_new()`.
     pub fn from_arc<T>(value: Arc<T>) -> Message
     where
         T: 'static + ActorMessage,
@@ -219,6 +223,8 @@ mod tests {
         Arc::new(value)
     }
 
+    /// Tests the basic downcast functionality for an `ActorMessage` type which is owned by
+    /// the `Message`.
     #[test]
     fn test_actor_message_downcast() {
         let value = 11 as i32;
@@ -227,6 +233,8 @@ mod tests {
         assert_eq!(None, msg.downcast::<u32>());
     }
 
+    /// Tests that messages can be created with the `new` method and that they use `Local`
+    /// content for the message.
     #[test]
     fn test_message_new() {
         let value = 11 as i32;
@@ -240,6 +248,8 @@ mod tests {
         }
     }
 
+    /// Tests that messages can be easily created from an `Arc` in an efficient manner without
+    /// nested `Arc`s.
     #[test]
     fn test_message_from_arc() {
         let value = 11 as i32;
@@ -256,6 +266,7 @@ mod tests {
         }
     }
 
+    /// Tests the basic downcast functionality for a `Message` type.
     #[test]
     fn test_message_downcast() {
         let value = 11 as i32;
@@ -264,6 +275,7 @@ mod tests {
         assert_eq!(None, msg.content_as::<u32>());
     }
 
+    /// Tests that messages can be serialized and deserialized properly.
     #[test]
     fn test_message_serialization() {
         let value = 11 as i32;
@@ -284,6 +296,8 @@ mod tests {
         }
     }
 
+    /// Tests that `Message`s with `MessageContent::Remote` values are converted to
+    /// `MessageContent::Local` the first time that they are successfully downcasted.
     #[test]
     fn test_remote_to_local() {
         let value = 11 as i32;
