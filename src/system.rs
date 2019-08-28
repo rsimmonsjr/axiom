@@ -10,7 +10,7 @@
 
 use crate::actors::*;
 use crate::message::*;
-use ccl::dashmap::DashMap;
+use dashmap::DashMap;
 use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
