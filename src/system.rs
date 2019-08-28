@@ -1,4 +1,4 @@
-//! Implements the [`ActorsSystem`] and related types of Axiom.
+//! Implements the [`ActorSystem`] and related types of Axiom.
 //!
 //! When the actor system starts up, a number of worker threads will be spawned that will
 //! constantly try to pull work from the work channel and process messages with the actor. The
