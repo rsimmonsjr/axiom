@@ -1,7 +1,7 @@
 use crate::actors::*;
 use crate::message::*;
 use ccl::dashmap::DashMap;
-use log::{error, warn};
+use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
@@ -251,7 +251,7 @@ impl ActorSystem {
             system_actor_aid: self.system_actor_aid(),
         };
         sender.send(hello).unwrap();
-        println!("Sending hello from {}", self.data.uuid);
+        debug!("Sending hello from {}", self.data.uuid);
 
         // FIXME Add error handling and make timeout configurable.
         let system_actor_aid = match receiver.receive_await_timeout(100) {
@@ -320,7 +320,6 @@ impl ActorSystem {
             } => {
                 if ActorSystem::current().uuid() == *system_uuid {
                     // FIXME errors not handled
-                    println!("Got actor message {:?}", actor_uuid);
                     let aid = ActorId::find_by_uuid(&actor_uuid).unwrap();
                     aid.send(message.clone());
                 } else {
@@ -328,7 +327,7 @@ impl ActorSystem {
                 }
             }
             WireMessage::Hello { system_actor_aid } => {
-                println!("{:?} Got Hello from {}", self.data.uuid, system_actor_aid);
+                debug!("{:?} Got Hello from {}", self.data.uuid, system_actor_aid);
             }
         }
     }
@@ -384,7 +383,7 @@ impl ActorSystem {
         let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
         let guard = mutex.lock().unwrap();
         match condvar.wait_timeout(guard, timeout) {
-            Ok((_, timeout)) => timeout.timed_out(),
+            Ok((_, timeout)) => !timeout.timed_out(),
             Err(err) => {
                 error!("Error while waiting for system to shitdown: {}", err);
                 false
@@ -647,15 +646,7 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
     if let Some(msg) = message.content_as::<SystemActorMsg>() {
         match &*msg {
             SystemActorMsg::FindByName { reply_to, name } => {
-                println!(
-                    "{} @ {} => Processing: {:?}",
-                    context.aid,
-                    context.system.uuid(),
-                    msg
-                );
                 let found = context.system.find_aid_by_name(&name);
-                println!("{} => Found: {:?}", context.aid, found);
-
                 reply_to.send(Message::new(SystemActorMsg::FindByNameResult {
                     system_uuid: context.system.uuid(),
                     name: name.clone(),
@@ -685,9 +676,7 @@ mod tests {
     // A helper to start two actor systems and connect them.
     fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {
         let system1 = ActorSystem::create(ActorSystemConfig::default());
-        println!("System 1 ======> {}", system1.uuid());
         let system2 = ActorSystem::create(ActorSystemConfig::default());
-        println!("System 2 ======> {}", system2.uuid());
         ActorSystem::connect_with_channels(system1.clone(), system2.clone());
         (system1, system2)
     }
@@ -958,7 +947,8 @@ mod tests {
     }
 
     /// Tests the ability to find an aid on a remote system by name using a SystemActor. This
-    /// also
+    /// also serves as a test for cross system actor communication as well as testing broadcast
+    /// to multiple system actors in the cluster.
     #[test]
     fn test_system_actor_find_by_name() {
         init_test_log();
@@ -966,11 +956,6 @@ mod tests {
 
         let aid1 = system1
             .spawn_named("A", (), |_: &mut (), context: &Context, _: &Message| {
-                println!(
-                    "system1 ==> {} @ {}",
-                    context.aid.uuid(),
-                    context.system.uuid()
-                );
                 context.system.trigger_shutdown();
                 Status::Processed
             })
@@ -979,18 +964,11 @@ mod tests {
         system2.spawn(
             (),
             move |_: &mut (), context: &Context, message: &Message| {
-                println!(
-                    "system2 ==> {} @ {}",
-                    context.aid.uuid(),
-                    context.system.uuid()
-                );
                 if let Some(msg) = message.content_as::<SystemActorMsg>() {
                     match &*msg {
                         SystemActorMsg::FindByNameResult { aid: found, .. } => {
                             if let Some(target) = found {
-                                println!("Processing FindByNameResult: {:?}", target);
                                 assert_eq!(target.uuid(), aid1.uuid());
-                                assert_eq!(false, target.is_local());
                                 target.send_new(true);
                                 context.system.trigger_shutdown();
                                 Status::Processed

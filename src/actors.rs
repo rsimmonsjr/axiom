@@ -353,7 +353,6 @@ impl ActorId {
                 }
             }
             ActorSender::Remote { sender } => {
-                println!("Using remote sender");
                 sender
                     .send_await(WireMessage::ActorMsg {
                         actor_uuid: self.data.uuid,
