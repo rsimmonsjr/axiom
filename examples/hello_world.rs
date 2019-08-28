@@ -20,9 +20,9 @@ enum HelloMessages {
 }
 
 /// This is the handler that will be used by the actor.
-fn hello(_state: &mut bool, aid: &ActorId, message: &Message) -> Status {
+fn hello(_state: &mut bool, context: &Context, message: &Message) -> Status {
     if let Some(_msg) = message.content_as::<HelloMessages>() {
-        println!("Hello World from Actor: {:?}", aid);
+        println!("Hello World from Actor: {:?}", context.aid);
         ActorSystem::current().trigger_shutdown();
     }
     Status::Processed

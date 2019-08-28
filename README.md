@@ -12,12 +12,18 @@ implementation deriving inspiration from the good parts of those models.
 
 ### What's New
 * 2019-??-??: 0.0.8 
-  * Changed `Processor` to take a `&ActorId` rather than `ActorId` of it. Which will break users.
-  * You no longer have to call `system.init_current()` unless you are deserializing `ActorId`s.
-  * `ActorSystem` reference is now baked into `Actor` and `ActorId` structure variables.
-  * Broken metrics methods like `received()` in `ActorId` have been removed. 
-  * Not that the broken metrics will be replaced with a message in later versions. 
-  * Changed internal maps to use `ccl` which expands dependencies.
+  * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
+  * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`. 
+  * `Processor` functions can get a reference to the `ActorId` of the actor from `Context`.
+  * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
+  * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
+  * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId`.
+  * Calling `system.init_current()` is unneeded unless deserializing `aid`s outside a `Processor`.
+  * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`. 
+  * Changed internal maps to use `dashmap` which expands dependencies but increases performance.
+  * New methods `send_new` and `try_send_new` are available to shorten boilerplate. 
+  * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
+  * Added a method `system_actor_aid` to easily look up the `System` actor. 
 * 2019-08-11: 0.0.7 
   * Simplified some of the casts and cleaned up code. 
   * Fixed issues related to major bug in fixed in `secc-0.0.9`
@@ -64,18 +70,21 @@ let system = ActorSystem::create(ActorSystemConfig::default());
 
 let aid = system.spawn(
     0 as usize,
-    |_state: &mut usize, _aid: ActorId, message: &Message| Status::Processed,
+    |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
  );
 
 aid.send(Message::new(11));
+aid.send_new(17); // This will wrap the value in a Message for you!
+
+// We can also create and send separately using just `send`, not `send_new`.
+let m = Message::new(19);
+aid.send(m);
 ```
 
 This code creates an actor system, spawns an actor and finally sends the actor a message.
-This example uses a closure but any static function with the right signature will work 
-as well. 
-
-If you want to create an actor with a struct that is simple as well. Let's create one that 
-handles a couple of different message types:
+That is really all there is to it but of course it doesn't end there. If you want to create
+an actor with a struct that is simple as well. Let's create one that handles a couple of
+different message types:
 
 ```rust
 use axiom::*;
@@ -88,28 +97,28 @@ struct Data {
 }
 
 impl Data {
-    fn handle_bool(&mut self, _aid: ActorId, message: &bool) -> Status {
+    fn handle_bool(&mut self, message: &bool) -> Status {
         if *message {
             self.value += 1;
         } else {
             self.value -= 1;
         }
-        Status::Processed // This assertion will fail but we still have to return.
+        Status::Processed
     }
 
-    fn handle_i32(&mut self, _aid: ActorId, message: &i32) -> Status {
+    fn handle_i32(&mut self, message: &i32) -> Status {
         self.value += *message;
-        Status::Processed // This assertion will fail but we still have to return.
+        Status::Processed
     }
 
-    fn handle(&mut self, aid: ActorId, message: &Message) -> Status {
+    fn handle(&mut self, _context: &Context, message: &Message) -> Status {
         if let Some(msg) = message.content_as::<bool>() {
-            self.handle_bool(aid, &*msg)
+            self.handle_bool(&*msg)
         } else if let Some(msg) = message.content_as::<i32>() {
-            self.handle_i32(aid, &*msg)
+            self.handle_i32(&*msg)
         } else {
-            assert!(false, "Failed to dispatch properly");
-            Status::Stop // This assertion will fail but we still have to return.
+            panic!("Failed to dispatch properly");
+            Status::Stop
         }
     }
 }
@@ -117,10 +126,9 @@ impl Data {
 let data = Data { value: 0 };
 let aid = system.spawn( data, Data::handle);
 
-aid.send(Message::new(11));
-aid.send(Message::new(true));
-aid.send(Message::new(true));
-aid.send(Message::new(false));
+aid.send_new(11);
+aid.send_new(true);
+aid.send_new(false);
 ```
 
 This code creates an actor out of an arbitrary struct. Since the only requirement to make
