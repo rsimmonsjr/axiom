@@ -37,8 +37,7 @@ where
 
 /// The message content in a message.
 pub enum MessageContent {
-    // FIXME Investigate if it is possible to get rid of the inner arc since the message will
-    // always be in an Arc anyway.
+    // FIXME (Issue #66) Investigate if it is possible to get rid of the inner arc.
     /// The message is a local message.
     Local(Arc<dyn ActorMessage + 'static>),
     /// The message is from remote and has the given hash of a [`std::any::TypeId`] and the
@@ -124,7 +123,7 @@ impl Message {
     /// let msg = Message::new(arc);
     /// ```
     ///
-    /// FIXME Support this in `ActorId::send_new()` and `ActorId::try_send_new()`.
+    /// FIXME (Issue #64) Support this in `ActorId::send_new()` and `ActorId::try_send_new()`.
     pub fn from_arc<T>(value: Arc<T>) -> Message
     where
         T: 'static + ActorMessage,
