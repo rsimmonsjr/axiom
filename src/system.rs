@@ -932,6 +932,7 @@ mod tests {
                 panic!("Unexpected message received!");
             }
         });
+        await_received(&aid, 1, 1000).unwrap();
 
         let serialized = bincode::serialize(&aid).unwrap();
         system2.spawn(
@@ -974,6 +975,7 @@ mod tests {
                 Status::Processed
             })
             .unwrap();
+        await_received(&aid1, 1, 1000).unwrap();
 
         system2.spawn(
             (),
