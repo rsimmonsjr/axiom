@@ -20,6 +20,7 @@
 //!   * New methods `send_new` and `try_send_new` are available to shorten boilerplate.
 //!   * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
 //!   * Added a method `system_actor_aid` to easily look up the `System` actor.
+//!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
 //!
 //! [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 //!

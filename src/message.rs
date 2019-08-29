@@ -36,7 +36,7 @@ where
 }
 
 /// The message content in a message.
-pub enum MessageContent {
+enum MessageContent {
     // FIXME (Issue #66) Investigate if it is possible to get rid of the inner arc.
     /// The message is a local message.
     Local(Arc<dyn ActorMessage + 'static>),
