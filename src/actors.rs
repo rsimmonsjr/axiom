@@ -183,7 +183,8 @@ impl<'de> Deserialize<'de> for ActorId {
         let system = ActorSystem::current();
         // We will look up the aid in the table and return it to the caller if it exists otherwise
         // it must be a remote aid.
-        // FIXME Add error if the ActorSystem UUID is the same but the `ActorId` is not found.
+        // FIXME (Issue #67) Add error if the system_uuid is the same but the `ActorId` is not
+        // found.
         match system.find_aid_by_uuid(&serialized_form.uuid) {
             Some(aid) => Ok(aid.clone()),
             None => {
@@ -331,11 +332,10 @@ impl ActorId {
                 system,
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    // FIXME Add logging that warns if a user sends to a stopped actor.
                     Err(ActorError::ActorStopped)
                 } else {
                     sender.send_await(message).unwrap();
-                    // FIXME Investigate if this could race the dispatcher threads.
+                    // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
                     if sender.receivable() == 1 {
                         system.schedule(self.clone());
                     };
@@ -560,7 +560,7 @@ impl Actor {
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
-        // FIXME: Issue #33: Let the user pass the size of the channel queue when creating.
+        // FIXME: (Issue #33) Let the user pass the size of the channel queue when creating.
         let (sender, receiver) = secc::create::<Message>(32, 10);
 
         // The sender will be put inside the actor id.
@@ -597,9 +597,7 @@ impl Actor {
 
     /// This method is called to finish up the procedure for processing a message
     ///
-    /// FIXME This should be converted to use a reductions system to process x number
-    /// of messages until a certain configurable time elapses to improve performance with
-    /// actors that get tons of super fast messages.
+    /// FIXME (Issue #69) Optimize dispatcher handling for actors that get lots of small messages.
     fn post_message_process(actor: &Arc<Self>) {
         // We check to see if the actor still has pending messages and if so we re-schedule it
         // for work at the back of the work channel. This prevents actors that get tons of
@@ -721,8 +719,8 @@ mod tests {
     /// `aid`s on the same actor system should just be the same `aid` as well as the fact that
     /// when deserialized on other actor systems the `aid`'s sender should be a `remote`.
     ///
-    /// FIXME Currently if the actor systems are not connected a panic will occur but should just
-    /// return a deserialize error.
+    /// FIXME (Issue #70) Return error when deserializing an ActorId if a remote is not connected
+    /// instead of panic.
     #[test]
     fn test_actor_id_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default());
@@ -852,7 +850,7 @@ mod tests {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default());
 
-        // FIXME See if there is some way to support processors without state without () stuff.
+        // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system.spawn((), |_: &mut (), _: &Context, message: &Message| {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {

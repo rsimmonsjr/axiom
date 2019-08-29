@@ -47,7 +47,7 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
-    /// FIXME Allow Actors to return stop reason values that must be serializable.
+    /// FIXME (Issue #73) Allow Actors to return stop reason values that must be serializable.
     Stopped(ActorId),
 }
 
@@ -148,7 +148,7 @@ pub struct RemoteInfo {
     /// The AID to the system actor for the remote system.
     pub system_actor_aid: ActorId,
     /// The handle returned by the thread processing remote messages.
-    /// FIXME Shut this down in shutdown but dont expose it.
+    /// FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
     _handle: JoinHandle<()>,
 }
 
@@ -266,7 +266,7 @@ impl ActorSystem {
         sender.send(hello).unwrap();
         debug!("Sending hello from {}", self.data.uuid);
 
-        // FIXME Add error handling and make timeout configurable.
+        // FIXME (Issue #75) Make error handling in ActorSystem::connect more robust.
         let system_actor_aid = match receiver.receive_await_timeout(100) {
             Ok(message) => match message {
                 WireMessage::Hello { system_actor_aid } => system_actor_aid,
@@ -282,7 +282,7 @@ impl ActorSystem {
         let sys_uuid = system_actor_aid.system_uuid().clone();
         let handle = thread::spawn(move || {
             system.init_current();
-            // FIXME Add soft-close mechanism.
+            // FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
             loop {
                 match receiver_clone.receive_await_timeout(thread_timeout) {
                     Err(_) => (), // not an error, just loop and try again.
@@ -324,6 +324,8 @@ impl ActorSystem {
     /// A helper function to process a wire message from another actor system. The passed uuid
     /// is the uuid of the remote that sent the message and the sender is the sender to that
     /// remote to facilitate replying to the remote.
+    ///
+    /// FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
     fn process_wire_message(&self, _uuid: &Uuid, wire_message: &WireMessage) {
         match wire_message {
             WireMessage::ActorMsg {
@@ -332,7 +334,6 @@ impl ActorSystem {
                 message,
             } => {
                 if ActorSystem::current().uuid() == *system_uuid {
-                    // FIXME errors not handled
                     let aid = self.find_aid_by_uuid(&actor_uuid).unwrap();
                     aid.send(message.clone());
                 } else {
@@ -555,7 +556,7 @@ impl ActorSystem {
     /// This is something that should rarely be called from the outside as it is much better to
     /// send the actor a [`SystemMsg::Stop`] message and allow it to stop gracefully.
     ///
-    /// FIXME Add ability for an actor to report to monitors why it stopped.
+    /// FIXME (Issue #73) Add ability for Actors to return a reason that they stopped via a trait.
     pub fn stop_actor(&self, aid: &ActorId) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
@@ -618,7 +619,7 @@ impl ActorSystem {
     }
 
     /// Asynchronously send a message to the system actors on all connected actor systems.
-    /// FIXME Add try_send ability and make actor and secc error types extend std::Error.
+    /// FIXME (Issue #72) Add try_send ability.
     pub fn send_to_system_actors(&self, message: Message) {
         let remotes = &*self.data.remotes;
         for iter_ref in remotes.iter() {
@@ -931,6 +932,7 @@ mod tests {
                 panic!("Unexpected message received!");
             }
         });
+        await_received(&aid, 1, 1000).unwrap();
 
         let serialized = bincode::serialize(&aid).unwrap();
         system2.spawn(
@@ -973,6 +975,7 @@ mod tests {
                 Status::Processed
             })
             .unwrap();
+        await_received(&aid1, 1, 1000).unwrap();
 
         system2.spawn(
             (),
