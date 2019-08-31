@@ -9,11 +9,6 @@
 //!   * Concurrent, Independent processing.
 //!   * Ability to send messages to self; stopping eating and getting hungry send to self.
 //!   * Ability to send messages after a specified time frame. (FIXME IMPLEMENT!)
-//!   * Ability to move memory between actors using Rust unique move dynamics. The movement of
-//!   `Fork` objects demonstrates how memory move semantics of Rust allow an actor to transfer
-//!   things like tokens from one actor to another in a memory-safe manner. The `Fork` itself is
-//!   moved around the actors by being passed as a message. There is no chance that the original
-//!   owner could have the fork and this actor as well.
 //!  
 //! FIXME There should be some way to abort the whole program other than panicing one actor.
 
@@ -116,7 +111,7 @@ impl Philosopher {
     /// Helper to clean a dirty fork and then send a fork to a requesting party. If the fork is
     /// sent then this function will return a `Processed` status but if the fork is not sent
     /// because it is already clean then it will return `Skipped`.
-    fn clean_and_send_fork(&mut self, context: &Context, requester: ActorId) -> Status {
+    fn clean_and_send_fork(&mut self, context: &Context, requester: &ActorId) -> Status {
         // Determine which fork was requested.
         let requested_fork = self.find_fork_for_aid(context, &requester);
         match requested_fork {
@@ -136,7 +131,7 @@ impl Philosopher {
     /// Handles a request for a fork. This request will be sent by the philosopher's neighbors
     /// and will result in either the fork being sent or the request being skipped to be
     /// processed later if the requested fork is clean.
-    fn fork_requested(&mut self, context: &Context, requester: ActorId) -> Status {
+    fn fork_requested(&mut self, context: &Context, requester: &ActorId) -> Status {
         match &self.state {
             PhilosopherState::Thinking => self.clean_and_send_fork(context, requester),
             PhilosopherState::Hungry => self.clean_and_send_fork(context, requester),
@@ -149,19 +144,19 @@ impl Philosopher {
     }
 
     /// The philosopher received a fork.
-    fn fork_received(&mut self, context: &Context, fork: Fork, from: ActorId) -> Status {
+    fn fork_received(&mut self, context: &Context, fork: &Fork, from: &ActorId) -> Status {
         match &self.state {
             PhilosopherState::Hungry => {
                 // Forks are always cleaned before being sent.
                 let received_fork = self.find_fork_for_aid(context, &from);
                 *received_fork = Some((fork, true));
                 // If the philosopher has both forks he starts eating and marks them dirty.
-                if let (Some((left, _)), Some((right, _))) =
-                    (self.left_fork.as_ref(), self.right_fork.as_ref())
+                if let (Some((_, left_clean)), Some((_, right_clean))) =
+                    (self.left_fork.as_mut(), self.right_fork.as_mut())
                 {
                     self.state = PhilosopherState::Eating;
-                    self.left_fork = Some((*left, false));
-                    self.right_fork = Some((*right, false));
+                    *left_clean = false;
+                    *right_clean = false;
                 };
                 Status::Processed
             }
@@ -181,7 +176,7 @@ impl Philosopher {
                 self.state = PhilosopherState::Hungry;
                 // Now that we are hungry we need both forks if we dont already have them.
                 // or just start eating if we have both.
-                match (self.left_fork, self.right_fork) {
+                match (self.left_fork.as_ref(), self.right_fork.as_ref()) {
                     (None, None) => {
                         self.left_neighbor
                             .as_ref()
@@ -239,8 +234,8 @@ impl Philosopher {
             match &*msg {
                 Command::StopEating => self.stop_eating(context),
                 Command::BecomeHungry => self.become_hungry(context),
-                Command::RequestFork(requester) => self.fork_requested(context, *requester),
-                Command::ForkReceived { from, fork } => self.fork_received(context, *fork, *from),
+                Command::RequestFork(ref requester) => self.fork_requested(context, requester),
+                Command::ForkReceived { from, fork } => self.fork_received(context, fork, from),
                 Command::SetNeighbors(left, right) => {
                     self.left_neighbor = Some(left.clone());
                     self.right_neighbor = Some(right.clone());
