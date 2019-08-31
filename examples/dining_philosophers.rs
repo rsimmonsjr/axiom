@@ -96,23 +96,32 @@ impl Philosopher {
         }
     }
 
+    /// Helper to find a fork option based on the requester.
+    fn find_fork_for_aid(
+        &mut self,
+        context: &Context,
+        requester: &ActorId,
+    ) -> &mut Option<(Fork, bool)> {
+        // Determine which fork was requested.
+        if requester == self.left_neighbor.as_ref().unwrap() {
+            &mut self.left_fork
+        } else if requester == self.right_neighbor.as_ref().unwrap() {
+            &mut self.right_fork
+        } else {
+            // This shouldn't happen if the problem is initialized corretly.
+            panic!("[{}] Illegal requester: {}", context.aid, requester);
+        }
+    }
+
     /// Helper to clean a dirty fork and then send a fork to a requesting party. If the fork is
     /// sent then this function will return a `Processed` status but if the fork is not sent
     /// because it is already clean then it will return `Skipped`.
     fn clean_and_send_fork(&mut self, context: &Context, requester: ActorId) -> Status {
         // Determine which fork was requested.
-        let requested_fork = if requester == *self.left_neighbor.as_ref().unwrap() {
-            &mut self.left_fork
-        } else if requester == *self.right_neighbor.as_ref().unwrap() {
-            &mut self.right_fork
-        } else {
-            // This shouldn't happen if the problem is initialized corretly.
-            panic!("[{}] Illegal requester: {}", context.aid, requester);
-        };
-
+        let requested_fork = self.find_fork_for_aid(context, &requester);
         match requested_fork {
-            Some((_, false)) => {
-                let (fork, _) = requested_fork.take().unwrap();
+            fork @ Some((_, false)) => {
+                let (fork, _) = fork.take().unwrap();
                 requester.send_new(Command::ForkReceived {
                     from: context.aid.clone(),
                     fork,
@@ -141,19 +150,10 @@ impl Philosopher {
 
     /// The philosopher received a fork.
     fn fork_received(&mut self, context: &Context, fork: Fork, from: ActorId) -> Status {
-        // Determine which fork was received.
-        let received_fork = if from == *self.left_neighbor.as_ref().unwrap() {
-            &mut self.left_fork
-        } else if from == *self.right_neighbor.as_ref().unwrap() {
-            &mut self.right_fork
-        } else {
-            // This shouldn't happen if the problem is initialized correctly.
-            panic!("[{}] Unknown Sender: {:?}", context.aid, from);
-        };
-
         match &self.state {
             PhilosopherState::Hungry => {
                 // Forks are always cleaned before being sent.
+                let received_fork = self.find_fork_for_aid(context, &from);
                 *received_fork = Some((fork, true));
                 // If the philosopher has both forks he starts eating and marks them dirty.
                 if let (Some((left, _)), Some((right, _))) =
