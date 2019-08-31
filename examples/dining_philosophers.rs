@@ -1,248 +1,251 @@
 //! An implementation of the classic finite state machine (FSM) [Dining Philosophers]
 //! (https://en.wikipedia.org/wiki/Dining_philosophers_problem) problem using Axiom.
+//!
+//! # Demonstrated in this Example:
+//!   * Basic usage of Actors to solve a classic problem in concurrency.
+//!   * Communication with Enumeration based messages.
+//!   * Skipping messages in the channel to defer processing.
+//!   * Implementation of finite state machine semantics with differential processing.
+//!   * Concurrent, Independent processing.
+//!   * Ability to send messages to self; stopping eating and getting hungry send to self.
+//!   * Ability to send messages after a specified time frame. (FIXME IMPLEMENT!)
+//!   * Ability to move memory between actors using Rust unique move dynamics. The movement of
+//!   `Fork` objects demonstrates how memory move semantics of Rust allow an actor to transfer
+//!   things like tokens from one actor to another in a memory-safe manner. The `Fork` itself is
+//!   moved around the actors by being passed as a message. There is no chance that the original
+//!   owner could have the fork and this actor as well.
+//!  
+//! FIXME There should be some way to abort the whole program other than panicing one actor.
+
 use axiom::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
-pub struct Data {}
-
-/// The state of a fork.
-pub enum ForkState {
-    /// The fork is held by a philosopher with the given `ActorId`.
-    Held(ActorId),
-    /// The fork is available.
-    Available,
-}
-
-#[derive(Serialize, Deserialize)]
-enum ForkCommand {
-    /// Request a fork for the given aid.
-    Request(ActorId),
-    /// Return the fork from the given aid.
-    Return(ActorId),
-}
-
-/// The fork actor will be handled by a single method. If the fork is held by a philosopher then
-/// the actor will skip all messages that request the fork until the philosopher returns the fork.
-/// If the fork is available it will grant it to the first philosopher that sends a message
-/// requesting the fork.
-///
-/// Note that this implementation is complete and very strict. If a fork gets out of synch in
-/// state then the actor will panic.
-///
-/// FIXME There should be some way to abort the whole program other than panicing one actor.
-pub fn fork(state: &mut ForkState, context: &Context, message: &Message) -> Status {
-    if let Some(msg) = message.content_as::<ForkCommand>() {
-        match &*msg {
-            ForkCommand::Return(philosopher) => match state {
-                ForkState::Available => panic!(
-                    "{} Return from {} but not owned by anyone",
-                    context.aid, philosopher
-                ),
-                ForkState::Held(owner) => {
-                    if owner.uuid() == philosopher.uuid() {
-                        *state = ForkState::Available;
-                        Status::ResetSkip
-                    } else {
-                        panic!(
-                            "{} Return from {} but owned by {}",
-                            context.aid, philosopher, owner
-                        )
-                    }
-                }
-            },
-            ForkCommand::Request(philosopher) => match state {
-                ForkState::Available => {
-                    *state = ForkState::Held(philosopher.clone());
-                    Status::Processed
-                }
-                ForkState::Held(_) => Status::Skipped,
-            },
-        }
-    } else {
-        // Ignore any other message
-        Status::Processed
-    }
+/// A fork for use in the problem.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Fork {
+    /// A unique UUID for the fork.
+    uuid: Uuid,
 }
 
 /// The state of a philosopher at the table.
 enum PhilosopherState {
     /// Has no forks and is thinking.
     Thinking,
+    /// Philosopher is hungry and waiting for forks.
+    Hungry,
     /// Has both forks and is eating.
     Eating,
-    /// Is waiting for both forks and ready to eat.
-    WaitingForForks,
-    /// Has the left fork but not the right.
-    HasLeftFork,
-    /// Has the right fork but not the left.
-    HasRightFork,
 }
 
+/// A command sent to a philosopher.
 #[derive(Serialize, Deserialize)]
-pub enum PhilosopherCommand {
+pub enum Command {
+    /// Sets the neighbors for a philosopher; the provided values are left and right neighbors
+    /// in that order.
+    SetNeighbors(ActorId, ActorId),
     /// Command to start eating.
     StopEating,
     /// Command to stop eating.
-    StartEating,
-    /// Notifies the philosopher that they got the fork.
-    GotFork(ActorId),
+    BecomeHungry,
+    /// Request a fork from a neighbor.
+    RequestFork(ActorId),
+    /// A fork was received from a philosopher.
+    ForkReceived { from: ActorId, fork: Fork },
 }
 
 /// The structure holding the data for the philosopher. This will be used to make an actor
 /// from the structure itself.
 struct Philosopher {
+    /// The current state that the philosopher is in.
     state: PhilosopherState,
-    left_fork: ActorId,
-    right_fork: ActorId,
+    /// The uuid of the philosopher to the right.
+    right_neighbor: Option<ActorId>,
+    /// The uuid of the philosopher to the left.
+    left_neighbor: Option<ActorId>,
+    /// The left fork holder. This will be a `Some` if the philosopher holds the fork with the
+    /// first element in the tuple being the fork and the second element being a boolean
+    /// indicating if the fork is clean (`true`) or not (`false`).
+    left_fork: Option<(Fork, bool)>,
+    /// The right fork holder. This is exactly like the left fork holder.
+    right_fork: Option<(Fork, bool)>,
+    /// The last time the philosopher's state changed. This is used for tracking time eating, etc.
     last_state_change: Instant,
+    /// The time that the Philosopher spent thinking.
     time_thinking: Duration,
+    /// The time that the Philosopher spent hungry.
+    time_hungry: Duration,
+    /// The time that the Philosopher spent eating.
     time_eating: Duration,
-    time_waiting_for_forks: Duration,
-    failed_to_eat: u16,
-    already_eating: u16,
-    already_thinking: u16,
 }
 
 impl Philosopher {
-    pub fn new(left_fork: ActorId, right_fork: ActorId) -> Philosopher {
+    pub fn new(left_fork: Option<Fork>, right_fork: Option<Fork>) -> Philosopher {
         Philosopher {
             state: PhilosopherState::Thinking,
-            left_fork,
-            right_fork,
+            left_neighbor: None,
+            right_neighbor: None,
+            // Note that all forks start dirty as per problem solution.
+            left_fork: left_fork.map(|f| (f, false)),
+            right_fork: right_fork.map(|f| (f, false)),
             last_state_change: Instant::now(),
             time_thinking: Duration::from_micros(0),
+            time_hungry: Duration::from_micros(0),
             time_eating: Duration::from_micros(0),
-            time_waiting_for_forks: Duration::from_micros(0),
-            failed_to_eat: 0,
-            already_eating: 0,
-            already_thinking: 0,
         }
     }
 
-    /// In this method we only care about 1 message, the others are ignored, so we use
-    /// a nested `if let`
-    fn start_eating(&mut self, context: &Context) -> Status {
-        match &self.state {
-            PhilosopherState::Thinking => {
-                self.left_fork
-                    .send_new(ForkCommand::Request(context.aid.clone()));
-                self.right_fork
-                    .send_new(ForkCommand::Request(context.aid.clone()));
-                self.time_thinking += Instant::elapsed(&self.last_state_change);
-                self.last_state_change = Instant::now();
-                self.last_state_change = Instant::now();
-                self.state = PhilosopherState::WaitingForForks;
+    /// Helper to clean a dirty fork and then send a fork to a requesting party. If the fork is
+    /// sent then this function will return a `Processed` status but if the fork is not sent
+    /// because it is already clean then it will return `Skipped`.
+    fn clean_and_send_fork(&mut self, context: &Context, requester: ActorId) -> Status {
+        // Determine which fork was requested.
+        let requested_fork = if requester == *self.left_neighbor.as_ref().unwrap() {
+            &mut self.left_fork
+        } else if requester == *self.right_neighbor.as_ref().unwrap() {
+            &mut self.right_fork
+        } else {
+            // This shouldn't happen if the problem is initialized corretly.
+            panic!("[{}] Illegal requester: {}", context.aid, requester);
+        };
+
+        match requested_fork {
+            Some((_, false)) => {
+                let (fork, _) = requested_fork.take().unwrap();
+                requester.send_new(Command::ForkReceived {
+                    from: context.aid.clone(),
+                    fork,
+                });
                 Status::Processed
+            }
+            Some((_, true)) => Status::Skipped,
+            None => Status::Skipped,
+        }
+    }
+
+    /// Handles a request for a fork. This request will be sent by the philosopher's neighbors
+    /// and will result in either the fork being sent or the request being skipped to be
+    /// processed later if the requested fork is clean.
+    fn fork_requested(&mut self, context: &Context, requester: ActorId) -> Status {
+        match &self.state {
+            PhilosopherState::Thinking => self.clean_and_send_fork(context, requester),
+            PhilosopherState::Hungry => self.clean_and_send_fork(context, requester),
+            PhilosopherState::Eating => {
+                // If eating all forks must be dirty.
+                self.state = PhilosopherState::Thinking;
+                self.clean_and_send_fork(context, requester)
+            }
+        }
+    }
+
+    /// The philosopher received a fork.
+    fn fork_received(&mut self, context: &Context, fork: Fork, from: ActorId) -> Status {
+        // Determine which fork was received.
+        let received_fork = if from == *self.left_neighbor.as_ref().unwrap() {
+            &mut self.left_fork
+        } else if from == *self.right_neighbor.as_ref().unwrap() {
+            &mut self.right_fork
+        } else {
+            // This shouldn't happen if the problem is initialized correctly.
+            panic!("[{}] Unknown Sender: {:?}", context.aid, from);
+        };
+
+        match &self.state {
+            PhilosopherState::Hungry => {
+                // Forks are always cleaned before being sent.
+                *received_fork = Some((fork, true));
+                // If the philosopher has both forks he starts eating and marks them dirty.
+                if let (Some((left, _)), Some((right, _))) =
+                    (self.left_fork.as_ref(), self.right_fork.as_ref())
+                {
+                    self.state = PhilosopherState::Eating;
+                    self.left_fork = Some((*left, false));
+                    self.right_fork = Some((*right, false));
+                };
+                Status::Processed
+            }
+            PhilosopherState::Thinking => {
+                panic!("[{}] Got Fork while thinking! {:?}", context.aid, fork);
             }
             PhilosopherState::Eating => {
-                self.already_eating += 1;
+                panic!("[{}] Got Fork while eating! {:?}", context.aid, fork);
+            }
+        }
+    }
+
+    /// Received when a philosopher is supposed to become hungry .
+    fn become_hungry(&mut self, context: &Context) -> Status {
+        match &self.state {
+            PhilosopherState::Thinking => {
+                self.state = PhilosopherState::Hungry;
+                // Now that we are hungry we need both forks if we dont already have them.
+                // or just start eating if we have both.
+                match (self.left_fork, self.right_fork) {
+                    (None, None) => {
+                        self.left_neighbor
+                            .as_ref()
+                            .unwrap()
+                            .send_new(Command::RequestFork(context.aid.clone()));
+                        self.right_neighbor
+                            .as_ref()
+                            .unwrap()
+                            .send_new(Command::RequestFork(context.aid.clone()));
+                    }
+                    (Some(_), None) => {
+                        self.right_neighbor
+                            .as_ref()
+                            .unwrap()
+                            .send_new(Command::RequestFork(context.aid.clone()));
+                    }
+                    (None, Some(_)) => {
+                        self.left_neighbor
+                            .as_ref()
+                            .unwrap()
+                            .send_new(Command::RequestFork(context.aid.clone()));
+                    }
+                    _ => self.state = PhilosopherState::Eating,
+                }
                 Status::Processed
             }
-            PhilosopherState::WaitingForForks => {
-                self.already_eating += 1;
-                Status::Processed
+            PhilosopherState::Hungry => {
+                panic!("[{}] Got BecomeHungry while eating!", context.aid);
             }
-            PhilosopherState::HasLeftFork => {
-                self.already_eating += 1;
-                Status::Processed
-            }
-            PhilosopherState::HasRightFork => {
-                self.already_eating += 1;
-                Status::Processed
+            PhilosopherState::Eating => {
+                panic!("[{}] Got BecomeHungry while eating!", context.aid);
             }
         }
     }
 
     fn stop_eating(&mut self, context: &Context) -> Status {
         match &self.state {
+            PhilosopherState::Thinking => {
+                println!("[{}] Got StopEating while thinking!", context.aid);
+                Status::Processed
+            }
+            PhilosopherState::Hungry => {
+                println!("[{}] Got StopEating while eating!", context.aid);
+                Status::Processed
+            }
             PhilosopherState::Eating => {
                 self.state = PhilosopherState::Thinking;
-                self.left_fork
-                    .send_new(ForkCommand::Return(context.aid.clone()));
-                self.right_fork
-                    .send_new(ForkCommand::Return(context.aid.clone()));
-                self.time_eating += Instant::elapsed(&self.last_state_change);
-                self.last_state_change = Instant::now();
-                Status::Processed
-            }
-            PhilosopherState::Thinking => {
-                self.already_thinking += 1;
-                Status::Processed
-            }
-            PhilosopherState::WaitingForForks => {
-                self.failed_to_eat += 1;
-                self.state = PhilosopherState::Thinking;
-                Status::Processed
-            }
-            PhilosopherState::HasLeftFork => {
-                self.left_fork
-                    .send_new(ForkCommand::Return(context.aid.clone()));
-                self.failed_to_eat += 1;
-                self.state = PhilosopherState::Thinking;
-                Status::Processed
-            }
-            PhilosopherState::HasRightFork => {
-                self.right_fork
-                    .send_new(ForkCommand::Return(context.aid.clone()));
-                self.failed_to_eat += 1;
-                self.state = PhilosopherState::Thinking;
-                Status::Processed
-            }
-        }
-    }
-
-    fn got_fork(&mut self, fork: &ActorId, context: &Context) -> Status {
-        match &self.state {
-            PhilosopherState::Eating => {
-                panic!("{} Already eating when got a new fork!", &context.aid);
-            }
-            PhilosopherState::Thinking => {
-                panic!("{} Got a fork while thinking!", &context.aid);
-            }
-            PhilosopherState::WaitingForForks => {
-                if fork.uuid() == self.left_fork.uuid() {
-                    self.state = PhilosopherState::HasLeftFork
-                } else if fork.uuid() == self.right_fork.uuid() {
-                    self.state = PhilosopherState::HasRightFork
-                } else {
-                    panic!("{} Got an unknown fork! {}", &context.aid, fork);
-                }
-                Status::Processed
-            }
-            PhilosopherState::HasLeftFork => {
-                if fork.uuid() == self.left_fork.uuid() {
-                    panic!("{} Got a left fork when already owned!", &context.aid);
-                } else if fork.uuid() == self.right_fork.uuid() {
-                    self.time_waiting_for_forks += Instant::elapsed(&self.last_state_change);
-                    self.last_state_change = Instant::now();
-                    self.state = PhilosopherState::Eating
-                } else {
-                    panic!("{} Got an unknown fork! {}", &context.aid, fork);
-                }
-                Status::Processed
-            }
-            PhilosopherState::HasRightFork => {
-                if fork.uuid() == self.left_fork.uuid() {
-                    self.time_waiting_for_forks += Instant::elapsed(&self.last_state_change);
-                    self.last_state_change = Instant::now();
-                    self.state = PhilosopherState::Eating
-                } else if fork.uuid() == self.right_fork.uuid() {
-                    panic!("{} Got a right fork when already owned!", &context.aid);
-                } else {
-                    panic!("{} Got an unknown fork! {}", &context.aid, fork);
-                }
                 Status::Processed
             }
         }
     }
 
     pub fn handle(&mut self, context: &Context, message: &Message) -> Status {
-        if let Some(msg) = message.content_as::<PhilosopherCommand>() {
+        if let Some(msg) = message.content_as::<Command>() {
             match &*msg {
-                PhilosopherCommand::StartEating => self.start_eating(context),
-                PhilosopherCommand::StopEating => self.stop_eating(context),
-                PhilosopherCommand::GotFork(fork) => self.got_fork(fork, context),
+                Command::StopEating => self.stop_eating(context),
+                Command::BecomeHungry => self.become_hungry(context),
+                Command::RequestFork(requester) => self.fork_requested(context, *requester),
+                Command::ForkReceived { from, fork } => self.fork_received(context, *fork, *from),
+                Command::SetNeighbors(left, right) => {
+                    self.left_neighbor = Some(left.clone());
+                    self.right_neighbor = Some(right.clone());
+                    Status::Processed
+                }
             }
         } else {
             Status::Processed
@@ -255,59 +258,81 @@ pub fn main() {
     let config = ActorSystemConfig::default();
     let system = ActorSystem::create(config);
 
-    // Spawn the fork actors clockwise from top of table.
-    let fork1 = system
-        .spawn_named("Fork1", ForkState::Available, fork)
-        .unwrap();
-    let fork2 = system
-        .spawn_named("Fork2", ForkState::Available, fork)
-        .unwrap();
-    let fork3 = system
-        .spawn_named("Fork3", ForkState::Available, fork)
-        .unwrap();
-    let fork4 = system
-        .spawn_named("Fork4", ForkState::Available, fork)
-        .unwrap();
-    let fork5 = system
-        .spawn_named("Fork5", ForkState::Available, fork)
-        .unwrap();
+    // Spawn the fork resources clockwise from top of table.
+    let fork1 = Fork {
+        uuid: Uuid::new_v4(),
+    };
+    let fork2 = Fork {
+        uuid: Uuid::new_v4(),
+    };
+    let fork3 = Fork {
+        uuid: Uuid::new_v4(),
+    };
+    let fork4 = Fork {
+        uuid: Uuid::new_v4(),
+    };
+    let fork5 = Fork {
+        uuid: Uuid::new_v4(),
+    };
 
     // Spawn the philosopher actors clockwise from top of table.
-    let _philosopher1 = system
+    let philosopher1 = system
         .spawn_named(
             "Confucius",
-            Philosopher::new(fork5.clone(), fork1.clone()),
+            Philosopher::new(None, Some(fork1)),
             Philosopher::handle,
         )
         .unwrap();
-    let _philosopher2 = system
+    let philosopher2 = system
         .spawn_named(
             "Laozi",
-            Philosopher::new(fork1.clone(), fork2.clone()),
+            Philosopher::new(None, Some(fork2)),
             Philosopher::handle,
         )
         .unwrap();
-    let _philosopher3 = system
+    let philosopher3 = system
         .spawn_named(
             "Descartes",
-            Philosopher::new(fork2.clone(), fork3.clone()),
+            Philosopher::new(None, Some(fork3)),
             Philosopher::handle,
         )
         .unwrap();
-    let _philosopher4 = system
+    let philosopher4 = system
         .spawn_named(
             "Ben Franklin",
-            Philosopher::new(fork3.clone(), fork4.clone()),
+            Philosopher::new(None, Some(fork4)),
             Philosopher::handle,
         )
         .unwrap();
-    let _philosopher5 = system
+    let philosopher5 = system
         .spawn_named(
             "Thomas Jefferson",
-            Philosopher::new(fork4.clone(), fork5.clone()),
+            Philosopher::new(None, Some(fork5)),
             Philosopher::handle,
         )
         .unwrap();
+
+    // Set up the neighbors for the actors.
+    philosopher1.send_new(Command::SetNeighbors(
+        philosopher5.clone(),
+        philosopher2.clone(),
+    ));
+    philosopher2.send_new(Command::SetNeighbors(
+        philosopher1.clone(),
+        philosopher3.clone(),
+    ));
+    philosopher3.send_new(Command::SetNeighbors(
+        philosopher2.clone(),
+        philosopher4.clone(),
+    ));
+    philosopher4.send_new(Command::SetNeighbors(
+        philosopher3.clone(),
+        philosopher5.clone(),
+    ));
+    philosopher5.send_new(Command::SetNeighbors(
+        philosopher4.clone(),
+        philosopher1.clone(),
+    ));
 
     // Have to do this since we want to call from outside actor system.
     system.init_current();

@@ -24,6 +24,7 @@ implementation deriving inspiration from the good parts of those models.
   * New methods `send_new` and `try_send_new` are available to shorten boilerplate. 
   * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
   * Added a method `system_actor_aid` to easily look up the `System` actor. 
+  * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
 * 2019-08-11: 0.0.7 
   * Simplified some of the casts and cleaned up code. 
   * Fixed issues related to major bug in fixed in `secc-0.0.9`

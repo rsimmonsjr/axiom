@@ -153,7 +153,7 @@ struct ActorIdSerializedForm {
 /// This `aid` can also be serialized to a remote system and then back to the system hosting the
 /// actor without issue. Often `ActorId`s are passed around an actor system so this is a common
 /// use case.
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ActorId {
     /// Holds the actual data for the [`ActorId`].
     data: Arc<ActorIdData>,
@@ -206,27 +206,27 @@ impl<'de> Deserialize<'de> for ActorId {
     }
 }
 
-impl std::cmp::PartialEq for ActorIdData {
+impl std::cmp::PartialEq for ActorId {
     fn eq(&self, other: &Self) -> bool {
-        self.uuid == other.uuid && self.system_uuid == other.system_uuid
+        self.data.uuid == other.data.uuid && self.data.system_uuid == other.data.system_uuid
     }
 }
 
-impl std::cmp::Eq for ActorIdData {}
+impl std::cmp::Eq for ActorId {}
 
-impl std::cmp::PartialOrd for ActorIdData {
+impl std::cmp::PartialOrd for ActorId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         use std::cmp::Ordering;
         // Order by name, then by system, then by uuid.  Also, sort `None` names before others.
-        match (&self.name, &other.name) {
+        match (&self.data.name, &other.data.name) {
             (None, Some(_)) => Some(Ordering::Less),
             (Some(_), None) => Some(Ordering::Greater),
             (Some(a), Some(b)) if a != b => Some(a.cmp(b)),
             (_, _) => {
                 // Names are equal, either both `None` or `Some(thing)` where `thing1 == thing2`
                 // so we impose a secondary order by system uuid.
-                match self.system_uuid.cmp(&other.system_uuid) {
-                    Ordering::Equal => Some(self.uuid.cmp(&other.uuid)),
+                match self.data.system_uuid.cmp(&other.data.system_uuid) {
+                    Ordering::Equal => Some(self.data.uuid.cmp(&other.data.uuid)),
                     x => Some(x),
                 }
             }
@@ -234,10 +234,10 @@ impl std::cmp::PartialOrd for ActorIdData {
     }
 }
 
-impl std::cmp::Ord for ActorIdData {
+impl std::cmp::Ord for ActorId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other)
-            .expect("ActorIdData::partial_cmp() returned None; can't happen")
+            .expect("ActorId::partial_cmp() returned None; can't happen")
     }
 }
 
