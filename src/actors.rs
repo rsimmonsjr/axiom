@@ -19,6 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
@@ -345,7 +346,39 @@ impl ActorId {
             }
             ActorSender::Remote { sender } => {
                 sender
-                    .send_await(WireMessage::ActorMsg {
+                    .send_await(WireMessage::ActorMessage {
+                        actor_uuid: self.data.uuid,
+                        system_uuid: self.data.system_uuid,
+                        message,
+                    })
+                    .unwrap();
+                Ok(())
+            }
+        }
+    }
+
+    /// Schedules the given message to be sent after a minimum of the specified duration. Note
+    /// that axiom doesn't guarantee that the message will be sent on exactly now + duration but
+    /// rather that _at least_ the duration will pass before the message is sent to the actor.
+    /// This message will return an `Err` if the actor has been stopped or `Ok` if the message
+    /// was scheduled to be sent. If the actor is stopped before the duration passes then the
+    /// scheduled message will never get to the actor.
+    pub fn try_send_after(&self, message: Message, duration: Duration) -> Result<(), ActorError> {
+        match &self.data.sender {
+            ActorSender::Local {
+                stopped, system, ..
+            } => {
+                if stopped.load(Ordering::Relaxed) {
+                    Err(ActorError::ActorStopped)
+                } else {
+                    system.send_after(message, self.clone(), duration);
+                    Ok(())
+                }
+            }
+            ActorSender::Remote { sender } => {
+                sender
+                    .send_await(WireMessage::DelayedActorMessage {
+                        duration: duration,
                         actor_uuid: self.data.uuid,
                         system_uuid: self.data.system_uuid,
                         message,

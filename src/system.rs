@@ -15,13 +15,14 @@ use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BinaryHeap;
 use std::fmt;
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 // Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`ActorId`] deserializer and
@@ -60,7 +61,18 @@ pub enum WireMessage {
         system_actor_aid: ActorId,
     },
     /// A container for a message from one actor on one system to an actor on another system.
-    ActorMsg {
+    ActorMessage {
+        /// The UUID of the [`ActorId`] that the message is being sent to.
+        actor_uuid: Uuid,
+        /// The UUID of the system that the destination [`ActorId`] is local to.
+        system_uuid: Uuid,
+        /// The message to be sent.
+        message: Message,
+    },
+    /// A container for sending a message with a specified duration delay.
+    DelayedActorMessage {
+        /// The duration to use to delay the message.
+        duration: Duration,
         /// The UUID of the [`ActorId`] that the message is being sent to.
         actor_uuid: Uuid,
         /// The UUID of the system that the destination [`ActorId`] is local to.
@@ -82,7 +94,7 @@ pub struct ActorSystemConfig {
     /// The size of the thread pool which governs how many worker threads there are in the system.
     /// The number of threads should be carefully considered to have sufficient concurrency but
     /// not overschedule the CPU on the target hardware. The default value is 4.
-    pub thread_pool_size: u16,
+    pub threads_size: u16,
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
@@ -95,9 +107,57 @@ impl Default for ActorSystemConfig {
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 16,
-            thread_pool_size: 4,
+            threads_size: 4,
             thread_wait_time: 10,
         }
+    }
+}
+
+/// Information for communicating with a remote actor system.
+pub struct RemoteInfo {
+    /// The UUID of the remote system.
+    pub system_uuid: Uuid,
+    /// The channel to use to send messages to the remote system.
+    pub sender: SeccSender<WireMessage>,
+    /// The channel to use to receive messages from the remote system.
+    pub receiver: SeccReceiver<WireMessage>,
+    /// The AID to the system actor for the remote system.
+    pub system_actor_aid: ActorId,
+    /// The handle returned by the thread processing remote messages.
+    /// FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
+    _handle: JoinHandle<()>,
+}
+
+/// Stores a message that will be sent with a delay to an actor.
+struct DelayedMessage {
+    /// A unique identifier for a message.
+    uuid: Uuid,
+    /// The ActorId that the message will be sent to.
+    destination: ActorId,
+    /// The minimum instant that the message should be sent.
+    instant: Instant,
+    /// The message to send.
+    message: Message,
+}
+
+impl std::cmp::PartialEq for DelayedMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.uuid == other.uuid
+    }
+}
+
+impl std::cmp::Eq for DelayedMessage {}
+
+impl std::cmp::PartialOrd for DelayedMessage {
+    fn partial_cmp(&self, other: &DelayedMessage) -> Option<std::cmp::Ordering> {
+        Some(self.instant.cmp(&other.instant))
+    }
+}
+
+impl std::cmp::Ord for DelayedMessage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other)
+            .expect("DelayedMessage::partial_cmp() returned None; can't happen")
     }
 }
 
@@ -116,7 +176,7 @@ struct ActorSystemData {
     /// from this receiver to process messages.
     receiver: SeccReceiver<Arc<Actor>>,
     /// Holds handles to the pool of threads processing the work channel.
-    thread_pool: Mutex<Vec<JoinHandle<()>>>,
+    threads: Mutex<Vec<JoinHandle<()>>>,
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: AtomicBool,
     // Stores the number of running threads with a Condvar that will be used to notify anyone
@@ -135,21 +195,8 @@ struct ActorSystemData {
     monitoring_by_monitored: Arc<DashMap<ActorId, Vec<ActorId>>>,
     /// Holds a map of information objects about links to remote actor systems.
     remotes: Arc<DashMap<Uuid, RemoteInfo>>,
-}
-
-/// Information for communicating with a remote actor system.
-pub struct RemoteInfo {
-    /// The UUID of the remote system.
-    pub system_uuid: Uuid,
-    /// The channel to use to send messages to the remote system.
-    pub sender: SeccSender<WireMessage>,
-    /// The channel to use to receive messages from the remote system.
-    pub receiver: SeccReceiver<WireMessage>,
-    /// The AID to the system actor for the remote system.
-    pub system_actor_aid: ActorId,
-    /// The handle returned by the thread processing remote messages.
-    /// FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
-    _handle: JoinHandle<()>,
+    /// Holds the messages that have been enqueued for delayed send.
+    delayed_messages: Arc<(Mutex<BinaryHeap<DelayedMessage>>, Condvar)>,
 }
 
 /// An actor system that contains and manages the actors spawned inside it.
@@ -169,8 +216,8 @@ impl ActorSystem {
         let (sender, receiver) =
             secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
-        let thread_pool = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
-        let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
+        let threads = Mutex::new(Vec::with_capacity(config.threads_size as usize));
+        let running_thread_count = Arc::new((Mutex::new(config.threads_size), Condvar::new()));
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
@@ -179,7 +226,7 @@ impl ActorSystem {
                 config: config,
                 sender,
                 receiver,
-                thread_pool,
+                threads,
                 shutdown_triggered: AtomicBool::new(false),
                 running_thread_count,
                 actors_by_aid: Arc::new(DashMap::default()),
@@ -187,6 +234,7 @@ impl ActorSystem {
                 aids_by_name: Arc::new(DashMap::default()),
                 monitoring_by_monitored: Arc::new(DashMap::default()),
                 remotes: Arc::new(DashMap::default()),
+                delayed_messages: Arc::new((Mutex::new(BinaryHeap::new()), Condvar::new())),
             }),
         };
 
@@ -194,9 +242,18 @@ impl ActorSystem {
         // system not being created yet but needed by the thread. We put this code in a block to
         // get around rust borrow constraints without unnecessarily copying things.
         {
-            let mut guard = system.data.thread_pool.lock().unwrap();
-            for _ in 0..system.data.config.thread_pool_size {
+            let mut guard = system.data.threads.lock().unwrap();
+
+            // Start the dispatcher threads.
+            for _ in 0..system.data.config.threads_size {
                 let thread = system.start_dispatcher_thread();
+                guard.push(thread);
+            }
+
+            // Start the thread that reads from the `delayed_messages` queue.
+            // FIXME Put in ability to confirm how many of these to start.
+            for _ in 0..1 {
+                let thread = system.start_send_after_thread();
                 guard.push(thread);
             }
         }
@@ -243,6 +300,35 @@ impl ActorSystem {
         })
     }
 
+    /// Starts a thread that monitors the delayed_messages and sends the messages when their
+    /// delays have elapesed.
+    fn start_send_after_thread(&self) -> JoinHandle<()> {
+        let system = self.clone();
+        let delayed_messages = self.data.delayed_messages.clone();
+        thread::spawn(move || {
+            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+                let (ref mutex, ref condvar) = &*delayed_messages;
+                let mut data = mutex.lock().unwrap();
+                match data.peek() {
+                    None => {
+                        // wait to be notified something is added.
+                        let _result = condvar.wait(data).unwrap();
+                    }
+                    Some(msg) => {
+                        let now = Instant::now();
+                        if now >= msg.instant {
+                            msg.destination.send(msg.message.clone());
+                            data.pop();
+                        } else {
+                            let duration = msg.instant.duration_since(now);
+                            let _result = condvar.wait_timeout(data, duration).unwrap();
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// Locates the sender for the remote actor system with the given Uuid.
     pub(crate) fn remote_sender(&self, system_uuid: &Uuid) -> Option<SeccSender<WireMessage>> {
         self.data
@@ -282,8 +368,9 @@ impl ActorSystem {
         let sys_uuid = system_actor_aid.system_uuid().clone();
         let handle = thread::spawn(move || {
             system.init_current();
-            // FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
-            loop {
+            // FIXME (Issue #76) Add graceful shutdown for threads handling remotes including
+            // informing remote that the system is exiting.
+            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
                 match receiver_clone.receive_await_timeout(thread_timeout) {
                     Err(_) => (), // not an error, just loop and try again.
                     Ok(wire_msg) => system.process_wire_message(&sys_uuid, &wire_msg),
@@ -328,17 +415,24 @@ impl ActorSystem {
     /// FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
     fn process_wire_message(&self, _uuid: &Uuid, wire_message: &WireMessage) {
         match wire_message {
-            WireMessage::ActorMsg {
+            WireMessage::ActorMessage {
                 actor_uuid,
                 system_uuid,
                 message,
             } => {
-                if ActorSystem::current().uuid() == *system_uuid {
-                    let aid = self.find_aid_by_uuid(&actor_uuid).unwrap();
-                    aid.send(message.clone());
-                } else {
-                    panic!("Error not handled yet");
-                }
+                self.find_aid(&system_uuid, &actor_uuid)
+                    .map(|aid| aid.send(message.clone()))
+                    .expect("Error not handled yet");
+            }
+            WireMessage::DelayedActorMessage {
+                duration,
+                actor_uuid,
+                system_uuid,
+                message,
+            } => {
+                self.find_aid(&system_uuid, &actor_uuid)
+                    .map(|aid| self.send_after(message.clone(), aid.clone(), *duration))
+                    .expect("Error not handled yet");
             }
             WireMessage::Hello { system_actor_aid } => {
                 debug!("{:?} Got Hello from {}", self.data.uuid, system_actor_aid);
@@ -599,6 +693,18 @@ impl ActorSystem {
         aids_by_name.get(&name.to_string()).map(|aid| aid.clone())
     }
 
+    /// A helper that finds an [`ActorId`] on this system from the `system_uuid` and `actor_uuid`
+    /// passed to the function. If the `system_uuid` doesn't match this system then a `None` will
+    /// be returned. Also if the `system_uuid` matches but the actor is not found a `None` will
+    /// be returned.
+    fn find_aid(&self, system_uuid: &Uuid, actor_uuid: &Uuid) -> Option<ActorId> {
+        if self.uuid() == *system_uuid {
+            self.find_aid_by_uuid(&actor_uuid)
+        } else {
+            None
+        }
+    }
+
     /// Returns the [`ActorId`] to the "System" actor for this actor system. The actor for
     /// the returned `aid` is started when the actor system is started and provides additional
     /// actor system functionality.
@@ -626,6 +732,23 @@ impl ActorSystem {
             iter_ref.value().system_actor_aid.send(message.clone());
         }
     }
+
+    /// Schedules a `message` to be sent to the `destination` [`ActorId`] after a `delay`. Note
+    /// That this method makes a best attempt at sending the message on time but the message may
+    /// not be sent on exactly the delay passed but will never be sent before that delay.
+    pub(crate) fn send_after(&self, message: Message, destination: ActorId, delay: Duration) {
+        let instant = Instant::now().checked_add(delay).unwrap();
+        let entry = DelayedMessage {
+            uuid: Uuid::new_v4(),
+            destination,
+            instant,
+            message,
+        };
+        let (ref mutex, ref condvar) = &*self.data.delayed_messages;
+        let mut data = mutex.lock().unwrap();
+        data.push(entry);
+        condvar.notify_all();
+    }
 }
 
 impl fmt::Debug for ActorSystem {
@@ -641,11 +764,11 @@ impl fmt::Debug for ActorSystem {
 
 /// Messages that are sent to and received from the System Actor.
 #[derive(Serialize, Deserialize, Debug)]
-enum SystemActorMsg {
+enum SystemActorMessage {
     /// Finds an actor by name.
     FindByName { reply_to: ActorId, name: String },
 
-    /// A message sent as a reply to a [`SystemActorMsg::FindByName`] request.
+    /// A message sent as a reply to a [`SystemActorMessage::FindByName`] request.
     FindByNameResult {
         /// The UUID of the system that is responding.
         system_uuid: Uuid,
@@ -658,11 +781,11 @@ enum SystemActorMsg {
 
 /// A processor for the system actor.
 fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) -> Status {
-    if let Some(msg) = message.content_as::<SystemActorMsg>() {
+    if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
-            SystemActorMsg::FindByName { reply_to, name } => {
+            SystemActorMessage::FindByName { reply_to, name } => {
                 let found = context.system.find_aid_by_name(&name);
-                reply_to.send(Message::new(SystemActorMsg::FindByNameResult {
+                reply_to.send(Message::new(SystemActorMessage::FindByNameResult {
                     system_uuid: context.system.uuid(),
                     name: name.clone(),
                     aid: found,
@@ -747,6 +870,23 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
+    /// This tests the find_aid function that takes a system uuid and an actor uuid.
+    #[test]
+    fn test_find_aid() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default());
+        let aid = system.spawn_named("A", 0, simple_handler).unwrap();
+        await_received(&aid, 1, 1000).unwrap();
+        let found = system.find_aid(&aid.system_uuid(), &aid.uuid()).unwrap();
+        assert!(ActorId::ptr_eq(&aid, &found));
+
+        assert_eq!(None, system.find_aid(&aid.system_uuid(), &Uuid::new_v4()));
+        assert_eq!(None, system.find_aid(&Uuid::new_v4(), &aid.uuid()));
+
+        system.trigger_and_await_shutdown();
+    }
+
     /// Tests that actors that are stopped are removed from all relevant lookup maps and
     /// are reported as not being alive.
     #[test]
@@ -770,6 +910,27 @@ mod tests {
         assert_eq!(false, aids_by_uuid.contains_key(&aid.uuid()));
         assert_eq!(None, system.find_aid_by_name("A"));
         assert_eq!(None, system.find_aid_by_uuid(&aid.uuid()));
+
+        system.trigger_and_await_shutdown();
+    }
+
+    /// This test verifies that the system can send a message after a particular timeframe.
+    /// FIXME need separate test for remotes.
+    #[test]
+    fn test_send_after() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default());
+        let aid = system.spawn_named("A", 0, simple_handler).unwrap();
+        await_received(&aid, 1, 1000).unwrap();
+
+        system.send_after(Message::new(11), aid.clone(), Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(1, aid.received().unwrap());
+        thread::sleep(Duration::from_millis(51));
+        assert_eq!(2, aid.received().unwrap());
+
+        // FIXME check after time elapsed.
 
         system.trigger_and_await_shutdown();
     }
@@ -980,9 +1141,9 @@ mod tests {
         system2.spawn(
             (),
             move |_: &mut (), context: &Context, message: &Message| {
-                if let Some(msg) = message.content_as::<SystemActorMsg>() {
+                if let Some(msg) = message.content_as::<SystemActorMessage>() {
                     match &*msg {
-                        SystemActorMsg::FindByNameResult { aid: found, .. } => {
+                        SystemActorMessage::FindByNameResult { aid: found, .. } => {
                             if let Some(target) = found {
                                 assert_eq!(target.uuid(), aid1.uuid());
                                 target.send_new(true);
@@ -997,7 +1158,7 @@ mod tests {
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Start = &*msg {
                         context.system.send_to_system_actors(Message::new(
-                            SystemActorMsg::FindByName {
+                            SystemActorMessage::FindByName {
                                 reply_to: context.aid.clone(),
                                 name: "A".to_string(),
                             },
