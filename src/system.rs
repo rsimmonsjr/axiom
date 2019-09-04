@@ -98,7 +98,7 @@ pub struct ActorSystemConfig {
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
-    /// getting enough work to justify their existence. The default value is 10.
+    /// getting enough work to justify their existence. The default value is 100.
     pub thread_wait_time: u16,
 }
 
@@ -108,7 +108,7 @@ impl Default for ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 16,
             threads_size: 4,
-            thread_wait_time: 10,
+            thread_wait_time: 100,
         }
     }
 }
@@ -285,9 +285,8 @@ impl ActorSystem {
         thread::spawn(move || {
             system.init_current();
             while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
-                match receiver.receive_await_timeout(thread_timeout) {
-                    Err(_) => (), // not an error, just loop and try again.
-                    Ok(actor) => Actor::receive(actor),
+                if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
+                    Actor::receive(actor);
                 }
             }
             let (mutex, condvar) = &*system.data.running_thread_count;

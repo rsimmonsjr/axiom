@@ -478,7 +478,7 @@ struct EndSimulation {}
 /// actors.
 pub fn main() {
     env_logger::builder()
-        .filter_level(LevelFilter::Warn)
+        .filter_level(LevelFilter::Debug)
         .is_test(true)
         .try_init()
         .unwrap();
