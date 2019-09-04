@@ -8,7 +8,7 @@
 
 use crate::message::*;
 use crate::system::*;
-use log::{error, warn};
+use log::error;
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -19,6 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
@@ -153,7 +154,7 @@ struct ActorIdSerializedForm {
 /// This `aid` can also be serialized to a remote system and then back to the system hosting the
 /// actor without issue. Often `ActorId`s are passed around an actor system so this is a common
 /// use case.
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ActorId {
     /// Holds the actual data for the [`ActorId`].
     data: Arc<ActorIdData>,
@@ -206,27 +207,27 @@ impl<'de> Deserialize<'de> for ActorId {
     }
 }
 
-impl std::cmp::PartialEq for ActorIdData {
+impl std::cmp::PartialEq for ActorId {
     fn eq(&self, other: &Self) -> bool {
-        self.uuid == other.uuid && self.system_uuid == other.system_uuid
+        self.data.uuid == other.data.uuid && self.data.system_uuid == other.data.system_uuid
     }
 }
 
-impl std::cmp::Eq for ActorIdData {}
+impl std::cmp::Eq for ActorId {}
 
-impl std::cmp::PartialOrd for ActorIdData {
+impl std::cmp::PartialOrd for ActorId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         use std::cmp::Ordering;
         // Order by name, then by system, then by uuid.  Also, sort `None` names before others.
-        match (&self.name, &other.name) {
+        match (&self.data.name, &other.data.name) {
             (None, Some(_)) => Some(Ordering::Less),
             (Some(_), None) => Some(Ordering::Greater),
             (Some(a), Some(b)) if a != b => Some(a.cmp(b)),
             (_, _) => {
                 // Names are equal, either both `None` or `Some(thing)` where `thing1 == thing2`
                 // so we impose a secondary order by system uuid.
-                match self.system_uuid.cmp(&other.system_uuid) {
-                    Ordering::Equal => Some(self.uuid.cmp(&other.uuid)),
+                match self.data.system_uuid.cmp(&other.data.system_uuid) {
+                    Ordering::Equal => Some(self.data.uuid.cmp(&other.data.uuid)),
                     x => Some(x),
                 }
             }
@@ -234,10 +235,10 @@ impl std::cmp::PartialOrd for ActorIdData {
     }
 }
 
-impl std::cmp::Ord for ActorIdData {
+impl std::cmp::Ord for ActorId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other)
-            .expect("ActorIdData::partial_cmp() returned None; can't happen")
+            .expect("ActorId::partial_cmp() returned None; can't happen")
     }
 }
 
@@ -298,6 +299,15 @@ impl ActorId {
         self.send(Message::new(value))
     }
 
+    /// A utility to call `try_send_after` and just unwrap the result. This should only be
+    /// used if the developer knows for sure there will not be an error.
+    pub fn send_after(&self, message: Message, duration: Duration) {
+        match self.try_send_after(message, duration) {
+            Ok(_) => (),
+            Err(e) => panic!("Error occurred sending to aid: {:?}", e),
+        }
+    }
+
     /// Attempts to send a message to the actor with the given [`ActorId`] and returns
     /// `std::Result::Ok` when the send was successful or a `std::Result::Err<ActorError>`
     /// if something went wrong with the send.
@@ -345,7 +355,39 @@ impl ActorId {
             }
             ActorSender::Remote { sender } => {
                 sender
-                    .send_await(WireMessage::ActorMsg {
+                    .send_await(WireMessage::ActorMessage {
+                        actor_uuid: self.data.uuid,
+                        system_uuid: self.data.system_uuid,
+                        message,
+                    })
+                    .unwrap();
+                Ok(())
+            }
+        }
+    }
+
+    /// Schedules the given message to be sent after a minimum of the specified duration. Note
+    /// that axiom doesn't guarantee that the message will be sent on exactly now + duration but
+    /// rather that _at least_ the duration will pass before the message is sent to the actor.
+    /// This message will return an `Err` if the actor has been stopped or `Ok` if the message
+    /// was scheduled to be sent. If the actor is stopped before the duration passes then the
+    /// scheduled message will never get to the actor.
+    pub fn try_send_after(&self, message: Message, duration: Duration) -> Result<(), ActorError> {
+        match &self.data.sender {
+            ActorSender::Local {
+                stopped, system, ..
+            } => {
+                if stopped.load(Ordering::Relaxed) {
+                    Err(ActorError::ActorStopped)
+                } else {
+                    system.send_after(message, self.clone(), duration);
+                    Ok(())
+                }
+            }
+            ActorSender::Remote { sender } => {
+                sender
+                    .send_await(WireMessage::DelayedActorMessage {
+                        duration: duration,
                         actor_uuid: self.data.uuid,
                         system_uuid: self.data.system_uuid,
                         message,
@@ -611,64 +653,55 @@ impl Actor {
     /// core of the processing pipeline.
     pub(crate) fn receive(actor: Arc<Actor>) {
         let mut guard = actor.handler.lock().unwrap();
-        match actor.receiver.peek() {
-            Result::Err(err) => {
-                // This happening should be very rare but it would mean that the thread pool
-                // tried to process a message for an actor and was beaten to it by another
-                // thread. In this case we will just ignore the error and write out a warning
-                // message for purposes of later optimization.
-                warn!("receive(): No Message to process: {:?}", err);
-                ()
-            }
-            Result::Ok(message) => {
-                // In this case there is a message in the channel that we have to process through
-                // the actor. We process the message and then we may override the actor's returned
-                // value if its a Stop message. Overriding the return for `Stop` allows actors that
-                // don't need to do anything special when stopping to ignore processing `Stop`.
-                let mut result = (&mut *guard)(&actor.context, &message);
-                if let Some(m) = message.content_as::<SystemMsg>() {
-                    if let SystemMsg::Stop = *m {
-                        result = Status::Stop
-                    }
-                };
+        // If there isn't a message, another dispatcher thread beat us to it, no big deal.
+        if let Ok(message) = actor.receiver.peek() {
+            // In this case there is a message in the channel that we have to process through
+            // the actor. We process the message and then we may override the actor's returned
+            // value if its a Stop message. Overriding the return for `Stop` allows actors that
+            // don't need to do anything special when stopping to ignore processing `Stop`.
+            let mut result = (&mut *guard)(&actor.context, &message);
+            if let Some(m) = message.content_as::<SystemMsg>() {
+                if let SystemMsg::Stop = *m {
+                    result = Status::Stop
+                }
+            };
 
-                // Handle the result of the processing.
-                match result {
-                    Status::Processed => {
-                        if let Err(e) = actor.receiver.pop() {
-                            error!("Error on pop(): {:?}.", e);
-                            actor.context.system.stop_actor(&actor.context.aid);
-                        } else {
-                            Actor::post_message_process(&actor);
-                        }
-                    }
-                    Status::Skipped => {
-                        if let Err(e) = actor.receiver.skip() {
-                            error!("Error on skip(): {:?}.", e);
-                            actor.context.system.stop_actor(&actor.context.aid);
-                        } else {
-                            Actor::post_message_process(&actor);
-                        }
-                    }
-                    Status::ResetSkip => {
-                        if let Err(e) = actor.receiver.pop_and_reset_skip() {
-                            error!("Error on pop_and_reset_skip(): {:?}.", e);
-                            actor.context.system.stop_actor(&actor.context.aid);
-                        } else {
-                            Actor::post_message_process(&actor);
-                        }
-                    }
-                    Status::Stop => {
+            // Handle the result of the processing.
+            match result {
+                Status::Processed => {
+                    if let Err(e) = actor.receiver.pop() {
+                        error!("Error on pop(): {:?}.", e);
                         actor.context.system.stop_actor(&actor.context.aid);
-                        // Even though the actor is stopping we want to pop the message to make
-                        // sure that the metrics on the actor's channel are correct. Then we will
-                        // stop the actor in the actor system.
-                        if let Err(e) = actor.receiver.pop() {
-                            error!("Error on pop(): {:?}.", e);
-                        }
+                    } else {
+                        Actor::post_message_process(&actor);
                     }
-                };
-            }
+                }
+                Status::Skipped => {
+                    if let Err(e) = actor.receiver.skip() {
+                        error!("Error on skip(): {:?}.", e);
+                        actor.context.system.stop_actor(&actor.context.aid);
+                    } else {
+                        Actor::post_message_process(&actor);
+                    }
+                }
+                Status::ResetSkip => {
+                    if let Err(e) = actor.receiver.pop_and_reset_skip() {
+                        error!("Error on pop_and_reset_skip(): {:?}.", e);
+                        actor.context.system.stop_actor(&actor.context.aid);
+                    } else {
+                        Actor::post_message_process(&actor);
+                    }
+                }
+                Status::Stop => {
+                    actor.context.system.stop_actor(&actor.context.aid);
+                    // Even though the actor is stopping we want to pop the message to make
+                    // sure that the metrics on the actor's channel are correct. Then we will
+                    // stop the actor in the actor system.
+                    if let Err(e) = actor.receiver.pop() {
+                        error!("Error on pop(): {:?}.", e);
+                    }
+                }
+            };
         }
     }
 }
