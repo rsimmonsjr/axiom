@@ -150,7 +150,7 @@ impl std::cmp::Eq for DelayedMessage {}
 
 impl std::cmp::PartialOrd for DelayedMessage {
     fn partial_cmp(&self, other: &DelayedMessage) -> Option<std::cmp::Ordering> {
-        Some(self.instant.cmp(&other.instant))
+        Some(other.instant.cmp(&self.instant)) // Uses an inverted sort.
     }
 }
 
@@ -737,6 +737,7 @@ impl ActorSystem {
     /// That this method makes a best attempt at sending the message on time but the message may
     /// not be sent on exactly the delay passed but will never be sent before that delay.
     pub(crate) fn send_after(&self, message: Message, destination: ActorId, delay: Duration) {
+        println!("Send After Called");
         let instant = Instant::now().checked_add(delay).unwrap();
         let entry = DelayedMessage {
             uuid: Uuid::new_v4(),
@@ -746,7 +747,9 @@ impl ActorSystem {
         };
         let (ref mutex, ref condvar) = &*self.data.delayed_messages;
         let mut data = mutex.lock().unwrap();
+        println!("Send After Got Lock");
         data.push(entry);
+        println!("Notifying");
         condvar.notify_all();
     }
 }
@@ -924,13 +927,46 @@ mod tests {
         let aid = system.spawn_named("A", 0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
 
-        system.send_after(Message::new(11), aid.clone(), Duration::from_millis(100));
-        thread::sleep(Duration::from_millis(50));
+        system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(5));
         assert_eq!(1, aid.received().unwrap());
-        thread::sleep(Duration::from_millis(51));
+        thread::sleep(Duration::from_millis(6));
         assert_eq!(2, aid.received().unwrap());
 
-        // FIXME check after time elapsed.
+        system.trigger_and_await_shutdown();
+    }
+
+    /// Tests that if we execute two send_after calls, one for a longer duration than the
+    /// second, that the message will be sent for the second one before the first one enqueued
+    /// and that the second one will still arrive properly.
+    #[test]
+    fn test_send_after_before_current() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default());
+        thread::sleep(Duration::from_millis(10));
+
+        let aid1 = system.spawn_named("A", 0, simple_handler).unwrap();
+        await_received(&aid1, 1, 1000).unwrap();
+        let aid2 = system.spawn_named("B", 0, simple_handler).unwrap();
+        await_received(&aid2, 1, 1000).unwrap();
+
+        aid1.send_after(Message::new(11), Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(5));
+
+        aid2.send_after(Message::new(11), Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(5));
+
+        assert_eq!(1, aid1.received().unwrap());
+        assert_eq!(1, aid2.received().unwrap());
+
+        thread::sleep(Duration::from_millis(46));
+        assert_eq!(1, aid1.received().unwrap());
+        assert_eq!(2, aid2.received().unwrap());
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(2, aid1.received().unwrap());
+        assert_eq!(2, aid2.received().unwrap());
 
         system.trigger_and_await_shutdown();
     }

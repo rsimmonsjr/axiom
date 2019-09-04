@@ -299,6 +299,15 @@ impl ActorId {
         self.send(Message::new(value))
     }
 
+    /// A utility to call `try_send_after` and just unwrap the result. This should only be
+    /// used if the developer knows for sure there will not be an error.
+    pub fn send_after(&self, message: Message, duration: Duration) {
+        match self.try_send_after(message, duration) {
+            Ok(_) => (),
+            Err(e) => panic!("Error occurred sending to aid: {:?}", e),
+        }
+    }
+
     /// Attempts to send a message to the actor with the given [`ActorId`] and returns
     /// `std::Result::Ok` when the send was successful or a `std::Result::Err<ActorError>`
     /// if something went wrong with the send.
