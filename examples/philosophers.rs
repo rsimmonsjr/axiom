@@ -27,6 +27,7 @@ use log::LevelFilter;
 use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::time::{Duration, Instant};
 
 /// A command sent to a fork actor.
@@ -477,8 +478,15 @@ struct EndSimulation {}
 /// Main method of the dining philosophers problem. This sets up the solution and starts the
 /// actors.
 pub fn main() {
+    let args: Vec<String> = env::args().collect();
+    let level = if args.contains(&"-v".to_string()) {
+        LevelFilter::Debug
+    } else {
+        LevelFilter::Error
+    };
+
     env_logger::builder()
-        .filter_level(LevelFilter::Debug)
+        .filter_level(level)
         .is_test(true)
         .try_init()
         .unwrap();
