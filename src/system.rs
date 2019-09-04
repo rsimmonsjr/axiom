@@ -737,7 +737,6 @@ impl ActorSystem {
     /// That this method makes a best attempt at sending the message on time but the message may
     /// not be sent on exactly the delay passed but will never be sent before that delay.
     pub(crate) fn send_after(&self, message: Message, destination: ActorId, delay: Duration) {
-        println!("Send After Called");
         let instant = Instant::now().checked_add(delay).unwrap();
         let entry = DelayedMessage {
             uuid: Uuid::new_v4(),
@@ -747,9 +746,7 @@ impl ActorSystem {
         };
         let (ref mutex, ref condvar) = &*self.data.delayed_messages;
         let mut data = mutex.lock().unwrap();
-        println!("Send After Got Lock");
         data.push(entry);
-        println!("Notifying");
         condvar.notify_all();
     }
 }
