@@ -23,6 +23,8 @@
 //! FIXME There should be some way to abort the whole program other than panicing one actor.
 
 use axiom::*;
+use log::LevelFilter;
+use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -60,8 +62,25 @@ impl Fork {
         }
     }
 
+    #[inline]
+    fn print_state(&mut self, context: &Context, info: &str) {
+        debug!(
+            "[{}] {} ==> state: owned_by: {}, clean: {}",
+            context.aid.name().unwrap(),
+            info,
+            self.owned_by
+                .as_ref()
+                .map_or("_".to_string(), |a| a.name().unwrap()),
+            self.clean,
+        );
+    }
+
     /// Request that a fork be sent to a philosopher.
     fn fork_requested(&mut self, context: &Context, requester: &ActorId) -> Status {
+        self.print_state(
+            context,
+            &format!("Fork Requested by {}", requester.name().unwrap()),
+        );
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
@@ -82,23 +101,28 @@ impl Fork {
     /// The philosopher that is the current owner of the fork has put it down, making it available
     /// for other philosophers to pick up.
     fn fork_put_down(&mut self, context: &Context, sender: &ActorId) -> Status {
+        self.print_state(
+            context,
+            &format!("Fork put down by {}", sender.name().unwrap()),
+        );
         match &self.owned_by {
             Some(owner) => {
                 if owner == sender {
                     self.owned_by = None;
+                    self.clean = true;
                     // Resetting the skip allows fork requests to be processed.
                     Status::ResetSkip
                 } else {
-                    println!(
-                        "[{}] Got PutDownFork from non-owner: {}",
-                        context.aid, sender
+                    error!(
+                        "[{}] fork_put_down() from non-owner: {} real owner is: {}",
+                        context.aid, sender, owner
                     );
                     Status::Processed
                 }
             }
             None => {
-                println!(
-                    "[{}] Got PutDownFork from non-owner: {}",
+                error!(
+                    "[{}] fork_put_down() from non-owner: {} real owner is: None:",
                     context.aid, sender
                 );
                 Status::Processed
@@ -110,6 +134,10 @@ impl Fork {
     /// will mark the fork as dirty and make it available to be sent to another philosopher if
     /// they request the fork.
     fn using_fork(&mut self, context: &Context, sender: &ActorId) -> Status {
+        self.print_state(
+            context,
+            &format!("Using Fork from {}", sender.name().unwrap()),
+        );
         match self.owned_by {
             Some(ref owner) => {
                 if *owner == *sender {
@@ -118,12 +146,12 @@ impl Fork {
                     // has been marked as being dirty.
                     Status::ResetSkip
                 } else {
-                    println!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
+                    error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
                     Status::Processed
                 }
             }
             _ => {
-                println!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
+                error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
                 Status::Processed
             }
         }
@@ -145,6 +173,7 @@ impl Fork {
 }
 
 /// The state of a philosopher at the table.
+#[derive(Debug)]
 enum PhilosopherState {
     /// Has no forks and is thinking.
     Thinking,
@@ -157,10 +186,12 @@ enum PhilosopherState {
 /// A command sent to an actor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Command {
-    /// Command to start eating.
-    StopEating,
-    /// Command to stop eating.
-    BecomeHungry,
+    /// Command to start eating. The u16 is the current state change number when sent this will
+    /// be used to track whether this message is old or if it should be handled.
+    StopEating(u16),
+    /// Command to stop eating. The u16 is the current state change number when sent this will
+    /// be used to track whether this message is old or if it should be handled.
+    BecomeHungry(u16),
     /// Instructs an actor to receive give up a fork with the given `aid`.
     GiveUpFork(ActorId),
     /// Instructs an actor to receive a fork.
@@ -179,6 +210,10 @@ struct MetricsReply {
 /// A struct that holds metrics for a philosopher.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Metrics {
+    /// The number of state changes that have occurred.
+    state_change_count: u16,
+    /// The number of times a Philosopher failed to eat because he didnt have both forks.
+    failed_to_eat: u16,
     /// The time that the Philosopher spent thinking.
     time_thinking: Duration,
     /// The time that the Philosopher spent hungry.
@@ -197,10 +232,14 @@ struct Philosopher {
     left_fork_aid: ActorId,
     /// Whether the philosopher has the left fork.
     has_left_fork: bool,
+    /// Whether or not the philosopher has requested the left fork.
+    left_fork_requested: bool,
     /// The `ActorId` of the philosopher's right fork.
     right_fork_aid: ActorId,
     /// Whether the philosopher has the right fork.
     has_right_fork: bool,
+    /// Whether or not the philosopher has requested the right fork.
+    right_fork_requested: bool,
     /// The last time the philosopher's state changed. This is used for tracking time eating, etc.
     last_state_change: Instant,
     /// The metrics for this actor.
@@ -220,10 +259,14 @@ impl Philosopher {
             state: PhilosopherState::Thinking,
             left_fork_aid,
             has_left_fork: false,
+            left_fork_requested: false,
             right_fork_aid,
             has_right_fork: false,
+            right_fork_requested: false,
             last_state_change: Instant::now(),
             metrics: Metrics {
+                state_change_count: 0,
+                failed_to_eat: 0,
                 time_thinking: Duration::from_micros(0),
                 time_hungry: Duration::from_micros(0),
                 time_eating: Duration::from_micros(0),
@@ -231,12 +274,24 @@ impl Philosopher {
         }
     }
 
+    #[inline]
+    fn print_state(&mut self, context: &Context, info: &str) {
+        debug!(
+            "[{}] {} ==> state: {:?}, left: {:?}, right: {:?}",
+            context.aid.name().unwrap(),
+            info,
+            self.state,
+            (self.has_left_fork, self.left_fork_requested),
+            (self.has_right_fork, self.right_fork_requested),
+        );
+    }
+
     /// Changes the philosopher to a state of eating.
     fn begin_eating(&mut self, context: &Context) {
-        println!("[{}] begin_eating()", context.aid);
         self.metrics.time_hungry += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
         self.state = PhilosopherState::Eating;
+        self.metrics.state_change_count += 1;
         // Now that we are eating we will tell the fork that we are using it,
         // thus marking the fork as dirty.
         self.left_fork_aid
@@ -245,159 +300,138 @@ impl Philosopher {
             .send_new(ForkCommand::UsingFork(context.aid.clone()));
 
         // Schedule to stop eating after an eating time slice elapsed.
-        let msg = Message::new(Command::StopEating);
+        let msg = Message::new(Command::StopEating(self.metrics.state_change_count));
         context.aid.send_after(msg, self.time_slice);
     }
 
     /// The philosopher received a fork. Once they have both forks they can start eating.
     /// Otherwise they have to wait for the other fork to begin eating.
     fn fork_received(&mut self, context: &Context, fork_aid: &ActorId) -> Status {
-        match &self.state {
-            PhilosopherState::Hungry => {
-                if self.left_fork_aid == *fork_aid {
-                    println!("[{}] Got Left Fork {}", context.aid, fork_aid);
-                    self.has_left_fork = true;
-                } else if self.right_fork_aid == *fork_aid {
-                    println!("[{}] Got Right Fork {}", context.aid, fork_aid);
-                    self.has_right_fork = true;
-                } else {
-                    panic!("[{}] Unknown Fork Received: {}", context.aid, *fork_aid);
-                }
+        if self.left_fork_aid == *fork_aid {
+            self.print_state(context, "Got Left Fork");
+            self.has_left_fork = true;
+            self.left_fork_requested = false;
+        } else if self.right_fork_aid == *fork_aid {
+            self.print_state(context, "Got Right Fork");
+            self.has_right_fork = true;
+            self.right_fork_requested = false;
+        } else {
+            panic!("[{}] Unknown Fork Received: {}", context.aid, *fork_aid);
+        }
 
-                // If we have both forks then we can start eating.
-                if self.has_left_fork && self.has_right_fork {
-                    self.begin_eating(context);
-                }
-            }
-            PhilosopherState::Thinking => {
-                println!("[{}] Got Fork while thinking! {}", context.aid, fork_aid);
-            }
-            PhilosopherState::Eating => {
-                println!("[{}] Got Fork while eating! {}", context.aid, fork_aid);
-            }
-        };
+        // If we have both forks then we can start eating.
+        if self.has_left_fork && self.has_right_fork {
+            self.begin_eating(context);
+        }
         Status::Processed
+    }
+
+    /// Helper to request forks that the philosopher doesnt have.
+    fn request_missing_forks(&mut self, context: &Context) {
+        if !self.has_left_fork && !self.left_fork_requested {
+            self.left_fork_requested = true;
+            self.left_fork_aid
+                .send_new(ForkCommand::RequestFork(context.aid.clone()));
+        }
+        if !self.has_right_fork && !self.right_fork_requested {
+            self.right_fork_requested = true;
+            self.right_fork_aid
+                .send_new(ForkCommand::RequestFork(context.aid.clone()));
+        }
     }
 
     /// The philosopher is being instructed to get hungry which will cause them to ask for the
     /// forks to eat. Note that the philosopher will have to have both forks to start eating.
     /// Once a philosopher starts eating, the forks will be sent a message indicating they are
-    /// being used.
-    fn become_hungry(&mut self, context: &Context) -> Status {
-        println!("[{}] become_hungry()", context.aid);
-        match &self.state {
-            PhilosopherState::Thinking => {
-                self.metrics.time_thinking += Instant::elapsed(&self.last_state_change);
-                self.last_state_change = Instant::now();
-                self.state = PhilosopherState::Hungry;
-                // Now that we are hungry we need both forks if we don't already have them.
-                // or just start eating if we have both.
-                match (self.has_left_fork, self.has_right_fork) {
-                    (false, false) => {
-                        self.left_fork_aid
-                            .send_new(ForkCommand::RequestFork(context.aid.clone()));
-                        self.right_fork_aid
-                            .send_new(ForkCommand::RequestFork(context.aid.clone()));
-                        self.state = PhilosopherState::Hungry
+    /// being used. Note that since this is sent as a scheduled message it may arrive later
+    /// after the philosopher has changed state. For this reason we track the state change count
+    /// and compare it with the number in the message.
+    fn become_hungry(&mut self, context: &Context, state_num: u16) -> Status {
+        if self.metrics.state_change_count == state_num {
+            if self.has_left_fork && self.has_right_fork {
+                self.begin_eating(context);
+            } else {
+                match &self.state {
+                    PhilosopherState::Thinking => {
+                        self.metrics.time_thinking += Instant::elapsed(&self.last_state_change);
+                        self.last_state_change = Instant::now();
+                        self.state = PhilosopherState::Hungry;
+                        self.metrics.state_change_count += 1;
+                        self.request_missing_forks(context);
                     }
-                    (true, false) => {
-                        self.right_fork_aid
-                            .send_new(ForkCommand::RequestFork(context.aid.clone()));
-                        self.state = PhilosopherState::Hungry
+                    PhilosopherState::Hungry => {
+                        error!("[{}] Got BecomeHungry while eating!", context.aid);
                     }
-                    (false, true) => {
-                        self.left_fork_aid
-                            .send_new(ForkCommand::RequestFork(context.aid.clone()));
-                        self.state = PhilosopherState::Hungry
+                    PhilosopherState::Eating => {
+                        error!("[{}] Got BecomeHungry while eating!", context.aid);
                     }
-                    _ => {
-                        self.state = PhilosopherState::Eating;
-                        // Now that we are eating we will tell the fork that we are using it,
-                        // thus marking the fork as dirty.
-                        self.left_fork_aid
-                            .send_new(ForkCommand::UsingFork(context.aid.clone()));
-                        self.right_fork_aid
-                            .send_new(ForkCommand::UsingFork(context.aid.clone()));
-                    }
-                }
+                };
             }
-            PhilosopherState::Hungry => {
-                println!("[{}] Got BecomeHungry while eating!", context.aid);
-            }
-            PhilosopherState::Eating => {
-                println!("[{}] Got BecomeHungry while eating!", context.aid);
-            }
-        };
+        }
         Status::Processed
     }
 
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
     /// philosopher will put down his forks. He will only do that if requested to.
     fn begin_thinking(&mut self, context: &Context) {
-        println!("[{}] begin_thinking()", context.aid);
         self.state = PhilosopherState::Thinking;
+        self.metrics.state_change_count += 1;
         self.metrics.time_eating += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
 
-        let msg = Message::new(Command::BecomeHungry);
+        let msg = Message::new(Command::BecomeHungry(self.metrics.state_change_count));
         context.aid.send_after(msg, self.time_slice);
     }
 
-    /// Processes a command to stop eating.
-    fn stop_eating(&mut self, context: &Context) -> Status {
-        println!("[{}] stop_eating()", context.aid);
-        match &self.state {
-            PhilosopherState::Eating => {
+    /// Processes a command to stop eating. Note that this can be received in any state because
+    /// it is a delayed message send and thus it was enqueued when the philosopher was in the
+    /// eating state but the philosopher might be in another state when received. That is why
+    /// we track the state change count and compare it with the number in the message.
+    fn stop_eating(&mut self, context: &Context, state_num: u16) -> Status {
+        if self.metrics.state_change_count == state_num {
+            if let PhilosopherState::Eating = &self.state {
                 self.begin_thinking(context);
-                Status::Processed
-            }
-            PhilosopherState::Thinking => {
-                println!("[{}] Got StopEating while thinking, ignoring!", context.aid);
-                Status::Processed
-            }
-            PhilosopherState::Hungry => {
-                println!("[{}] Got StopEating while hungry, ignoring!", context.aid);
-                Status::Processed
             }
         }
+        Status::Processed
     }
 
     /// Processes a command to a philosopher to give up a fork. Note that this can be received
     /// when the philosopher is in any state since the philosopher will not put down a fork
     /// unless he is asked to. A philosopher can be eating, stop eating and start thinking
-    /// and then start eating again if no one asked for his forks.
+    /// and then start eating again if no one asked for his forks. The fork actor is the only
+    /// actor sending this message and it will only do so if the fork is dirty.
     fn give_up_fork(&mut self, context: &Context, fork_aid: &ActorId) -> Status {
         if self.left_fork_aid == *fork_aid {
+            self.print_state(context, "Gave Up Left Fork");
             self.has_left_fork = false;
+            fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()));
         } else if self.right_fork_aid == *fork_aid {
+            self.print_state(context, "Gave Up Right Fork");
             self.has_right_fork = false;
+            fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()));
         } else {
-            panic!(
+            error!(
                 "[{}] Unknown fork asked for: {}:\n left ==>  {}\n right ==> {}",
                 context.aid, *fork_aid, self.left_fork_aid, self.right_fork_aid
             );
         }
-        println!(
-            "[{}] give_up_fork() {:?}",
-            context.aid,
-            (self.has_left_fork, self.has_right_fork)
-        );
-
-        // Tell the fork that we put it down.
-        fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()));
 
         match &self.state {
-            PhilosopherState::Thinking => Status::Processed,
-            _ => {
+            PhilosopherState::Hungry => {
+                self.metrics.failed_to_eat += 1;
                 self.begin_thinking(context);
-                Status::Processed
             }
+            PhilosopherState::Eating => {
+                self.begin_thinking(context);
+            }
+            _ => (),
         }
+        Status::Processed
     }
 
     /// A function that handles sending metrics to an actor that requests the metrics.
     fn send_metrics(&mut self, context: &Context, reply_to: &ActorId) -> Status {
-        println!("[{}] send_metrics()", context.aid);
         // We copy the metrics becase we want to send immutable data. This call
         // cant move the metrics out of self so it must copy them.
         reply_to.send_new(MetricsReply {
@@ -413,8 +447,8 @@ impl Philosopher {
     pub fn handle(&mut self, context: &Context, message: &Message) -> Status {
         if let Some(msg) = message.content_as::<Command>() {
             match &*msg {
-                Command::StopEating => self.stop_eating(context),
-                Command::BecomeHungry => self.become_hungry(context),
+                Command::StopEating(state_num) => self.stop_eating(context, *state_num),
+                Command::BecomeHungry(state_num) => self.become_hungry(context, *state_num),
                 Command::ReceiveFork(fork_aid) => self.fork_received(context, fork_aid),
                 Command::GiveUpFork(fork_aid) => self.give_up_fork(context, fork_aid),
                 Command::SendMetrics(reply_to) => self.send_metrics(context, reply_to),
@@ -425,7 +459,7 @@ impl Philosopher {
                 // this message will be recieved only once so we want to put the most used
                 // message types first.
                 SystemMsg::Start => {
-                    context.aid.send_new(Command::BecomeHungry);
+                    context.aid.send_new(Command::BecomeHungry(0));
                     Status::Processed
                 }
                 _ => Status::Processed,
@@ -443,11 +477,17 @@ struct EndSimulation {}
 /// Main method of the dining philosophers problem. This sets up the solution and starts the
 /// actors.
 pub fn main() {
+    env_logger::builder()
+        .filter_level(LevelFilter::Warn)
+        .is_test(true)
+        .try_init()
+        .unwrap();
+
     // FIXME Let the user pass in the number of philosophers at the table, time slice
     // and runtime as command line parameters.
-    let count = 3 as usize;
+    let count = 5 as usize;
     let time_slice = Duration::from_millis(100);
-    let run_time = Duration::from_millis(1000);
+    let run_time = Duration::from_millis(2000);
     let mut forks: Vec<ActorId> = Vec::with_capacity(count);
     let mut results: HashMap<ActorId, Option<Metrics>> = HashMap::with_capacity(count);
 
@@ -487,45 +527,45 @@ pub fn main() {
     // This actor is created with a closure and when it gets the timed message it will
     // request metrics of all of the actors and then print the metrics when all collected
     // and shut down the actor system.
-    let _shutdown = system.spawn(
-        results,
-        move |state: &mut HashMap<ActorId, Option<Metrics>>,
-              context: &Context,
-              message: &Message| {
-            if let Some(msg) = message.content_as::<MetricsReply>() {
-                println!("[{}] Got MetricsReply ", context.aid);
-                state.insert(msg.aid.clone(), Some(msg.metrics));
+    let _shutdown = system
+        .spawn_named(
+            "Manager",
+            results,
+            move |state: &mut HashMap<ActorId, Option<Metrics>>,
+                  context: &Context,
+                  message: &Message| {
+                if let Some(msg) = message.content_as::<MetricsReply>() {
+                    state.insert(msg.aid.clone(), Some(msg.metrics));
 
-                // Check to see if we have all of the metrics collected and if so then
-                // output the results of the simulation and end the program by shutting
-                // down the actor system.
-                if !state.iter().any(|(_, metrics)| metrics.is_none()) {
-                    println!("Final Metrics:");
-                    for (aid, metrics) in state.iter() {
-                        println!("{}: {:?}", aid, metrics);
+                    // Check to see if we have all of the metrics collected and if so then
+                    // output the results of the simulation and end the program by shutting
+                    // down the actor system.
+                    if !state.iter().any(|(_, metrics)| metrics.is_none()) {
+                        println!("Final Metrics:");
+                        for (aid, metrics) in state.iter() {
+                            println!("{}: {:?}", aid, metrics);
+                        }
+                        context.system.trigger_shutdown();
                     }
-                    context.system.trigger_shutdown();
+                } else if let Some(_) = message.content_as::<EndSimulation>() {
+                    // We create a message that will be sent to all actors in our list. Note that
+                    // we can send the message with an extremely lightweight clone.
+                    let request = Message::new(Command::SendMetrics(context.aid.clone()));
+                    for (aid, _) in state.iter() {
+                        aid.send(request.clone());
+                    }
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    // FIXME SERIOUSLY consider making SystemMsg variants into structs to simplify
+                    // code.
+                    if let SystemMsg::Start = &*msg {
+                        let msg = Message::new(EndSimulation {});
+                        context.aid.send_after(msg, run_time);
+                    }
                 }
-            } else if let Some(_) = message.content_as::<EndSimulation>() {
-                println!("[{}] Got EndSimulation", context.aid);
-                // We create a message that will be sent to all actors in our list. Note that
-                // we can send the message with an extremely lightweight clone.
-                let request = Message::new(Command::SendMetrics(context.aid.clone()));
-                for (aid, _) in state.iter() {
-                    aid.send(request.clone());
-                }
-            } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                // FIXME SERIOUSLY consider making SystemMsg variants into structs to simplify
-                // code.
-                if let SystemMsg::Start = &*msg {
-                    println!("[{}] Got Start ()", context.aid);
-                    let msg = Message::new(SystemMsg::Stop);
-                    context.aid.send_after(msg, run_time);
-                }
-            }
-            Status::Processed
-        },
-    );
+                Status::Processed
+            },
+        )
+        .unwrap();
 
     system.await_shutdown();
 }
