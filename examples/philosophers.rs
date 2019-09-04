@@ -233,6 +233,7 @@ impl Philosopher {
 
     /// Changes the philosopher to a state of eating.
     fn begin_eating(&mut self, context: &Context) {
+        println!("[{}] begin_eating()", context.aid);
         self.metrics.time_hungry += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
         self.state = PhilosopherState::Eating;
@@ -251,13 +252,12 @@ impl Philosopher {
     /// The philosopher received a fork. Once they have both forks they can start eating.
     /// Otherwise they have to wait for the other fork to begin eating.
     fn fork_received(&mut self, context: &Context, fork_aid: &ActorId) -> Status {
-        println!("[{}] fork_received()", context.aid);
         match &self.state {
             PhilosopherState::Hungry => {
                 if self.left_fork_aid == *fork_aid {
                     println!("[{}] Got Left Fork {}", context.aid, fork_aid);
                     self.has_left_fork = true;
-                } else if self.left_fork_aid == *fork_aid {
+                } else if self.right_fork_aid == *fork_aid {
                     println!("[{}] Got Right Fork {}", context.aid, fork_aid);
                     self.has_right_fork = true;
                 } else {
@@ -334,6 +334,7 @@ impl Philosopher {
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
     /// philosopher will put down his forks. He will only do that if requested to.
     fn begin_thinking(&mut self, context: &Context) {
+        println!("[{}] begin_thinking()", context.aid);
         self.state = PhilosopherState::Thinking;
         self.metrics.time_eating += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
@@ -366,14 +367,21 @@ impl Philosopher {
     /// unless he is asked to. A philosopher can be eating, stop eating and start thinking
     /// and then start eating again if no one asked for his forks.
     fn give_up_fork(&mut self, context: &Context, fork_aid: &ActorId) -> Status {
-        println!("[{}] give_up_fork()", context.aid);
         if self.left_fork_aid == *fork_aid {
             self.has_left_fork = false;
-        } else if self.left_fork_aid == *fork_aid {
+        } else if self.right_fork_aid == *fork_aid {
             self.has_right_fork = false;
         } else {
-            panic!("[{}] Unknown fork asked for: {}", context.aid, *fork_aid);
+            panic!(
+                "[{}] Unknown fork asked for: {}:\n left ==>  {}\n right ==> {}",
+                context.aid, *fork_aid, self.left_fork_aid, self.right_fork_aid
+            );
         }
+        println!(
+            "[{}] give_up_fork() {:?}",
+            context.aid,
+            (self.has_left_fork, self.has_right_fork)
+        );
 
         // Tell the fork that we put it down.
         fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()));
@@ -437,7 +445,7 @@ struct EndSimulation {}
 pub fn main() {
     // FIXME Let the user pass in the number of philosophers at the table, time slice
     // and runtime as command line parameters.
-    let count = 5 as usize;
+    let count = 3 as usize;
     let time_slice = Duration::from_millis(100);
     let run_time = Duration::from_millis(1000);
     let mut forks: Vec<ActorId> = Vec::with_capacity(count);
@@ -485,6 +493,7 @@ pub fn main() {
               context: &Context,
               message: &Message| {
             if let Some(msg) = message.content_as::<MetricsReply>() {
+                println!("[{}] Got MetricsReply ", context.aid);
                 state.insert(msg.aid.clone(), Some(msg.metrics));
 
                 // Check to see if we have all of the metrics collected and if so then
@@ -498,6 +507,7 @@ pub fn main() {
                     context.system.trigger_shutdown();
                 }
             } else if let Some(_) = message.content_as::<EndSimulation>() {
+                println!("[{}] Got EndSimulation", context.aid);
                 // We create a message that will be sent to all actors in our list. Note that
                 // we can send the message with an extremely lightweight clone.
                 let request = Message::new(Command::SendMetrics(context.aid.clone()));
@@ -508,6 +518,7 @@ pub fn main() {
                 // FIXME SERIOUSLY consider making SystemMsg variants into structs to simplify
                 // code.
                 if let SystemMsg::Start = &*msg {
+                    println!("[{}] Got Start ()", context.aid);
                     let msg = Message::new(SystemMsg::Stop);
                     context.aid.send_after(msg, run_time);
                 }
