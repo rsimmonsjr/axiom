@@ -65,7 +65,7 @@ impl Fork {
     #[inline]
     fn print_state(&mut self, context: &Context, info: &str) {
         debug!(
-            "[{}] {} ==> state: owned_by: {}, clean: {}",
+            "[{}] {} ==> owned_by: {}, clean: {}",
             context.aid.name().unwrap(),
             info,
             self.owned_by
