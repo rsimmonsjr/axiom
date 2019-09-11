@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use axiom::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct Game {
     funds: i64,
     wager: u32,
@@ -39,7 +39,6 @@ impl Game {
                 results_vec.push(self.funds);
             }
             results_aid.send_new(GameMsg::new(ctx.aid.clone(), results_vec));
-            println!("Stopping `Game`");
             return Status::Stop;
         }
         Status::Processed
@@ -101,8 +100,13 @@ impl GameResults {
                 // This is the first code that will run in the actor. It spawns the Game actors,
                 // registers them to its monitoring list, then sends them a start signal
                 SystemMsg::Start => {
+                    let game_conditions = Game::default();
+                    println!("Starting funds: ${}", game_conditions.funds);
+                    println!("Wager per round: ${}", game_conditions.wager);
+                    println!("Rounds per game: {}", game_conditions.total_plays);
+                    println!("Running simulations...");
                     for _ in 0..self.total_games {
-                        let aid = ctx.system.spawn(Game::default(), Game::play);
+                        let aid = ctx.system.spawn(game_conditions, Game::play);
                         ctx.system.monitor(&ctx.aid, &aid);
                         aid.send_new(ctx.aid.clone());
                     }
@@ -112,7 +116,6 @@ impl GameResults {
                 SystemMsg::Stopped(_) => {
                     self.games_finished += 1;
                     if self.games_finished == self.total_games {
-                        println!("Stopping `GameResults`");
                         let average_funds = self
                             .results
                             .values()
