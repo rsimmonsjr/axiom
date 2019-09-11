@@ -5,7 +5,7 @@
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use axiom::*;
 
@@ -26,6 +26,7 @@ impl Game {
     }
 
     fn play(&mut self, ctx: &Context, msg: &Message) -> Status {
+        // The game starts when this actor receives a go message from the GameResults actor
         if let Some(results_aid) = msg.content_as::<ActorId>() {
             let mut current_play = 1;
             while current_play <= self.total_plays {
@@ -70,26 +71,25 @@ impl GameMsg {
 
 #[derive(Debug)]
 struct GameResults {
+    games_finished: u32,
+    total_games: u32,
     results: HashMap<ActorId, Vec<i64>>,
-    monitoring: HashSet<ActorId>,
 }
 
 impl GameResults {
-    fn new() -> Self {
+    fn new(total_games: u32) -> Self {
         Self {
+            games_finished: 0,
+            total_games: total_games,
             results: HashMap::new(),
-            monitoring: HashSet::new(),
         }
     }
 }
 
 impl GameResults {
     fn gather(&mut self, ctx: &Context, msg: &Message) -> Status {
+        // Receive messages from the Game actors and aggregate their results
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
-            // Keep track of all the ActorIds that have sent us messages
-            if self.monitoring.insert(game_msg.aid.clone()) {
-                ActorSystem::current().monitor(&ctx.aid, &game_msg.aid);
-            }
             let entry = self
                 .results
                 .entry(game_msg.aid.clone())
@@ -99,19 +99,23 @@ impl GameResults {
 
         if let Some(sys_msg) = msg.content_as::<SystemMsg>() {
             match &*sys_msg {
-                SystemMsg::Stopped(aid) => {
-                    // Send the Stop command only if all the actors talking to us
-                    // have also stopped
-                    if self.monitoring.contains(&aid) {
-                        if self
-                            .monitoring
-                            .iter()
-                            .all(|aid| !ActorSystem::current().is_actor_alive(&aid))
-                        {
-                            println!("Stopping `GameResults`");
-                            println!("{:#?}", self.results);
-                            ActorSystem::current().trigger_shutdown();
-                        }
+                // This is the first code that will run in the actor. It spawns the Game actors,
+                // registers them to its monitoring list, then sends them a start signal
+                SystemMsg::Start => {
+                    for _ in 0..self.total_games {
+                        let aid = ctx.system.spawn(Game::default(), Game::play);
+                        ctx.system.monitor(&ctx.aid, &aid);
+                        aid.send_new(ctx.aid.clone());
+                    }
+                },
+                // This code runs each time a monitored actor stops. Once all Game actors are finished,
+                // the actor system will be shut down.
+                SystemMsg::Stopped(_) => {
+                    self.games_finished += 1;
+                    if self.games_finished == self.total_games {
+                        println!("Stopping `GameResults`");
+                        println!("{:#?}", self.results);
+                        ctx.system.trigger_shutdown();
                     }
                 }
                 _ => {}
@@ -121,28 +125,19 @@ impl GameResults {
     }
 }
 
-const NUM_GAMES: usize = 5;
+const NUM_GAMES: u32 = 5;
 
 fn main() {
-    // First we initialize the actor system using the default config.
-    let config = ActorSystemConfig::default();
+    // Initialize the actor system
+    let config = ActorSystemConfig {
+        work_channel_size: 16,
+        threads_size: 4,
+        thread_wait_time: 10,
+    };
     let system = ActorSystem::create(config);
 
-    // Have to do this since we want to call from outside actor system.
-    system.init_current();
-
-    // Spawn the Game actors.
-    let game_ids = std::iter::repeat_with(|| system.spawn(Game::default(), Game::play))
-        .take(NUM_GAMES)
-        .collect::<Vec<ActorId>>();
-
-    // Spawn the results aggregator.
-    let results_aid = system.spawn(GameResults::new(), GameResults::gather);
-
-    // Start the game by sending the ID for the GameResults actor to each Game instance.
-    for id in game_ids {
-        id.send_new(results_aid.clone());
-    }
+    // Spawn the results aggregator, which will in turn spawn the Game actors.
+    system.spawn(GameResults::new(NUM_GAMES), GameResults::gather);
 
     // Wait for the actor system to shut down.
     system.await_shutdown();
