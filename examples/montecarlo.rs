@@ -29,14 +29,16 @@ impl Game {
         // The game starts when this actor receives a go message from the GameResults actor
         if let Some(results_aid) = msg.content_as::<ActorId>() {
             let mut current_play = 1;
+            let mut results_vec = Vec::new();
             while current_play <= self.total_plays {
                 current_play += 1;
                 match Game::roll_dice() {
                     true => self.funds += self.wager as i64,
                     false => self.funds -= self.wager as i64,
                 }
-                results_aid.send_new(GameMsg::new(ctx.aid.clone(), self.funds));
+                results_vec.push(self.funds);
             }
+            results_aid.send_new(GameMsg::new(ctx.aid.clone(), results_vec));
             println!("Stopping `Game`");
             return Status::Stop;
         }
@@ -49,7 +51,7 @@ impl Default for Game {
         Self {
             funds: 10_000,
             wager: 100,
-            total_plays: 10,
+            total_plays: 100,
         }
     }
 }
@@ -57,14 +59,14 @@ impl Default for Game {
 #[derive(Debug, Serialize, Deserialize)]
 struct GameMsg {
     aid: ActorId,
-    funds: i64,
+    results_vec: Vec<i64>,
 }
 
 impl GameMsg {
-    fn new(aid: ActorId, funds: i64) -> Self {
+    fn new(aid: ActorId, vec: Vec<i64>) -> Self {
         Self {
             aid: aid,
-            funds: funds,
+            results_vec: vec,
         }
     }
 }
@@ -90,11 +92,8 @@ impl GameResults {
     fn gather(&mut self, ctx: &Context, msg: &Message) -> Status {
         // Receive messages from the Game actors and aggregate their results
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
-            let entry = self
-                .results
-                .entry(game_msg.aid.clone())
-                .or_insert(Vec::new());
-            entry.push(game_msg.funds);
+            self.results
+                .insert(game_msg.aid.clone(), game_msg.results_vec.clone());
         }
 
         if let Some(sys_msg) = msg.content_as::<SystemMsg>() {
@@ -107,14 +106,21 @@ impl GameResults {
                         ctx.system.monitor(&ctx.aid, &aid);
                         aid.send_new(ctx.aid.clone());
                     }
-                },
+                }
                 // This code runs each time a monitored actor stops. Once all Game actors are finished,
                 // the actor system will be shut down.
                 SystemMsg::Stopped(_) => {
                     self.games_finished += 1;
                     if self.games_finished == self.total_games {
                         println!("Stopping `GameResults`");
-                        println!("{:#?}", self.results);
+                        let average_funds = self
+                            .results
+                            .values()
+                            .map(|v| v.last().unwrap())
+                            .sum::<i64>()
+                            / self.total_games as i64;
+                        println!("Simulations ran: {}", self.results.len());
+                        println!("Final average funds: ${}", average_funds);
                         ctx.system.trigger_shutdown();
                     }
                 }
@@ -125,14 +131,16 @@ impl GameResults {
     }
 }
 
-const NUM_GAMES: u32 = 5;
+const NUM_GAMES: u32 = 100;
 
 fn main() {
     // Initialize the actor system
+    // FIXME: We spawn an unreasonable number of worker threads here because that magically prevents
+    // a deadlock from happening somehow. Fixing the source of the deadlock would be preferable.
     let config = ActorSystemConfig {
-        work_channel_size: 16,
-        threads_size: 4,
-        thread_wait_time: 10,
+        work_channel_size: 100,
+        threads_size: 200,
+        thread_wait_time: 100,
     };
     let system = ActorSystem::create(config);
 
