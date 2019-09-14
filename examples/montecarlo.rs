@@ -6,6 +6,7 @@ use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use axiom::*;
 
@@ -143,7 +144,7 @@ fn main() {
     let config = ActorSystemConfig {
         work_channel_size: 100,
         threads_size: 200,
-        thread_wait_time: 100,
+        thread_wait_time: Duration::from_millis(100),
     };
     let system = ActorSystem::create(config);
 
