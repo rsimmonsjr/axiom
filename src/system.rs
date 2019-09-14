@@ -98,8 +98,8 @@ pub struct ActorSystemConfig {
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
-    /// getting enough work to justify their existence. The default value is 100.
-    pub thread_wait_time: u16,
+    /// getting enough work to justify their existence. The default value is 100 milliseconds.
+    pub thread_wait_time: Duration,
 }
 
 impl Default for ActorSystemConfig {
@@ -108,7 +108,7 @@ impl Default for ActorSystemConfig {
         ActorSystemConfig {
             work_channel_size: 16,
             threads_size: 4,
-            thread_wait_time: 100,
+            thread_wait_time: Duration::from_millis(100),
         }
     }
 }
@@ -352,13 +352,14 @@ impl ActorSystem {
         debug!("Sending hello from {}", self.data.uuid);
 
         // FIXME (Issue #75) Make error handling in ActorSystem::connect more robust.
-        let system_actor_aid = match receiver.receive_await_timeout(100) {
-            Ok(message) => match message {
-                WireMessage::Hello { system_actor_aid } => system_actor_aid,
-                _ => panic!("Expected first message to be a Hello"),
-            },
-            Err(e) => panic!("Expected to read a Hello message {:?}", e),
-        };
+        let system_actor_aid =
+            match receiver.receive_await_timeout(self.data.config.thread_wait_time) {
+                Ok(message) => match message {
+                    WireMessage::Hello { system_actor_aid } => system_actor_aid,
+                    _ => panic!("Expected first message to be a Hello"),
+                },
+                Err(e) => panic!("Expected to read a Hello message {:?}", e),
+            };
 
         // Starts a thread to read incomming wire messages and process them.
         let system = self.clone();
@@ -394,8 +395,8 @@ impl ActorSystem {
     /// Connects two actor systems using two channels directly. This can be used as a utility
     /// in testing or to link two actor systems directly within the same process.
     pub fn connect_with_channels(system1: ActorSystem, system2: ActorSystem) {
-        let (tx1, rx1) = secc::create::<WireMessage>(32, 10);
-        let (tx2, rx2) = secc::create::<WireMessage>(32, 10);
+        let (tx1, rx1) = secc::create::<WireMessage>(32, system1.data.config.thread_wait_time);
+        let (tx2, rx2) = secc::create::<WireMessage>(32, system2.data.config.thread_wait_time);
 
         // We will do this in 2 threads because one connect would block waiting on a message
         // from the other actor system, causing a deadlock.
@@ -926,7 +927,7 @@ mod tests {
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
         thread::sleep(Duration::from_millis(5));
         assert_eq!(1, aid.received().unwrap());
-        thread::sleep(Duration::from_millis(6));
+        thread::sleep(Duration::from_millis(10));
         assert_eq!(2, aid.received().unwrap());
 
         system.trigger_and_await_shutdown();
