@@ -603,7 +603,7 @@ impl Actor {
         F: Processor<State> + 'static,
     {
         // FIXME: (Issue #33) Let the user pass the size of the channel queue when creating.
-        let (sender, receiver) = secc::create::<Message>(32, 10);
+        let (sender, receiver) = secc::create::<Message>(32, Duration::from_millis(10));
 
         // The sender will be put inside the actor id.
         let aid = ActorId {
