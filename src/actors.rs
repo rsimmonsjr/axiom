@@ -282,7 +282,7 @@ impl ActorId {
     pub fn send(&self, message: Message) {
         match self.try_send(message) {
             Ok(_) => (),
-            Err(e) => panic!("Error occurred sending to aid: {:?}", e),
+            Err(e) => panic!("Error {:?} occurred sending to aid: {}", e, self),
         }
     }
 
@@ -663,6 +663,7 @@ impl Actor {
         let mut guard = actor.handler.lock().unwrap();
         let system = actor.context.system.clone();
         let start = Instant::now();
+        // FIXME The time sliced batching of messages needs testing.
         while Instant::elapsed(&start) < system.config().time_slice {
             // If there isn't a message, another dispatcher thread beat us to it, no big deal.
             if let Ok(message) = actor.receiver.peek() {

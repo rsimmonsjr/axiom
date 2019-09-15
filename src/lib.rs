@@ -21,6 +21,14 @@
 //!   * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
 //!   * Added a method `system_actor_aid` to easily look up the `System` actor.
 //!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
+//!   * Added additional configuration options to `ActorSystemConfig`.
+//!   * System will warn if an actor takes longer than the configured `warn_threshold` to process a
+//!   message.
+//!   * Instead of processing one message per receive, the system will now process pending messages
+//!   up until the configured `time_slice`, allowing optimized processing for quick messages.
+//!   * The defailt `message_channel_size` is now configurable for the actor system as a whole.
+//!   * Instead of waiting forever on a send, the system will wait for the configured
+//!   `send_timeout` before returning a timeout error to the caller.
 //!
 //! [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 //!
