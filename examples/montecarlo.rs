@@ -2,13 +2,10 @@
 //! The simulation is of a basic gambling game adapted from this page:
 //! https://towardsdatascience.com/the-house-always-wins-monte-carlo-simulation-eb82787da2a3
 
+use axiom::*;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
-
 use std::collections::HashMap;
-use std::time::Duration;
-
-use axiom::*;
 
 #[derive(Debug, Copy, Clone)]
 struct Game {
@@ -110,7 +107,6 @@ impl GameResults {
                     println!("Rounds per game: {}", game_conditions.total_plays);
                     println!("Running simulations...");
                     for i in 0..self.total_games {
-                        println!("[{}] ==> Doing Game {}", ctx.aid, i);
                         let name = format!("Game{}", i);
                         let aid = ctx
                             .system

@@ -8,7 +8,7 @@
 
 use crate::message::*;
 use crate::system::*;
-use log::{error, warn};
+use log::warn;
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -361,9 +361,7 @@ impl ActorId {
                     match sender.send_await_timeout(message, system.config().send_timeout) {
                         Ok(_) => {
                             // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
-                            println!("[{}] Receivable: {}", self, sender.receivable());
                             if sender.receivable() == 1 {
-                                println!("Scheduling");
                                 system.schedule(self.clone());
                             };
                             Ok(())
@@ -659,24 +657,6 @@ impl Actor {
         Arc::new(actor)
     }
 
-    /// This method is called to finish up the procedure for processing a message
-    ///
-    /// FIXME (Issue #69) Optimize dispatcher handling for actors that get lots of small messages.
-    fn post_message_process(actor: &Arc<Self>) {
-        // We check to see if the actor still has pending messages and if so we re-schedule it
-        // for work at the back of the work channel. This prevents actors that get tons of
-        // messages from starving out actors that get few messages.
-        println!(
-            "[{}] Post Process: {}",
-            actor.context.aid,
-            actor.receiver.receivable()
-        );
-        if actor.receiver.receivable() > 0 {
-            println!("[{}] Rescheduling", actor.context.aid);
-            actor.context.system.reschedule(actor.clone());
-        }
-    }
-
     /// Receive a message from the channel and process it with the actor. This function is the
     /// core of the processing pipeline.
     pub(crate) fn receive(actor: Arc<Actor>) {
@@ -684,9 +664,9 @@ impl Actor {
         let system = actor.context.system.clone();
         let start = Instant::now();
         while Instant::elapsed(&start) < system.config().time_slice {
-            println!("[{}] Processing message", actor.context.aid);
             // If there isn't a message, another dispatcher thread beat us to it, no big deal.
             if let Ok(message) = actor.receiver.peek() {
+                println!("[{}] Processing message", actor.context.aid);
                 // In this case there is a message in the channel that we have to process through
                 // the actor. We process the message and then we may override the actor's returned
                 // value if its a Stop message. Overriding the return for `Stop` allows actors that
@@ -696,11 +676,12 @@ impl Actor {
                 let elapsed = Instant::elapsed(&start_process);
                 if elapsed > system.config().warn_threshold {
                     warn!(
-                        "[{}] Actor took {:?} to process a message!",
-                        actor.context.aid, elapsed
+                        "[{}] Actor took {:?} to process a message, threshold is {:?}!",
+                        actor.context.aid,
+                        elapsed,
+                        system.config().warn_threshold
                     );
                 }
-                println!("===> Processor Done");
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         result = Status::Stop
@@ -709,44 +690,31 @@ impl Actor {
 
                 // Handle the result of the processing.
                 match result {
-                    Status::Processed => {
-                        if let Err(e) = actor.receiver.pop() {
-                            error!("Error on pop(): {:?}.", e);
-                            actor.context.system.stop_actor(&actor.context.aid);
-                        } else {
-                            Actor::post_message_process(&actor);
-                        }
-                    }
-                    Status::Skipped => {
-                        if let Err(e) = actor.receiver.skip() {
-                            error!("Error on skip(): {:?}.", e);
-                            actor.context.system.stop_actor(&actor.context.aid);
-                        } else {
-                            Actor::post_message_process(&actor);
-                        }
-                    }
-                    Status::ResetSkip => {
-                        if let Err(e) = actor.receiver.pop_and_reset_skip() {
-                            error!("Error on pop_and_reset_skip(): {:?}.", e);
-                            actor.context.system.stop_actor(&actor.context.aid);
-                        } else {
-                            Actor::post_message_process(&actor);
-                        }
-                    }
+                    Status::Processed => actor.receiver.pop().unwrap(),
+                    Status::Skipped => actor.receiver.skip().unwrap(),
+                    Status::ResetSkip => actor.receiver.reset_skip().unwrap(),
                     Status::Stop => {
+                        // Even though the actor is stopping we want to pop the message.
+                        actor.receiver.pop().unwrap();
                         actor.context.system.stop_actor(&actor.context.aid);
-                        // Even though the actor is stopping we want to pop the message to make
-                        // sure that the metrics on the actor's channel are correct. Then we will
-                        // stop the actor in the actor system.
-                        if let Err(e) = actor.receiver.pop() {
-                            error!("Error on pop(): {:?}.", e);
-                        }
                     }
                 };
             } else {
                 // No more messages so we just break out of the loop and return.
-                return;
+                break;
             }
+        }
+
+        println!(
+            "[{}] Post Process: {}",
+            actor.context.aid,
+            actor.receiver.receivable()
+        );
+
+        // Reschedule the actor if it is still alive and has more content.
+        if system.is_actor_alive(&actor.context.aid) && actor.receiver.receivable() > 0 {
+            println!("[{}] Rescheduling", actor.context.aid);
+            actor.context.system.reschedule(actor.clone());
         }
     }
 }

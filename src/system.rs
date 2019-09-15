@@ -663,11 +663,6 @@ impl ActorSystem {
     /// TODO Put tests verifying the resend on multiple messages.
     pub(crate) fn schedule(&self, aid: ActorId) {
         let actors_by_aid = &self.data.actors_by_aid;
-        println!(
-            "[{}] schedule =>=>=> {}",
-            aid,
-            self.data.sender.receivable()
-        );
         match actors_by_aid.get(&aid) {
             Some(actor) => self
                 .data
