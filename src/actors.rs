@@ -715,6 +715,7 @@ impl Actor {
 
         // Reschedule the actor if it is still alive and has more content.
         if system.is_actor_alive(&actor.context.aid) && actor.receiver.receivable() > 0 {
+            println!("[{}] Rescheduling", actor.context.aid);
             actor.context.system.reschedule(actor.clone());
         }
     }
