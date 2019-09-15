@@ -100,6 +100,12 @@ pub struct ActorSystemConfig {
     /// CPU. However, larger values will impact performance and may lead to some threads never
     /// getting enough work to justify their existence. The default value is 100 milliseconds.
     pub thread_wait_time: Duration,
+    /// The default size for the channel that is created for each actor. Making the channel
+    /// bigger allows for more bandwidth in sending messages to actors but also takes more
+    /// memory. Also the user should consider if their actor needs a large channel then it might
+    /// need to be refactored or the threads size should be increased because messages arent
+    /// being processed fast enough. The default value for this is 32.
+    pub message_channel_size: u16,
 }
 
 impl Default for ActorSystemConfig {
@@ -109,6 +115,7 @@ impl Default for ActorSystemConfig {
             work_channel_size: 16,
             threads_size: 4,
             thread_wait_time: Duration::from_millis(100),
+            message_channel_size: 32,
         }
     }
 }

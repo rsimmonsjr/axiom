@@ -151,11 +151,12 @@ fn main() {
     // Initialize the actor system
     // FIXME: We spawn an unreasonable number of worker threads here because that magically prevents
     // a deadlock from happening somehow. Fixing the source of the deadlock would be preferable.
-    let config = ActorSystemConfig {
-        work_channel_size: 1000,
-        threads_size: 150,
-        thread_wait_time: Duration::from_millis(100),
-    };
+    let mut config = ActorSystemConfig::default();
+    config.work_channel_size = 1000;
+    config.threads_size = 150;
+    config.thread_wait_time = Duration::from_millis(100);
+    config.message_channel_size = 150;
+
     let system = ActorSystem::create(config);
 
     // Spawn the results aggregator, which will in turn spawn the Game actors.
