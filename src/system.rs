@@ -87,6 +87,20 @@ pub enum WireMessage {
 /// means.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ActorSystemConfig {
+    /// The size of the thread pool which governs how many worker threads there are in the system.
+    /// The number of threads should be carefully considered to have sufficient concurrency but
+    /// not overschedule the CPU on the target hardware. The default value is 4.
+    pub threads_size: u16,
+    /// The threshold at which the dispatcher thread will warn the user that the message took too
+    /// long to process. If this warning is being logged then the user probably should reconsider
+    /// how their message processing works and refactor big tasks into a number of smaller tasks.
+    /// The default value is 1 millisecond.
+    pub warn_threshold: Duration,
+    /// This controls how long a processor will max spend working on messages for an actor before
+    /// yielding to work on other actors in the system. The dispatcher will continue to pluck
+    /// messages off the actor's channel and process them until this time slice is exceeded. The
+    /// default value is 1 millisecond.
+    pub time_slice: Duration,
     /// The number of slots to allocate for the work channel. This is the channel that the worker
     /// threads use to schedule work on actors. The more traffic the actor system takes and the
     /// longer the messages take to process, the bigger this should be. The default value is 100.
@@ -94,10 +108,6 @@ pub struct ActorSystemConfig {
     /// The maximum amount of time to wait to be able to schedule an actor for work before
     /// reporting an error to the user. The default is 1 millisecond.
     pub work_channel_timeout: Duration,
-    /// The size of the thread pool which governs how many worker threads there are in the system.
-    /// The number of threads should be carefully considered to have sufficient concurrency but
-    /// not overschedule the CPU on the target hardware. The default value is 4.
-    pub threads_size: u16,
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
@@ -121,9 +131,11 @@ impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
+            threads_size: 4,
+            warn_threshold: Duration::from_millis(1),
+            time_slice: Duration::from_millis(1),
             work_channel_size: 100,
             work_channel_timeout: Duration::from_millis(1),
-            threads_size: 4,
             thread_wait_time: Duration::from_millis(100),
             message_channel_size: 32,
             send_timeout: Duration::from_millis(1),

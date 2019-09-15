@@ -8,7 +8,7 @@
 
 use crate::message::*;
 use crate::system::*;
-use log::error;
+use log::{error, warn};
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
@@ -680,64 +680,74 @@ impl Actor {
     /// Receive a message from the channel and process it with the actor. This function is the
     /// core of the processing pipeline.
     pub(crate) fn receive(actor: Arc<Actor>) {
-        println!(
-            "[{}] START Receiving message for actor: ",
-            actor.context.aid
-        );
         let mut guard = actor.handler.lock().unwrap();
-        // If there isn't a message, another dispatcher thread beat us to it, no big deal.
-        if let Ok(message) = actor.receiver.peek() {
-            // In this case there is a message in the channel that we have to process through
-            // the actor. We process the message and then we may override the actor's returned
-            // value if its a Stop message. Overriding the return for `Stop` allows actors that
-            // don't need to do anything special when stopping to ignore processing `Stop`.
-            println!("===> Calling Processor");
-            let mut result = (&mut *guard)(&actor.context, &message);
-            println!("===> Processor Done");
-            if let Some(m) = message.content_as::<SystemMsg>() {
-                if let SystemMsg::Stop = *m {
-                    result = Status::Stop
+        let system = actor.context.system.clone();
+        let start = Instant::now();
+        while Instant::elapsed(&start) < system.config().time_slice {
+            println!("[{}] Processing message", actor.context.aid);
+            // If there isn't a message, another dispatcher thread beat us to it, no big deal.
+            if let Ok(message) = actor.receiver.peek() {
+                // In this case there is a message in the channel that we have to process through
+                // the actor. We process the message and then we may override the actor's returned
+                // value if its a Stop message. Overriding the return for `Stop` allows actors that
+                // don't need to do anything special when stopping to ignore processing `Stop`.
+                let start_process = Instant::now();
+                let mut result = (&mut *guard)(&actor.context, &message);
+                let elapsed = Instant::elapsed(&start_process);
+                if elapsed > system.config().warn_threshold {
+                    warn!(
+                        "[{}] Actor took {:?} to process a message!",
+                        actor.context.aid, elapsed
+                    );
                 }
-            };
+                println!("===> Processor Done");
+                if let Some(m) = message.content_as::<SystemMsg>() {
+                    if let SystemMsg::Stop = *m {
+                        result = Status::Stop
+                    }
+                };
 
-            // Handle the result of the processing.
-            match result {
-                Status::Processed => {
-                    if let Err(e) = actor.receiver.pop() {
-                        error!("Error on pop(): {:?}.", e);
+                // Handle the result of the processing.
+                match result {
+                    Status::Processed => {
+                        if let Err(e) = actor.receiver.pop() {
+                            error!("Error on pop(): {:?}.", e);
+                            actor.context.system.stop_actor(&actor.context.aid);
+                        } else {
+                            Actor::post_message_process(&actor);
+                        }
+                    }
+                    Status::Skipped => {
+                        if let Err(e) = actor.receiver.skip() {
+                            error!("Error on skip(): {:?}.", e);
+                            actor.context.system.stop_actor(&actor.context.aid);
+                        } else {
+                            Actor::post_message_process(&actor);
+                        }
+                    }
+                    Status::ResetSkip => {
+                        if let Err(e) = actor.receiver.pop_and_reset_skip() {
+                            error!("Error on pop_and_reset_skip(): {:?}.", e);
+                            actor.context.system.stop_actor(&actor.context.aid);
+                        } else {
+                            Actor::post_message_process(&actor);
+                        }
+                    }
+                    Status::Stop => {
                         actor.context.system.stop_actor(&actor.context.aid);
-                    } else {
-                        Actor::post_message_process(&actor);
+                        // Even though the actor is stopping we want to pop the message to make
+                        // sure that the metrics on the actor's channel are correct. Then we will
+                        // stop the actor in the actor system.
+                        if let Err(e) = actor.receiver.pop() {
+                            error!("Error on pop(): {:?}.", e);
+                        }
                     }
-                }
-                Status::Skipped => {
-                    if let Err(e) = actor.receiver.skip() {
-                        error!("Error on skip(): {:?}.", e);
-                        actor.context.system.stop_actor(&actor.context.aid);
-                    } else {
-                        Actor::post_message_process(&actor);
-                    }
-                }
-                Status::ResetSkip => {
-                    if let Err(e) = actor.receiver.pop_and_reset_skip() {
-                        error!("Error on pop_and_reset_skip(): {:?}.", e);
-                        actor.context.system.stop_actor(&actor.context.aid);
-                    } else {
-                        Actor::post_message_process(&actor);
-                    }
-                }
-                Status::Stop => {
-                    actor.context.system.stop_actor(&actor.context.aid);
-                    // Even though the actor is stopping we want to pop the message to make
-                    // sure that the metrics on the actor's channel are correct. Then we will
-                    // stop the actor in the actor system.
-                    if let Err(e) = actor.receiver.pop() {
-                        error!("Error on pop(): {:?}.", e);
-                    }
-                }
-            };
+                };
+            } else {
+                // No more messages so we just break out of the loop and return.
+                return;
+            }
         }
-        println!("[{}] DONE Receiving message for actor: ", actor.context.aid);
     }
 }
 
