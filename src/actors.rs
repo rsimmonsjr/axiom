@@ -667,10 +667,8 @@ impl Actor {
             // If there isn't a message, another dispatcher thread beat us to it, no big deal.
             if let Ok(message) = actor.receiver.peek() {
                 println!("[{}] Processing message", actor.context.aid);
-                // In this case there is a message in the channel that we have to process through
-                // the actor. We process the message and then we may override the actor's returned
-                // value if its a Stop message. Overriding the return for `Stop` allows actors that
-                // don't need to do anything special when stopping to ignore processing `Stop`.
+                // In this case there is a message in the channel that we have to process. We
+                // will time the result and log a warning if it took too long.
                 let start_process = Instant::now();
                 let mut result = (&mut *guard)(&actor.context, &message);
                 let elapsed = Instant::elapsed(&start_process);
@@ -682,6 +680,10 @@ impl Actor {
                         system.config().warn_threshold
                     );
                 }
+
+                // If the message was a system stop message then we override the actor returned
+                // result with a stop. The override means actors that don't do anything special
+                // can essentially ignore processing stop.
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         result = Status::Stop
@@ -694,7 +696,6 @@ impl Actor {
                     Status::Skipped => actor.receiver.skip().unwrap(),
                     Status::ResetSkip => actor.receiver.reset_skip().unwrap(),
                     Status::Stop => {
-                        // Even though the actor is stopping we want to pop the message.
                         actor.receiver.pop().unwrap();
                         actor.context.system.stop_actor(&actor.context.aid);
                     }
