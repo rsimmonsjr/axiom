@@ -109,7 +109,6 @@ impl GameResults {
                     println!("Wager per round: ${}", game_conditions.wager);
                     println!("Rounds per game: {}", game_conditions.total_plays);
                     println!("Running simulations...");
-                    println!("============> total_cames: {}", self.total_games);
                     for i in 0..self.total_games {
                         println!("[{}] ==> Doing Game {}", ctx.aid, i);
                         let name = format!("Game{}", i);
@@ -152,10 +151,9 @@ fn main() {
     // FIXME: We spawn an unreasonable number of worker threads here because that magically prevents
     // a deadlock from happening somehow. Fixing the source of the deadlock would be preferable.
     let mut config = ActorSystemConfig::default();
-    config.work_channel_size = 1000;
-    config.threads_size = 150;
-    config.thread_wait_time = Duration::from_millis(100);
-    config.message_channel_size = 150;
+    config.work_channel_size = 100;
+    config.threads_size = 4;
+    config.message_channel_size = 50;
 
     let system = ActorSystem::create(config);
 

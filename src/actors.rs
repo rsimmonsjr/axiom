@@ -70,6 +70,20 @@ pub enum ActorError {
     /// Error returned when an ActorId is not local and a user is trying to do operations that
     /// only work on local ActorId instances.
     ActorIdNotLocal,
+
+    /// Used when unable to send to an actor's message channel within the scheduled timeout
+    /// configured in the actor system. This could result from the actor's channel being too
+    /// small to accomodate the message flow, the lack of thread count to process messages fast
+    /// ennough to keep up with the flow or something wrong with the actor itself that it is
+    /// taking too long to cleare the messages.
+    SendTimeout,
+
+    /// Used when unable to schedule the actor for work in the work channel. This could be a
+    /// result of having a work channel that is too small to accomodate the number of actors
+    /// being concurrently scheduled, not enough threads to process actors in the channel fast
+    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of time
+    /// or not finish at all.
+    UnableToSchedule,
 }
 
 impl fmt::Display for ActorError {
@@ -344,15 +358,18 @@ impl ActorId {
                 if stopped.load(Ordering::Relaxed) {
                     Err(ActorError::ActorStopped)
                 } else {
-                    sender.send_await(message).unwrap();
-                    // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
-                    println!("[{}] Receivable: {}", self, sender.receivable());
-                    if sender.receivable() == 1 {
-                        println!("Scheduling");
-                        system.schedule(self.clone());
-                    };
-
-                    Ok(())
+                    match sender.send_await_timeout(message, system.config().send_timeout) {
+                        Ok(_) => {
+                            // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
+                            println!("[{}] Receivable: {}", self, sender.receivable());
+                            if sender.receivable() == 1 {
+                                println!("Scheduling");
+                                system.schedule(self.clone());
+                            };
+                            Ok(())
+                        }
+                        Err(_) => Err(ActorError::SendTimeout),
+                    }
                 }
             }
             ActorSender::Remote { sender } => {
@@ -605,7 +622,10 @@ impl Actor {
         F: Processor<State> + 'static,
     {
         // FIXME: (Issue #33) Let the user pass the size of the channel queue when creating.
-        let (sender, receiver) = secc::create::<Message>(32, Duration::from_millis(10));
+        let (sender, receiver) = secc::create::<Message>(
+            system.config().message_channel_size,
+            Duration::from_millis(10),
+        );
 
         // The sender will be put inside the actor id.
         let aid = ActorId {

@@ -89,8 +89,11 @@ pub enum WireMessage {
 pub struct ActorSystemConfig {
     /// The number of slots to allocate for the work channel. This is the channel that the worker
     /// threads use to schedule work on actors. The more traffic the actor system takes and the
-    /// longer the messages take to process, the bigger this should be. The default value is 16.
+    /// longer the messages take to process, the bigger this should be. The default value is 100.
     pub work_channel_size: u16,
+    /// The maximum amount of time to wait to be able to schedule an actor for work before
+    /// reporting an error to the user. The default is 1 millisecond.
+    pub work_channel_timeout: Duration,
     /// The size of the thread pool which governs how many worker threads there are in the system.
     /// The number of threads should be carefully considered to have sufficient concurrency but
     /// not overschedule the CPU on the target hardware. The default value is 4.
@@ -98,7 +101,7 @@ pub struct ActorSystemConfig {
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
-    /// getting enough work to justify their existence. The default value is 100 milliseconds.
+    /// getting enough work to justify their existence. The default value is 10 milliseconds.
     pub thread_wait_time: Duration,
     /// The default size for the channel that is created for each actor. Making the channel
     /// bigger allows for more bandwidth in sending messages to actors but also takes more
@@ -106,16 +109,24 @@ pub struct ActorSystemConfig {
     /// need to be refactored or the threads size should be increased because messages arent
     /// being processed fast enough. The default value for this is 32.
     pub message_channel_size: u16,
+    /// Max duration to wait between attempts to send to an actor's message channel. This is used
+    /// to poll a busy channel that is at its capacity limit. The larger this value is, the longer
+    /// `send` will wait for capacity in the channel but the user should be aware that if the
+    /// system is often waiting on capacity that channel may be too small or the actor may need to
+    /// be refactored to process messages faster.  The default value is 1 millisecond.
+    pub send_timeout: Duration,
 }
 
 impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
-            work_channel_size: 16,
+            work_channel_size: 100,
+            work_channel_timeout: Duration::from_millis(1),
             threads_size: 4,
             thread_wait_time: Duration::from_millis(100),
             message_channel_size: 32,
+            send_timeout: Duration::from_millis(1),
         }
     }
 }
@@ -333,6 +344,11 @@ impl ActorSystem {
                 }
             }
         })
+    }
+
+    /// Returns a reference to the config for this actor system.
+    pub fn config(&self) -> &ActorSystemConfig {
+        &self.data.config
     }
 
     /// Locates the sender for the remote actor system with the given Uuid.
@@ -622,7 +638,7 @@ impl ActorSystem {
         );
         self.data
             .sender
-            .send(actor)
+            .send_await_timeout(actor, self.data.config.work_channel_timeout)
             .expect("Unable to Schedule actor: ")
     }
 
@@ -644,7 +660,7 @@ impl ActorSystem {
             Some(actor) => self
                 .data
                 .sender
-                .send(actor.clone())
+                .send_await_timeout(actor.clone(), self.data.config.work_channel_timeout)
                 .expect("Unable to Schedule actor: "),
             None => {
                 // The actor was removed from the map so ignore the problem and just log
