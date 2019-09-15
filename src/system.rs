@@ -608,6 +608,11 @@ impl ActorSystem {
 
     /// Reschedules an actor on the actor system.
     pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
+        println!(
+            "[{}] reschedule =>=>=> {}",
+            actor.context.aid,
+            self.data.sender.receivable()
+        );
         self.data
             .sender
             .send(actor)
@@ -623,6 +628,11 @@ impl ActorSystem {
     /// TODO Put tests verifying the resend on multiple messages.
     pub(crate) fn schedule(&self, aid: ActorId) {
         let actors_by_aid = &self.data.actors_by_aid;
+        println!(
+            "[{}] schedule =>=>=> {}",
+            aid,
+            self.data.sender.receivable()
+        );
         match actors_by_aid.get(&aid) {
             Some(actor) => self
                 .data

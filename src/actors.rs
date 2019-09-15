@@ -346,7 +346,9 @@ impl ActorId {
                 } else {
                     sender.send_await(message).unwrap();
                     // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
+                    println!("[{}] Receivable: {}", self, sender.receivable());
                     if sender.receivable() == 1 {
+                        println!("Scheduling");
                         system.schedule(self.clone());
                     };
 
@@ -644,7 +646,13 @@ impl Actor {
         // We check to see if the actor still has pending messages and if so we re-schedule it
         // for work at the back of the work channel. This prevents actors that get tons of
         // messages from starving out actors that get few messages.
+        println!(
+            "[{}] Post Process: {}",
+            actor.context.aid,
+            actor.receiver.receivable()
+        );
         if actor.receiver.receivable() > 0 {
+            println!("[{}] Rescheduling", actor.context.aid);
             actor.context.system.reschedule(actor.clone());
         }
     }
@@ -652,6 +660,10 @@ impl Actor {
     /// Receive a message from the channel and process it with the actor. This function is the
     /// core of the processing pipeline.
     pub(crate) fn receive(actor: Arc<Actor>) {
+        println!(
+            "[{}] START Receiving message for actor: ",
+            actor.context.aid
+        );
         let mut guard = actor.handler.lock().unwrap();
         // If there isn't a message, another dispatcher thread beat us to it, no big deal.
         if let Ok(message) = actor.receiver.peek() {
@@ -659,7 +671,9 @@ impl Actor {
             // the actor. We process the message and then we may override the actor's returned
             // value if its a Stop message. Overriding the return for `Stop` allows actors that
             // don't need to do anything special when stopping to ignore processing `Stop`.
+            println!("===> Calling Processor");
             let mut result = (&mut *guard)(&actor.context, &message);
+            println!("===> Processor Done");
             if let Some(m) = message.content_as::<SystemMsg>() {
                 if let SystemMsg::Stop = *m {
                     result = Status::Stop
@@ -703,6 +717,7 @@ impl Actor {
                 }
             };
         }
+        println!("[{}] DONE Receiving message for actor: ", actor.context.aid);
     }
 }
 
