@@ -10,6 +10,7 @@
 
 use crate::actors::*;
 use crate::message::*;
+use crate::*;
 use dashmap::DashMap;
 use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
@@ -275,8 +276,8 @@ impl ActorSystem {
             let mut guard = system.data.threads.lock().unwrap();
 
             // Start the dispatcher threads.
-            for _ in 0..system.data.config.threads_size {
-                let thread = system.start_dispatcher_thread();
+            for number in 0..system.data.config.threads_size {
+                let thread = system.start_dispatcher_thread(number);
                 guard.push(thread);
             }
 
@@ -305,28 +306,32 @@ impl ActorSystem {
     /// to the work channel to process the next message. This process allows thousands of actors
     /// to run and not take up resources if they have no messages to process but also prevents one
     /// super busy actor from starving out other actors that get messages only occasionally.
-    fn start_dispatcher_thread(&self) -> JoinHandle<()> {
+    fn start_dispatcher_thread(&self, number: u16) -> JoinHandle<()> {
         // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
         // long in the channel.
         let system = self.clone();
         let receiver = self.data.receiver.clone();
         let thread_timeout = self.data.config.thread_wait_time;
+        let name = format!("DispatchThread{}", number);
 
-        thread::spawn(move || {
-            system.init_current();
-            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
-                if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
-                    Actor::receive(actor);
+        thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                system.init_current();
+                while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+                    if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
+                        Actor::receive(actor);
+                    }
                 }
-            }
-            let (mutex, condvar) = &*system.data.running_thread_count;
-            let mut count = mutex.lock().unwrap();
-            *count = *count - 1;
-            // If this is the last thread exiting we will notify any waiters.
-            if *count == 0 {
-                condvar.notify_all();
-            }
-        })
+                let (mutex, condvar) = &*system.data.running_thread_count;
+                let mut count = mutex.lock().unwrap();
+                *count = *count - 1;
+                // If this is the last thread exiting we will notify any waiters.
+                if *count == 0 {
+                    condvar.notify_all();
+                }
+            })
+            .unwrap()
     }
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
@@ -346,7 +351,14 @@ impl ActorSystem {
                     Some(msg) => {
                         let now = Instant::now();
                         if now >= msg.instant {
-                            msg.destination.send(msg.message.clone());
+                            msg.destination
+                                .send(msg.message.clone())
+                                .unwrap_or_else(|error| {
+                                    warn!(
+                                        "Cannot send scheduled message to {}: Error {:?}",
+                                        msg.destination, error
+                                    );
+                                });
                             data.pop();
                         } else {
                             let duration = msg.instant.duration_since(now);
@@ -455,9 +467,11 @@ impl ActorSystem {
                 system_uuid,
                 message,
             } => {
-                self.find_aid(&system_uuid, &actor_uuid)
-                    .map(|aid| aid.send(message.clone()))
-                    .expect("Error not handled yet");
+                self.find_aid(&system_uuid, &actor_uuid).map(|aid| {
+                    aid.send(message.clone()).unwrap_or_else(|error| {
+                        warn!("Could not send wire message to {}. Error: {}", aid, error);
+                    })
+                });
             }
             WireMessage::DelayedActorMessage {
                 duration,
@@ -560,14 +574,14 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    fn register_actor(&self, actor: Arc<Actor>) -> Result<ActorId, ActorError> {
+    fn register_actor(&self, actor: Arc<Actor>) -> Result<ActorId, AxiomError> {
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
         let aids_by_name = &self.data.aids_by_name;
         let aid = actor.context.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
-                return Err(ActorError::NameAlreadyUsed(name_string.clone()));
+                return Err(AxiomError::NameAlreadyUsed(name_string.clone()));
             } else {
                 aids_by_name.insert(name_string.clone(), aid.clone());
             }
@@ -592,23 +606,22 @@ impl ActorSystem {
     ///     0 as usize,
     ///     |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
     /// );
-    /// aid.send(Message::new(11));
     /// ```
-    pub fn spawn<F, State>(&self, state: State, processor: F) -> ActorId
+    pub fn spawn<F, State>(&self, state: State, processor: F) -> Result<ActorId, AxiomError>
     where
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
         let actor = Actor::new(self.clone(), None, state, processor);
-        let result = self.register_actor(actor).unwrap();
-        result.send(Message::new(SystemMsg::Start));
-        result
+        let result = self.register_actor(actor)?;
+        result.send(Message::new(SystemMsg::Start))?;
+        Ok(result)
     }
 
     /// Spawns a new named actor on the `system` using the given starting `state` for the actor
     /// and the given `processor` function that will be used to process actor messages.
     /// If the `name` is already registered then this function will return an [`std::Result::Err`]
-    /// with the value [`ActorError::NameAlreadyUsed`] containing the name attempted to be
+    /// with the value [`AxiomError::NameAlreadyUsed`] containing the name attempted to be
     /// registered.
     ///
     /// # Examples
@@ -630,18 +643,19 @@ impl ActorSystem {
         name: &str,
         state: State,
         processor: F,
-    ) -> Result<ActorId, ActorError>
+    ) -> Result<ActorId, AxiomError>
     where
         State: Send + Sync + 'static,
         F: Processor<State> + 'static,
     {
         let actor = Actor::new(self.clone(), Some(name.to_string()), state, processor);
         let result = self.register_actor(actor)?;
-        result.send(Message::new(SystemMsg::Start));
+        result.send(Message::new(SystemMsg::Start))?;
         Ok(result)
     }
 
-    /// Reschedules an actor on the actor system.
+    /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
+    /// `receive` if the actor has more messages that are receivable.
     pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
         println!(
             "[{}] reschedule =>=>=> {}",
@@ -708,7 +722,13 @@ impl ActorSystem {
         // actor from the map of monitors.
         if let Some((_, monitoring)) = self.data.monitoring_by_monitored.remove(&aid) {
             for m_aid in monitoring {
-                ActorId::send(&m_aid, Message::new(SystemMsg::Stopped(aid.clone())));
+                let value = SystemMsg::Stopped(aid.clone());
+                m_aid.send(Message::new(value)).unwrap_or_else(|error| {
+                    error!(
+                        "Could not send 'Stopped' to monitoring actor {}: Error: {:?}",
+                        m_aid, error
+                    );
+                });
             }
         }
     }
@@ -768,8 +788,11 @@ impl ActorSystem {
     /// FIXME (Issue #72) Add try_send ability.
     pub fn send_to_system_actors(&self, message: Message) {
         let remotes = &*self.data.remotes;
-        for iter_ref in remotes.iter() {
-            iter_ref.value().system_actor_aid.send(message.clone());
+        for remote in remotes.iter() {
+            let aid = &remote.value().system_actor_aid;
+            aid.send(message.clone()).unwrap_or_else(|error| {
+                error!("Could not send to system actor {}. Error: {}", aid, error)
+            });
         }
     }
 
@@ -820,28 +843,39 @@ enum SystemActorMessage {
 }
 
 /// A processor for the system actor.
-fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) -> Status {
+/// FIXME Refactor into a full struct based actor.
+fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) -> AxiomResult {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
+            // Someone requested that this system actor find an actor by name.
             SystemActorMessage::FindByName { reply_to, name } => {
                 let found = context.system.find_aid_by_name(&name);
-                reply_to.send(Message::new(SystemActorMessage::FindByNameResult {
+                let reply = Message::new(SystemActorMessage::FindByNameResult {
                     system_uuid: context.system.uuid(),
                     name: name.clone(),
                     aid: found,
-                }));
-                Status::Processed
+                });
+                // Note that you can't just unwrap or you could panic the dispatcher thread if
+                // there is a problem sending the reply. In this case, the error is logged but the
+                // actor moves on.
+                reply_to.send(reply).unwrap_or_else(|error| {
+                    error!(
+                        "Could not send reply to FindByName to actor {}. Error: {:?}",
+                        reply_to, error
+                    )
+                });
+                Ok(Status::Processed)
             }
-            _ => Status::Processed,
+            _ => Ok(Status::Processed),
         }
     } else if let Some(msg) = message.content_as::<SystemMsg>() {
         match &*msg {
-            SystemMsg::Start => Status::Processed,
-            _ => Status::Processed,
+            SystemMsg::Start => Ok(Status::Processed),
+            _ => Ok(Status::Processed),
         }
     } else {
         error!("Unhandled message received.");
-        Status::Processed
+        Ok(Status::Processed)
     }
 }
 
@@ -882,8 +916,8 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn(0, simple_handler);
-        aid.send_new(11);
+        let aid = system.spawn(0, simple_handler).unwrap();
+        aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_uuid(&aid.uuid()).unwrap();
         assert!(ActorId::ptr_eq(&aid, &found));
@@ -900,7 +934,7 @@ mod tests {
 
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn_named("A", 0, simple_handler).unwrap();
-        aid.send_new(11);
+        aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_name(&aid.name().unwrap()).unwrap();
         assert!(ActorId::ptr_eq(&aid, &found));
@@ -935,7 +969,7 @@ mod tests {
 
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn_named("A", 0, simple_handler).unwrap();
-        aid.send_new(11);
+        aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
         // Now we stop the actor.
@@ -988,10 +1022,12 @@ mod tests {
         let aid2 = system.spawn_named("B", 0, simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
-        aid1.send_after(Message::new(11), Duration::from_millis(100));
+        aid1.send_after(Message::new(11), Duration::from_millis(100))
+            .unwrap();
         thread::sleep(Duration::from_millis(5));
 
-        aid2.send_after(Message::new(11), Duration::from_millis(50));
+        aid2.send_after(Message::new(11), Duration::from_millis(50))
+            .unwrap();
         thread::sleep(Duration::from_millis(5));
 
         assert_eq!(1, aid1.received().unwrap());
@@ -1017,7 +1053,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn(0, simple_handler);
+        let aid = system.spawn(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap(); // Now it is started for sure.
 
         // We force remove the actor from the system without calling stop so now it cannot
@@ -1027,7 +1063,7 @@ mod tests {
         actors_by_aid.remove(&aid);
 
         // Send a message to the actor which should not schedule it but write out a warning.
-        aid.send_new(11);
+        aid.send_new(11).unwrap();
 
         system.trigger_and_await_shutdown();
     }
@@ -1060,14 +1096,14 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        fn monitor_handler(state: &mut ActorId, _: &Context, message: &Message) -> Status {
+        fn monitor_handler(state: &mut ActorId, _: &Context, message: &Message) -> AxiomResult {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
                         assert!(ActorId::ptr_eq(state, aid));
-                        Status::Processed
+                        Ok(Status::Processed)
                     }
-                    SystemMsg::Start => Status::Processed,
+                    SystemMsg::Start => Ok(Status::Processed),
                     _ => panic!("Received some other message!"),
                 }
             } else {
@@ -1076,10 +1112,10 @@ mod tests {
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let monitored = system.spawn(0 as usize, simple_handler);
-        let not_monitoring = system.spawn(0 as usize, simple_handler);
-        let monitoring1 = system.spawn(monitored.clone(), monitor_handler);
-        let monitoring2 = system.spawn(monitored.clone(), monitor_handler);
+        let monitored = system.spawn(0 as usize, simple_handler).unwrap();
+        let not_monitoring = system.spawn(0 as usize, simple_handler).unwrap();
+        let monitoring1 = system.spawn(monitored.clone(), monitor_handler).unwrap();
+        let monitoring2 = system.spawn(monitored.clone(), monitor_handler).unwrap();
         system.monitor(&monitoring1, &monitored);
         system.monitor(&monitoring2, &monitored);
 
@@ -1118,7 +1154,7 @@ mod tests {
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
         // attempt returns an error to be handled.
         let result = system.spawn_named("A", state, simple_handler);
-        assert_eq!(Err(ActorError::NameAlreadyUsed("A".to_string())), result);
+        assert_eq!(Err(AxiomError::NameAlreadyUsed("A".to_string())), result);
 
         // Verify that the same actor has "A" name and is still up.
         let found1 = system.find_aid_by_name("A").unwrap();
@@ -1155,42 +1191,49 @@ mod tests {
         let (system1, system2) = start_and_connect_two_systems();
 
         system1.init_current();
-        let aid = system1.spawn((), |_: &mut (), context: &Context, message: &Message| {
-            if let Some(msg) = message.content_as::<Request>() {
-                msg.reply_to.send_new(Reply {});
-                context.system.trigger_shutdown();
-                Status::Stop
-            } else if let Some(_) = message.content_as::<SystemMsg>() {
-                Status::Processed
-            } else {
-                panic!("Unexpected message received!");
-            }
-        });
-        await_received(&aid, 1, 1000).unwrap();
-
-        let serialized = bincode::serialize(&aid).unwrap();
-        system2.spawn(
-            (),
-            move |_: &mut (), context: &Context, message: &Message| {
-                if let Some(_) = message.content_as::<Reply>() {
+        let aid = system1
+            .spawn((), |_: &mut (), context: &Context, message: &Message| {
+                if let Some(msg) = message.content_as::<Request>() {
+                    msg.reply_to.send_new(Reply {}).unwrap();
                     context.system.trigger_shutdown();
-                    Status::Stop
-                } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    match &*msg {
-                        SystemMsg::Start => {
-                            let target_aid: ActorId = bincode::deserialize(&serialized).unwrap();
-                            target_aid.send_new(Request {
-                                reply_to: context.aid.clone(),
-                            });
-                            Status::Processed
-                        }
-                        _ => Status::Processed,
-                    }
+                    Ok(Status::Stop)
+                } else if let Some(_) = message.content_as::<SystemMsg>() {
+                    Ok(Status::Processed)
                 } else {
                     panic!("Unexpected message received!");
                 }
-            },
-        );
+            })
+            .unwrap();
+        await_received(&aid, 1, 1000).unwrap();
+
+        let serialized = bincode::serialize(&aid).unwrap();
+        system2
+            .spawn(
+                (),
+                move |_: &mut (), context: &Context, message: &Message| {
+                    if let Some(_) = message.content_as::<Reply>() {
+                        context.system.trigger_shutdown();
+                        Ok(Status::Stop)
+                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        match &*msg {
+                            SystemMsg::Start => {
+                                let target_aid: ActorId =
+                                    bincode::deserialize(&serialized).unwrap();
+                                target_aid
+                                    .send_new(Request {
+                                        reply_to: context.aid.clone(),
+                                    })
+                                    .unwrap();
+                                Ok(Status::Processed)
+                            }
+                            _ => Ok(Status::Processed),
+                        }
+                    } else {
+                        panic!("Unexpected message received!");
+                    }
+                },
+            )
+            .unwrap();
 
         await_two_system_shutdown(system1, system2);
     }
@@ -1206,45 +1249,47 @@ mod tests {
         let aid1 = system1
             .spawn_named("A", (), |_: &mut (), context: &Context, _: &Message| {
                 context.system.trigger_shutdown();
-                Status::Processed
+                Ok(Status::Processed)
             })
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
-        system2.spawn(
-            (),
-            move |_: &mut (), context: &Context, message: &Message| {
-                if let Some(msg) = message.content_as::<SystemActorMessage>() {
-                    match &*msg {
-                        SystemActorMessage::FindByNameResult { aid: found, .. } => {
-                            if let Some(target) = found {
-                                assert_eq!(target.uuid(), aid1.uuid());
-                                target.send_new(true);
-                                context.system.trigger_shutdown();
-                                Status::Processed
-                            } else {
-                                panic!("Didn't find AID.");
+        system2
+            .spawn(
+                (),
+                move |_: &mut (), context: &Context, message: &Message| {
+                    if let Some(msg) = message.content_as::<SystemActorMessage>() {
+                        match &*msg {
+                            SystemActorMessage::FindByNameResult { aid: found, .. } => {
+                                if let Some(target) = found {
+                                    assert_eq!(target.uuid(), aid1.uuid());
+                                    target.send_new(true).unwrap();
+                                    context.system.trigger_shutdown();
+                                    Ok(Status::Processed)
+                                } else {
+                                    panic!("Didn't find AID.");
+                                }
                             }
+                            _ => panic!("Unexpected message received!"),
                         }
-                        _ => panic!("Unexpected message received!"),
-                    }
-                } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    if let SystemMsg::Start = &*msg {
-                        context.system.send_to_system_actors(Message::new(
-                            SystemActorMessage::FindByName {
-                                reply_to: context.aid.clone(),
-                                name: "A".to_string(),
-                            },
-                        ));
-                        Status::Processed
+                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        if let SystemMsg::Start = &*msg {
+                            context.system.send_to_system_actors(Message::new(
+                                SystemActorMessage::FindByName {
+                                    reply_to: context.aid.clone(),
+                                    name: "A".to_string(),
+                                },
+                            ));
+                            Ok(Status::Processed)
+                        } else {
+                            panic!("Unexpected message received!");
+                        }
                     } else {
                         panic!("Unexpected message received!");
                     }
-                } else {
-                    panic!("Unexpected message received!");
-                }
-            },
-        );
+                },
+            )
+            .unwrap();
 
         await_two_system_shutdown(system1, system2);
     }

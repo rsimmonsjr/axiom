@@ -23,7 +23,7 @@ impl Game {
         }
     }
 
-    fn play(&mut self, ctx: &Context, msg: &Message) -> Status {
+    fn play(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
         // The game starts when this actor receives a go message from the GameResults actor
         if let Some(results_aid) = msg.content_as::<ActorId>() {
             let mut current_play = 1;
@@ -36,10 +36,12 @@ impl Game {
                 }
                 results_vec.push(self.funds);
             }
-            results_aid.send_new(GameMsg::new(ctx.aid.clone(), results_vec));
-            return Status::Stop;
+            results_aid
+                .send_new(GameMsg::new(ctx.aid.clone(), results_vec))
+                .unwrap();
+            return Ok(Status::Stop);
         }
-        Status::Processed
+        Ok(Status::Processed)
     }
 }
 
@@ -86,7 +88,7 @@ impl GameResults {
 }
 
 impl GameResults {
-    fn gather(&mut self, ctx: &Context, msg: &Message) -> Status {
+    fn gather(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
         println!("============> Handling With GameResults");
         // Receive messages from the Game actors and aggregate their results
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
@@ -113,7 +115,7 @@ impl GameResults {
                             .spawn_named(&name, game_conditions, Game::play)
                             .unwrap();
                         ctx.system.monitor(&ctx.aid, &aid);
-                        aid.send_new(ctx.aid.clone());
+                        aid.send_new(ctx.aid.clone()).unwrap();
                     }
                     println!("[{}] ==> Start Done", ctx.aid);
                 }
@@ -136,7 +138,7 @@ impl GameResults {
                 _ => {}
             }
         }
-        Status::Processed
+        Ok(Status::Processed)
     }
 }
 
@@ -147,9 +149,9 @@ fn main() {
     // FIXME: We spawn an unreasonable number of worker threads here because that magically prevents
     // a deadlock from happening somehow. Fixing the source of the deadlock would be preferable.
     let mut config = ActorSystemConfig::default();
-    config.work_channel_size = 100;
+    config.work_channel_size = 110;
     config.threads_size = 4;
-    config.message_channel_size = 50;
+    config.message_channel_size = 210;
 
     let system = ActorSystem::create(config);
 
