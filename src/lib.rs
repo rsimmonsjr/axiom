@@ -17,10 +17,22 @@
 //!   * Calling `system.init_current()` is unneeded unless deserializing `aid`s outside a `Processor`.
 //!   * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`.
 //!   * Changed internal maps to use `dashmap` which expands dependencies but increases performance.
-//!   * New methods `send_new` and `try_send_new` are available to shorten boilerplate.
+//!   * New methods `send_new` and `send_new_after` are available to shorten boilerplate.
 //!   * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
 //!   * Added a method `system_actor_aid` to easily look up the `System` actor.
 //!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
+//!   * Added additional configuration options to `ActorSystemConfig`.
+//!   * System will warn if an actor takes longer than the configured `warn_threshold` to process a
+//!   message.
+//!   * Instead of processing one message per receive, the system will now process pending messages
+//!   up until the configured `time_slice`, allowing optimized processing for quick messages.
+//!   * The defailt `message_channel_size` is now configurable for the actor system as a whole.
+//!   * Instead of waiting forever on a send, the system will wait for the configured
+//!   `send_timeout` before returning a timeout error to the caller.
+//!   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
+//!   that the user must manage.
+//!   * BREAKING CHANGE: All actor procesors now should return `AxiomResult` which will allow them
+//!   to use the `?` syntax for all functions that return `AxiomError` and return their own errors.
 //!
 //! [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 //!
@@ -54,20 +66,31 @@
 //! ```rust
 //! use axiom::*;
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
 //!
 //! let aid = system.spawn(
 //!     0 as usize,
-//!     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-//!  );
+//!     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+//!  ).unwrap();
 //!
-//! aid.send(Message::new(11));
-//! aid.send_new(17); // This will wrap the value in a Message for you!
+//! aid.send(Message::new(11)).unwrap();
+//!
+//! // It is worth noting that you probably wouldn't just unwrap in real code but deal with
+//! // the result as a panic in Axiom will take down a dispatcher thread and potentially
+//! // hang the system.
+//!
+//! // This will wrap the value in a Message for you!
+//! aid.send_new(17).unwrap();
 //!
 //! // We can also create and send separately using just `send`, not `send_new`.
 //! let m = Message::new(19);
-//! aid.send(m);
+//! aid.send(m).unwrap();
+//!
+//! // Another neat capability is to send a message after some time has elapsed.
+//! aid.send_after(Message::new(7), Duration::from_millis(10)).unwrap();
+//! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //!
 //! This code creates an actor system, spawns an actor and finally sends the actor a message.
@@ -86,38 +109,38 @@
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(&mut self, message: &bool) -> Status {
+//!     fn handle_bool(&mut self, message: &bool) -> AxiomResult {
 //!         if *message {
 //!             self.value += 1;
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Status::Processed
+//!         Ok(Status::Processed)
 //!     }
 //!
-//!     fn handle_i32(&mut self, message: &i32) -> Status {
+//!     fn handle_i32(&mut self, message: &i32) -> AxiomResult {
 //!         self.value += *message;
-//!         Status::Processed
+//!         Ok(Status::Processed)
 //!     }
 //!
-//!     fn handle(&mut self, _context: &Context, message: &Message) -> Status {
+//!     fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
 //!         if let Some(msg) = message.content_as::<bool>() {
 //!             self.handle_bool(&*msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
 //!             self.handle_i32(&*msg)
 //!         } else {
 //!             panic!("Failed to dispatch properly");
-//!             Status::Stop
+//!             Ok(Status::Stop)
 //!         }
 //!     }
 //! }
 //!
 //! let data = Data { value: 0 };
-//! let aid = system.spawn( data, Data::handle);
+//! let aid = system.spawn( data, Data::handle).unwrap();
 //!
-//! aid.send_new(11);
-//! aid.send_new(true);
-//! aid.send_new(false);
+//! aid.send_new(11).unwrap();
+//! aid.send_new(true).unwrap();
+//! aid.send_new(false).unwrap();
 //! ```
 //!
 //! This code creates an actor out of an arbitrary struct. Since the only requirement to make
@@ -140,7 +163,6 @@ pub mod actors;
 pub mod message;
 pub mod system;
 
-pub use crate::actors::ActorError;
 pub use crate::actors::ActorId;
 pub use crate::actors::Context;
 pub use crate::actors::Status;
@@ -148,6 +170,59 @@ pub use crate::message::Message;
 pub use crate::system::ActorSystem;
 pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
+
+use serde::{Deserialize, Serialize};
+
+/// Errors returned by various parts of Axiom.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AxiomError {
+    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
+    /// actor cannot accept any more messages and is shut down. The holder of an [`ActorId`] to
+    /// a stopped actor should throw away the [`ActorId`] as the actor can never be started again.
+    ActorAlreadyStopped,
+
+    /// An error returned when an actor is already using a local name at the time the user tries
+    /// to register that name for a new actor. The error contains the name that was attempted
+    /// to be registered.
+    NameAlreadyUsed(String),
+
+    /// Error returned when an ActorId is not local and a user is trying to do operations that
+    /// only work on local ActorId instances.
+    ActorIdNotLocal,
+
+    /// Used when unable to send to an actor's message channel within the scheduled timeout
+    /// configured in the actor system. This could result from the actor's channel being too
+    /// small to accomodate the message flow, the lack of thread count to process messages fast
+    /// ennough to keep up with the flow or something wrong with the actor itself that it is
+    /// taking too long to cleare the messages.
+    SendTimedOut(ActorId),
+
+    /// Used when unable to schedule the actor for work in the work channel. This could be a
+    /// result of having a work channel that is too small to accomodate the number of actors
+    /// being concurrently scheduled, not enough threads to process actors in the channel fast
+    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of time
+    /// or not finish at all.
+    UnableToSchedule,
+
+    /// Returned by actors when there is an error in the actor. The optional enclosed string
+    /// will be sent to monitoring actors and can tell them why the actor errored.
+    ActorError(Option<String>),
+}
+
+impl std::fmt::Display for AxiomError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for AxiomError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
+
+/// A type for a result from an actor's message processor.
+pub type AxiomResult = Result<Status, AxiomError>;
 
 #[cfg(test)]
 mod tests {
@@ -163,10 +238,10 @@ mod tests {
             .try_init();
     }
 
-    /// A function that just returns [`Status::Processed`] which can be used as a handler for
-    /// a simple actor.
-    pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> Status {
-        Status::Processed
+    /// A function that just returns `Ok(Status::Processed)` which can be used as a handler for
+    /// a simple dummy actor.
+    pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> AxiomResult {
+        Ok(Status::Processed)
     }
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and
@@ -187,7 +262,7 @@ mod tests {
     }
 
     /// This test shows how the simplest actor can be built and used. This actor uses a closure
-    /// that simply returns that the message is processed.
+    /// that simply returns that the message is processed without doing anything with it.
     #[test]
     fn test_simplest_actor() {
         init_test_log();
@@ -197,13 +272,15 @@ mod tests {
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
-        let aid = system.spawn(
-            0 as usize,
-            |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
-        );
+        let aid = system
+            .spawn(
+                0 as usize,
+                |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
+            )
+            .unwrap();
 
         // Send a message to the actor.
-        aid.send_new(11);
+        aid.send_new(11).unwrap();
 
         // Wait for the message to get there because test is asynchronous.
         await_received(&aid, 1, 1000).unwrap();
@@ -224,15 +301,15 @@ mod tests {
         struct Data {}
 
         impl Data {
-            fn handle(&mut self, _context: &Context, _message: &Message) -> Status {
-                Status::Processed
+            fn handle(&mut self, _context: &Context, _message: &Message) -> AxiomResult {
+                Ok(Status::Processed)
             }
         }
 
-        let aid = system.spawn(Data {}, Data::handle);
+        let aid = system.spawn(Data {}, Data::handle).unwrap();
 
         // Send a message to the actor.
-        aid.send_new(11);
+        aid.send_new(11).unwrap();
 
         // Wait for the message to get there because test is asynchronous.
         await_received(&aid, 1, 1000).unwrap();
@@ -255,22 +332,22 @@ mod tests {
             // Attempt to downcast to expected message.
             if let Some(_msg) = message.content_as::<SystemMsg>() {
                 *state += 1;
-                Status::Processed
+                Ok(Status::Processed)
             } else if let Some(msg) = message.content_as::<i32>() {
                 assert_eq!(expected[*state - 1], *msg);
                 assert_eq!(*state, context.aid.received().unwrap());
                 *state += 1;
-                Status::Processed
+                Ok(Status::Processed)
             } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                 // Note that we put this last because it only is ever received once, we
                 // want the most frequently received messages first.
-                Status::Processed
+                Ok(Status::Processed)
             } else {
                 panic!("Failed to dispatch properly");
             }
         };
 
-        let aid = system.spawn(starting_state, closure);
+        let aid = system.spawn(starting_state, closure).unwrap();
 
         // First message will always be the SystemMsg::Start.
         assert_eq!(1, aid.sent().unwrap());
@@ -278,11 +355,11 @@ mod tests {
         // Send some messages to the actor in the order required in the test. In a real actor
         // its unlikely any order restriction would be needed. However this test makes sure that
         // the messages are processed correctly.
-        aid.send_new(11 as i32);
+        aid.send_new(11 as i32).unwrap();
         assert_eq!(2, aid.sent().unwrap());
-        aid.send_new(13 as i32);
+        aid.send_new(13 as i32).unwrap();
         assert_eq!(3, aid.sent().unwrap());
-        aid.send_new(17 as i32);
+        aid.send_new(17 as i32).unwrap();
         assert_eq!(4, aid.sent().unwrap());
 
         // Wait for all of the messages to get there because test is asynchronous.
@@ -307,21 +384,21 @@ mod tests {
         }
 
         impl Data {
-            fn handle_bool(&mut self, message: &bool) -> Status {
+            fn handle_bool(&mut self, message: &bool) -> AxiomResult {
                 if *message {
                     self.value += 1;
                 } else {
                     self.value -= 1;
                 }
-                Status::Processed // This assertion will fail but we still have to return.
+                Ok(Status::Processed) // This assertion will fail but we still have to return.
             }
 
-            fn handle_i32(&mut self, message: &i32) -> Status {
+            fn handle_i32(&mut self, message: &i32) -> AxiomResult {
                 self.value += *message;
-                Status::Processed // This assertion will fail but we still have to return.
+                Ok(Status::Processed) // This assertion will fail but we still have to return.
             }
 
-            fn handle(&mut self, _context: &Context, message: &Message) -> Status {
+            fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
                 if let Some(msg) = message.content_as::<bool>() {
                     self.handle_bool(&*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
@@ -329,7 +406,7 @@ mod tests {
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Status::Processed
+                    Ok(Status::Processed)
                 } else {
                     panic!("Failed to dispatch properly");
                 }
@@ -338,13 +415,13 @@ mod tests {
 
         let data = Data { value: 0 };
 
-        let aid = system.spawn(data, Data::handle);
+        let aid = system.spawn(data, Data::handle).unwrap();
 
         // Send some messages to the actor.
-        aid.send_new(11);
-        aid.send_new(true);
-        aid.send_new(true);
-        aid.send_new(false);
+        aid.send_new(11).unwrap();
+        aid.send_new(true).unwrap();
+        aid.send_new(true).unwrap();
+        aid.send_new(false).unwrap();
 
         // Wait for all of the messages to get there because this test is asynchronous.
         await_received(&aid, 4, 1000).unwrap();
@@ -365,12 +442,12 @@ mod tests {
             Pong,
         }
 
-        fn ping(_state: &mut usize, context: &Context, message: &Message) -> Status {
+        fn ping(_state: &mut usize, context: &Context, message: &Message) -> AxiomResult {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
-                        Status::Processed
+                        Ok(Status::Processed)
                     }
                     _ => panic!("Unexpected message"),
                 }
@@ -378,34 +455,40 @@ mod tests {
                 // Start messages happen only once so we keep them last.
                 match &*msg {
                     SystemMsg::Start => {
-                        // Now we will spawn a new actor to handle our pong and send to it.
-                        let pong_aid = context.system.spawn(0, pong);
-                        pong_aid.send_new(PingPong::Ping(context.aid.clone()));
-                        Status::Processed
+                        // Now we will spawn a new actor to handle our pong and send to it. Note
+                        // that although we use unwrap on the `send_new` here, that is a bad
+                        // idea in a real system because actor panics will take down the system.
+                        let pong_aid = context.system.spawn(0, pong).unwrap();
+                        pong_aid
+                            .send_new(PingPong::Ping(context.aid.clone()))
+                            .unwrap();
+                        Ok(Status::Processed)
                     }
-                    _ => Status::Processed,
+                    _ => Ok(Status::Processed),
                 }
             } else {
-                Status::Processed
+                Ok(Status::Processed)
             }
         }
 
-        fn pong(_state: &mut usize, _context: &Context, message: &Message) -> Status {
+        fn pong(_state: &mut usize, _context: &Context, message: &Message) -> AxiomResult {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
-                        from.send_new(PingPong::Pong);
-                        Status::Processed
+                        // Note that although we use unwrap on the `send_new` here, that is a bad
+                        // idea in a real system because actor panics will take down the system.
+                        from.send_new(PingPong::Pong).unwrap();
+                        Ok(Status::Processed)
                     }
                     _ => panic!("Unexpected message"),
                 }
             } else {
-                Status::Processed
+                Ok(Status::Processed)
             }
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.spawn(0, ping);
+        system.spawn(0, ping).unwrap();
         system.await_shutdown();
 
         assert_eq!(2 + 2, 4);

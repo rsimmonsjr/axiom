@@ -2,13 +2,10 @@
 //! The simulation is of a basic gambling game adapted from this page:
 //! https://towardsdatascience.com/the-house-always-wins-monte-carlo-simulation-eb82787da2a3
 
+use axiom::*;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
-
 use std::collections::HashMap;
-use std::time::Duration;
-
-use axiom::*;
 
 #[derive(Debug, Copy, Clone)]
 struct Game {
@@ -26,7 +23,7 @@ impl Game {
         }
     }
 
-    fn play(&mut self, ctx: &Context, msg: &Message) -> Status {
+    fn play(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
         // The game starts when this actor receives a go message from the GameResults actor
         if let Some(results_aid) = msg.content_as::<ActorId>() {
             let mut current_play = 1;
@@ -39,10 +36,12 @@ impl Game {
                 }
                 results_vec.push(self.funds);
             }
-            results_aid.send_new(GameMsg::new(ctx.aid.clone(), results_vec));
-            return Status::Stop;
+            results_aid
+                .send_new(GameMsg::new(ctx.aid.clone(), results_vec))
+                .unwrap();
+            return Ok(Status::Stop);
         }
-        Status::Processed
+        Ok(Status::Processed)
     }
 }
 
@@ -89,11 +88,13 @@ impl GameResults {
 }
 
 impl GameResults {
-    fn gather(&mut self, ctx: &Context, msg: &Message) -> Status {
+    fn gather(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
+        println!("============> Handling With GameResults");
         // Receive messages from the Game actors and aggregate their results
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
             self.results
                 .insert(game_msg.aid.clone(), game_msg.results_vec.clone());
+            println!("Handling GameMsg");
         }
 
         if let Some(sys_msg) = msg.content_as::<SystemMsg>() {
@@ -101,16 +102,22 @@ impl GameResults {
                 // This is the first code that will run in the actor. It spawns the Game actors,
                 // registers them to its monitoring list, then sends them a start signal
                 SystemMsg::Start => {
+                    println!("[{}] ==> Handling Start", ctx.aid);
                     let game_conditions = Game::default();
                     println!("Starting funds: ${}", game_conditions.funds);
                     println!("Wager per round: ${}", game_conditions.wager);
                     println!("Rounds per game: {}", game_conditions.total_plays);
                     println!("Running simulations...");
-                    for _ in 0..self.total_games {
-                        let aid = ctx.system.spawn(game_conditions, Game::play);
+                    for i in 0..self.total_games {
+                        let name = format!("Game{}", i);
+                        let aid = ctx
+                            .system
+                            .spawn_named(&name, game_conditions, Game::play)
+                            .unwrap();
                         ctx.system.monitor(&ctx.aid, &aid);
-                        aid.send_new(ctx.aid.clone());
+                        aid.send_new(ctx.aid.clone()).unwrap();
                     }
+                    println!("[{}] ==> Start Done", ctx.aid);
                 }
                 // This code runs each time a monitored actor stops. Once all Game actors are finished,
                 // the actor system will be shut down.
@@ -131,7 +138,7 @@ impl GameResults {
                 _ => {}
             }
         }
-        Status::Processed
+        Ok(Status::Processed)
     }
 }
 
@@ -141,15 +148,17 @@ fn main() {
     // Initialize the actor system
     // FIXME: We spawn an unreasonable number of worker threads here because that magically prevents
     // a deadlock from happening somehow. Fixing the source of the deadlock would be preferable.
-    let config = ActorSystemConfig {
-        work_channel_size: 100,
-        threads_size: 200,
-        thread_wait_time: Duration::from_millis(100),
-    };
+    let mut config = ActorSystemConfig::default();
+    config.work_channel_size = 110;
+    config.threads_size = 4;
+    config.message_channel_size = 210;
+
     let system = ActorSystem::create(config);
 
     // Spawn the results aggregator, which will in turn spawn the Game actors.
-    system.spawn(GameResults::new(NUM_GAMES), GameResults::gather);
+    system
+        .spawn_named("Manager", GameResults::new(NUM_GAMES), GameResults::gather)
+        .unwrap();
 
     // Wait for the actor system to shut down.
     system.await_shutdown();

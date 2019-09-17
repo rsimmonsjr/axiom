@@ -8,18 +8,17 @@
 
 use crate::message::*;
 use crate::system::*;
-use log::error;
+use crate::*;
+use log::{error, warn};
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
-use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
@@ -54,36 +53,6 @@ pub enum Status {
     Stop,
 }
 
-/// Errors returned from actors and other parts of the actor system.
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ActorError {
-    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
-    /// actor cannot accept any more messages and is shut down. The holder of an [`ActorId`] to
-    /// a stopped actor should throw away the [`ActorId`] as the actor can never be started again.
-    ActorStopped,
-
-    /// An error returned when an actor is already using a local name at the time the user tries
-    /// to register that name for a new actor. The error contains the name that was attempted
-    /// to be registered.
-    NameAlreadyUsed(String),
-
-    /// Error returned when an ActorId is not local and a user is trying to do operations that
-    /// only work on local ActorId instances.
-    ActorIdNotLocal,
-}
-
-impl fmt::Display for ActorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl Error for ActorError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
-    }
-}
-
 /// An enum that holds a sender for an actor.
 ///
 /// An [`ActorId`] uses the sender to send messages to the destination actor. Messages that are
@@ -109,8 +78,8 @@ enum ActorSender {
     Remote { sender: SeccSender<WireMessage> },
 }
 
-impl fmt::Debug for ActorSender {
-    fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Debug for ActorSender {
+    fn fmt(&self, formatter: &'_ mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             formatter,
             "{}",
@@ -125,7 +94,8 @@ impl fmt::Debug for ActorSender {
 /// The inner data of an [`ActorId`].
 ///
 /// This is kept separate to make serialization possible without duplicating all of the data
-/// associated with the [`ActorId`].
+/// associated with the [`ActorId`]. It also makes it easier when cloning and referring to an
+/// `aid` as the user doesnt have to put `Arc<ActorId>` all over thier code.
 struct ActorIdData {
     /// See [`ActorId::uuid()`]
     uuid: Uuid,
@@ -243,79 +213,10 @@ impl std::cmp::Ord for ActorId {
 }
 
 impl ActorId {
-    /// A helper to invoke [`ActorId::try_send`] and simply panic if an error occurs. Note that
-    /// if there is an error that is possible in the send, the user should call `try_send` instead
-    /// and handle the error. Panics in Axiom have the capability of taking down the whole actor
-    /// system and process. The standard practices of Rust are different than Erlang or other
-    /// actor systems. In Rust the user is expected to handle and manage potential errors. For
-    /// this reason an intentional decision was made to allow panics to take out the process. Rust
-    /// developers, suspecting an error, should design around this.
-    ///
-    /// # Examples
-    /// ```
-    /// use axiom::*;
-    /// use std::sync::Arc;
-    ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
-    ///
-    /// let aid = system.spawn(
-    ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
-    ///  );
-    ///
-    /// aid.send(Message::new(11));
-    /// ```
-    pub fn send(&self, message: Message) {
-        match self.try_send(message) {
-            Ok(_) => (),
-            Err(e) => panic!("Error occurred sending to aid: {:?}", e),
-        }
-    }
-
-    /// Shortcut for calling `send(Message::new(value))` This method will internally wrap
-    /// whatever it is passed into a `Message` and send it. This method would not be appropriate
-    /// if you want to re-send a message as it would wrap the message again with the same result
-    /// as if the code called `aid.send(Message::new(Message::new(value)))`. If the code wishes
-    /// to resend a message it should just call just call `send(msg)`.
-    ///
-    /// # Examples
-    /// ```
-    /// use axiom::*;
-    /// use std::sync::Arc;
-    ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
-    ///
-    /// let aid = system.spawn(
-    ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
-    ///  );
-    ///
-    /// aid.send_new(11);
-    /// ```
-    pub fn send_new<T>(&self, value: T)
-    where
-        T: 'static + ActorMessage,
-    {
-        self.send(Message::new(value))
-    }
-
-    /// A utility to call `try_send_after` and just unwrap the result. This should only be
-    /// used if the developer knows for sure there will not be an error.
-    pub fn send_after(&self, message: Message, duration: Duration) {
-        match self.try_send_after(message, duration) {
-            Ok(_) => (),
-            Err(e) => panic!("Error occurred sending to aid: {:?}", e),
-        }
-    }
-
     /// Attempts to send a message to the actor with the given [`ActorId`] and returns
-    /// `std::Result::Ok` when the send was successful or a `std::Result::Err<ActorError>`
-    /// if something went wrong with the send.
-    ///
-    /// This is useful when the user wants to send a message and feels that there is a
-    /// possibility of an error and that possibility has to be handled gracefully. Note that
-    /// as with `send` if a user just calls `try_send(msg).unwrap()`, a panic could take down the
-    /// whole process. See the documentation on `send` for a longer explanation.
+    /// `std::Result::Ok` when the send was successful or a `std::Result::Err<AxiomError>`
+    /// if something went wrong with the send. Note that if a user just calls `send(msg).unwrap()`,
+    /// a panic could take down the dispatcher thread and thus eventually hang the process.
     ///
     /// # Examples
     /// ```
@@ -326,15 +227,15 @@ impl ActorId {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-    ///  );
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///  ).unwrap();
     ///
-    /// match aid.try_send(Message::new(11)) {
+    /// match aid.send(Message::new(11)) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     /// ```
-    pub fn try_send(&self, message: Message) -> Result<(), ActorError> {
+    pub fn send(&self, message: Message) -> Result<(), AxiomError> {
         match &self.data.sender {
             ActorSender::Local {
                 stopped,
@@ -342,15 +243,18 @@ impl ActorId {
                 system,
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    Err(ActorError::ActorStopped)
+                    Err(AxiomError::ActorAlreadyStopped)
                 } else {
-                    sender.send_await(message).unwrap();
-                    // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
-                    if sender.receivable() == 1 {
-                        system.schedule(self.clone());
-                    };
-
-                    Ok(())
+                    match sender.send_await_timeout(message, system.config().send_timeout) {
+                        Ok(_) => {
+                            // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
+                            if sender.receivable() == 1 {
+                                system.schedule(self.clone());
+                            };
+                            Ok(())
+                        }
+                        Err(_) => Err(AxiomError::SendTimedOut(self.clone())),
+                    }
                 }
             }
             ActorSender::Remote { sender } => {
@@ -366,19 +270,50 @@ impl ActorId {
         }
     }
 
+    /// Shortcut for calling `send(Message::new(value))` This method will internally wrap
+    /// whatever it is passed into a `Message` and try to send it. This method would not be
+    /// appropriate if you want to re-send a message as it would wrap the message again with the
+    /// same result as if the the code called `aid.send(Message::new(Message::new(value)))`.
+    /// If the code wishes to resend a message it should just call just call `send(msg)`.
+    ///
+    /// # Examples
+    /// ```
+    /// use axiom::*;
+    /// use std::sync::Arc;
+    ///
+    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    ///
+    /// let aid = system.spawn(
+    ///     0 as usize,
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///  ).unwrap();
+    ///
+    /// match aid.send_new(11) {
+    ///     Ok(_) => println!("OK Then!"),
+    ///     Err(e) => println!("Ooops {:?}", e),
+    /// }
+    /// ```
+    pub fn send_new<T>(&self, value: T) -> Result<(), AxiomError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.send(Message::new(value))
+    }
+
     /// Schedules the given message to be sent after a minimum of the specified duration. Note
     /// that axiom doesn't guarantee that the message will be sent on exactly now + duration but
     /// rather that _at least_ the duration will pass before the message is sent to the actor.
-    /// This message will return an `Err` if the actor has been stopped or `Ok` if the message
-    /// was scheduled to be sent. If the actor is stopped before the duration passes then the
-    /// scheduled message will never get to the actor.
-    pub fn try_send_after(&self, message: Message, duration: Duration) -> Result<(), ActorError> {
+    /// Axiom will try to send as close as possible without going under the amount but precise
+    /// timing should not be depended on.  This message will return an `Err` if the actor has been
+    /// stopped or `Ok` if the message was scheduled to be sent. If the actor is stopped before
+    /// the duration passes then the scheduled message will never get to the actor.
+    pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
         match &self.data.sender {
             ActorSender::Local {
                 stopped, system, ..
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    Err(ActorError::ActorStopped)
+                    Err(AxiomError::ActorAlreadyStopped)
                 } else {
                     system.send_after(message, self.clone(), duration);
                     Ok(())
@@ -392,40 +327,41 @@ impl ActorId {
                         system_uuid: self.data.system_uuid,
                         message,
                     })
-                    .unwrap();
+                    .unwrap(); // FIXME Get rid of this unwrap!
                 Ok(())
             }
         }
     }
 
-    /// Shortcut for calling `try_send(Message::new(value))` This method will internally wrap
+    /// Shortcut for calling `send_after(Message::new(value))` This method will internally wrap
     /// whatever it is passed into a `Message` and try to send it. This method would not be
     /// appropriate if you want to re-send a message as it would wrap the message again with the
-    /// same result as if the the code called `aid.try_send(Message::new(Message::new(value)))`.
-    /// If the code wishes to resend a message it should just call just call `try_send(msg)`.
+    /// same result as if the the code called `aid.send_after(Message::new(Message::new(value)))`.
+    /// If the code wishes to resend a message it should just call just call `send(msg)`.
     ///
     /// # Examples
     /// ```
     /// use axiom::*;
     /// use std::sync::Arc;
+    /// use std::time::Duration;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-    ///  );
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///  ).unwrap();
     ///
-    /// match aid.try_send_new(11) {
+    /// match aid.send_new_after(11, Duration::from_millis(1)) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     /// ```
-    pub fn try_send_new<T>(&self, value: T) -> Result<(), ActorError>
+    pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AxiomError>
     where
         T: 'static + ActorMessage,
     {
-        self.try_send(Message::new(value))
+        self.send_after(Message::new(value), duration)
     }
 
     /// The unique UUID for this actor within the entire cluster. The UUID for an [`ActorId`]
@@ -464,19 +400,19 @@ impl ActorId {
 
     /// Determines how many messages the actor with the aid has been sent. This method works only
     /// for local `aid`s, remote `aid`s will return an error if this is called.
-    pub fn sent(&self) -> Result<usize, ActorError> {
+    pub fn sent(&self) -> Result<usize, AxiomError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.sent()),
-            _ => Err(ActorError::ActorIdNotLocal),
+            _ => Err(AxiomError::ActorIdNotLocal),
         }
     }
 
     /// Determines how many messages the actor with the `aid` has received. This method works only
     /// for local `aid`s, remote `aid`s will return an error if this is called.    
-    pub fn received(&self) -> Result<usize, ActorError> {
+    pub fn received(&self) -> Result<usize, AxiomError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.received()),
-            _ => Err(ActorError::ActorIdNotLocal),
+            _ => Err(AxiomError::ActorIdNotLocal),
         }
     }
 
@@ -484,13 +420,13 @@ impl ActorId {
     /// cause no more messages to be sent to the actor. Note that once stopped, an [`ActorId`] can
     /// never be started again. Note that this is `pub(crate)` because the user should be sending
     /// `SystemMsg::Stop` to actors or, at worst, calling `ActorSystem::stop()` to stop an actor.
-    pub(crate) fn stop(&self) -> Result<(), ActorError> {
+    pub(crate) fn stop(&self) -> Result<(), AxiomError> {
         match &self.data.sender {
             ActorSender::Local { stopped, .. } => {
                 stopped.fetch_or(true, Ordering::AcqRel);
                 Ok(())
             }
-            _ => Err(ActorError::ActorIdNotLocal),
+            _ => Err(AxiomError::ActorIdNotLocal),
         }
     }
 
@@ -500,8 +436,8 @@ impl ActorId {
     }
 }
 
-impl fmt::Debug for ActorId {
-    fn fmt(&self, formatter: &'_ mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Debug for ActorId {
+    fn fmt(&self, formatter: &'_ mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             formatter,
             "ActorId{{id: {}, system_uuid: {}, name: {:?}, is_local: {}}}",
@@ -513,8 +449,8 @@ impl fmt::Debug for ActorId {
     }
 }
 
-impl fmt::Display for ActorId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for ActorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data.name {
             Some(name) => write!(f, "{}:{}", name, self.data.uuid),
             None => write!(f, "{}", self.data.uuid),
@@ -537,8 +473,8 @@ pub struct Context {
     pub system: ActorSystem,
 }
 
-impl fmt::Display for Context {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "Context{{aid: {}, system: {}}}",
@@ -551,12 +487,14 @@ impl fmt::Display for Context {
 /// A type for a function that processes messages for an actor.
 ///
 /// This will be passed to a spawn function to specify the function used for managing the state of
-/// the actor based on the messages passed to the actor. The processor takes three arguments:
+/// the actor based on the messages passed to the actor. The result of a processor is used to
+/// determine the status of an actor. If the actor returns an `AxiomError` then it will be stopped
+/// as if the actor had returned `Stop`. The processor takes three arguments:
 /// * `state`   - A mutable reference to the current state of the actor.
 /// * `aid`     - The reference to the [`ActorId`] for this actor.
 /// * `message` - The reference to the current message to process.
 pub trait Processor<State: Send + Sync>:
-    (FnMut(&mut State, &Context, &Message) -> Status) + Send + Sync
+    (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync
 {
 }
 
@@ -564,16 +502,16 @@ pub trait Processor<State: Send + Sync>:
 impl<F, State> Processor<State> for F
 where
     State: Send + Sync + 'static,
-    F: (FnMut(&mut State, &Context, &Message) -> Status) + Send + Sync + 'static,
+    F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
 {
 }
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
-trait Handler: (FnMut(&Context, &Message) -> Status) + Send + Sync + 'static {}
+trait Handler: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
 
 // Allows any static function or closure, to be used as a Handler.
-impl<F> Handler for F where F: (FnMut(&Context, &Message) -> Status) + Send + Sync + 'static {}
+impl<F> Handler for F where F: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
 
 /// An actual actor in the system. Please see overview and library documentation for more detail.
 pub(crate) struct Actor {
@@ -603,7 +541,10 @@ impl Actor {
         F: Processor<State> + 'static,
     {
         // FIXME: (Issue #33) Let the user pass the size of the channel queue when creating.
-        let (sender, receiver) = secc::create::<Message>(32, Duration::from_millis(10));
+        let (sender, receiver) = secc::create::<Message>(
+            system.config().message_channel_size,
+            Duration::from_millis(10),
+        );
 
         // The sender will be put inside the actor id.
         let aid = ActorId {
@@ -637,71 +578,77 @@ impl Actor {
         Arc::new(actor)
     }
 
-    /// This method is called to finish up the procedure for processing a message
-    ///
-    /// FIXME (Issue #69) Optimize dispatcher handling for actors that get lots of small messages.
-    fn post_message_process(actor: &Arc<Self>) {
-        // We check to see if the actor still has pending messages and if so we re-schedule it
-        // for work at the back of the work channel. This prevents actors that get tons of
-        // messages from starving out actors that get few messages.
-        if actor.receiver.receivable() > 0 {
-            actor.context.system.reschedule(actor.clone());
-        }
-    }
-
     /// Receive a message from the channel and process it with the actor. This function is the
-    /// core of the processing pipeline.
+    /// core of the processing pipeline. The function will process messages up until the actor has
+    /// no more pending messages or the given time slice has expired. The time slice is
+    /// configurable and should be tuned to allow the most possible messages to be processed
+    /// without locking out other actors.
     pub(crate) fn receive(actor: Arc<Actor>) {
         let mut guard = actor.handler.lock().unwrap();
-        // If there isn't a message, another dispatcher thread beat us to it, no big deal.
-        if let Ok(message) = actor.receiver.peek() {
-            // In this case there is a message in the channel that we have to process through
-            // the actor. We process the message and then we may override the actor's returned
-            // value if its a Stop message. Overriding the return for `Stop` allows actors that
-            // don't need to do anything special when stopping to ignore processing `Stop`.
-            let mut result = (&mut *guard)(&actor.context, &message);
-            if let Some(m) = message.content_as::<SystemMsg>() {
-                if let SystemMsg::Stop = *m {
-                    result = Status::Stop
+        let system = actor.context.system.clone();
+        let start = Instant::now();
+        // FIXME The time sliced batching of messages needs testing.
+        while Instant::elapsed(&start) < system.config().time_slice {
+            // If there isn't a message, another dispatcher thread beat us to it, no big deal.
+            if let Ok(message) = actor.receiver.peek() {
+                println!("[{}] Processing message", actor.context.aid);
+                // In this case there is a message in the channel that we have to process. We
+                // will time the result and log a warning if it took too long.
+                let start_process = Instant::now();
+                let mut result = (&mut *guard)(&actor.context, &message);
+                let elapsed = Instant::elapsed(&start_process);
+                if elapsed > system.config().warn_threshold {
+                    warn!(
+                        "[{}] Actor took {:?} to process a message, threshold is {:?}!",
+                        actor.context.aid,
+                        elapsed,
+                        system.config().warn_threshold
+                    );
                 }
-            };
 
-            // Handle the result of the processing.
-            match result {
-                Status::Processed => {
-                    if let Err(e) = actor.receiver.pop() {
-                        error!("Error on pop(): {:?}.", e);
+                // If the message was a system stop message then we override the actor returned
+                // result with a stop. The override means actors that don't do anything special
+                // can essentially ignore processing stop.
+                if let Some(m) = message.content_as::<SystemMsg>() {
+                    if let SystemMsg::Stop = *m {
+                        result = Ok(Status::Stop)
+                    }
+                };
+
+                // Handle the result of the processing.
+                match result {
+                    Ok(Status::Processed) => actor.receiver.pop().unwrap(),
+                    Ok(Status::Skipped) => actor.receiver.skip().unwrap(),
+                    Ok(Status::ResetSkip) => actor.receiver.reset_skip().unwrap(),
+                    Ok(Status::Stop) => {
+                        actor.receiver.pop().unwrap();
                         actor.context.system.stop_actor(&actor.context.aid);
-                    } else {
-                        Actor::post_message_process(&actor);
                     }
-                }
-                Status::Skipped => {
-                    if let Err(e) = actor.receiver.skip() {
-                        error!("Error on skip(): {:?}.", e);
+                    Err(e) => {
+                        actor.receiver.pop().unwrap();
                         actor.context.system.stop_actor(&actor.context.aid);
-                    } else {
-                        Actor::post_message_process(&actor);
+                        error!(
+                            "[{}] Returned an error when processing: {:?}",
+                            actor.context.aid, e
+                        );
                     }
-                }
-                Status::ResetSkip => {
-                    if let Err(e) = actor.receiver.pop_and_reset_skip() {
-                        error!("Error on pop_and_reset_skip(): {:?}.", e);
-                        actor.context.system.stop_actor(&actor.context.aid);
-                    } else {
-                        Actor::post_message_process(&actor);
-                    }
-                }
-                Status::Stop => {
-                    actor.context.system.stop_actor(&actor.context.aid);
-                    // Even though the actor is stopping we want to pop the message to make
-                    // sure that the metrics on the actor's channel are correct. Then we will
-                    // stop the actor in the actor system.
-                    if let Err(e) = actor.receiver.pop() {
-                        error!("Error on pop(): {:?}.", e);
-                    }
-                }
-            };
+                };
+            } else {
+                // No more messages so we just break out of the loop.
+                break;
+            }
+        }
+
+        println!(
+            "[{}] Post Process: {}",
+            actor.context.aid,
+            actor.receiver.receivable()
+        );
+
+        // Reschedule the actor if it is still alive and has more content.
+        if system.is_actor_alive(&actor.context.aid) && actor.receiver.receivable() > 0 {
+            println!("[{}] Rescheduling", actor.context.aid);
+            actor.context.system.reschedule(actor.clone());
         }
     }
 }
@@ -719,7 +666,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn(0, simple_handler);
+        let aid = system.spawn(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -757,7 +704,7 @@ mod tests {
     #[test]
     fn test_actor_id_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn(0 as usize, simple_handler);
+        let aid = system.spawn(0 as usize, simple_handler).unwrap();
         system.init_current(); // Required by ActorId serialization.
 
         // This check forces the test to break here if someone changes the default.
@@ -808,23 +755,25 @@ mod tests {
             Aid(ActorId),
         }
 
-        let aid = system.spawn(
-            0,
-            |_state: &mut i32, context: &Context, message: &Message| {
-                if let Some(msg) = message.content_as::<ActorId>() {
-                    assert!(ActorId::ptr_eq(&context.aid, &msg));
-                } else if let Some(msg) = message.content_as::<Op>() {
-                    match &*msg {
-                        Op::Aid(a) => assert!(ActorId::ptr_eq(&context.aid, &a)),
+        let aid = system
+            .spawn(
+                0,
+                |_state: &mut i32, context: &Context, message: &Message| {
+                    if let Some(msg) = message.content_as::<ActorId>() {
+                        assert!(ActorId::ptr_eq(&context.aid, &msg));
+                    } else if let Some(msg) = message.content_as::<Op>() {
+                        match &*msg {
+                            Op::Aid(a) => assert!(ActorId::ptr_eq(&context.aid, &a)),
+                        }
                     }
-                }
-                Status::Processed
-            },
-        );
+                    Ok(Status::Processed)
+                },
+            )
+            .unwrap();
 
         // Send a message to the actor.
-        aid.send_new(aid.clone());
-        aid.send_new(Op::Aid(aid.clone()));
+        aid.send_new(aid.clone()).unwrap();
+        aid.send_new(Op::Aid(aid.clone())).unwrap();
 
         // Wait for the start and our message to get there because test is asynchronous.
         await_received(&aid, 2, 1000).unwrap();
@@ -835,13 +784,13 @@ mod tests {
     #[test]
     fn test_cant_send_to_stopped() {
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.spawn(0 as usize, simple_handler);
+        let aid = system.spawn(0 as usize, simple_handler).unwrap();
         system.stop_actor(&aid);
         assert_eq!(false, system.is_actor_alive(&aid));
 
         // Make sure that the actor is actually stopped and can't get more messages.
-        match aid.try_send(Message::new(42 as i32)) {
-            Err(ActorError::ActorStopped) => assert!(true), // all OK!
+        match aid.send(Message::new(42 as i32)) {
+            Err(AxiomError::ActorAlreadyStopped) => assert!(true), // all OK!
             Ok(_) => panic!("Expected the actor to be shut down!"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -854,24 +803,36 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default());
 
         // FIXME See if there is some way to support processors without state without () stuff.
-        let aid = system.spawn((), |_: &mut (), _: &Context, message: &Message| {
-            if let Some(_msg) = message.content_as::<i32>() {
-                Status::Stop
-            } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                match &*msg {
-                    SystemMsg::Start => Status::Processed,
-                    m => panic!("unexpected message: {:?}", m),
+        let aid = system
+            .spawn((), |_: &mut (), _: &Context, message: &Message| {
+                if let Some(_msg) = message.content_as::<i32>() {
+                    Ok(Status::Stop)
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Start => Ok(Status::Processed),
+                        m => panic!("unexpected message: {:?}", m),
+                    }
+                } else {
+                    panic!("Unknown Message received");
                 }
-            } else {
-                panic!("Unknown Message received");
-            }
-        });
+            })
+            .unwrap();
 
         // Send a message to the actor.
         assert_eq!(true, system.is_actor_alive(&aid));
-        aid.send_new(11 as i32);
+        aid.send_new(11 as i32).unwrap();
         await_received(&aid, 2, 1000).unwrap(); // Remember they always get `Start` as well!
-        assert_eq!(false, system.is_actor_alive(&aid));
+
+        let max = Duration::from_millis(200);
+        let start = Instant::now();
+        loop {
+            if !system.is_actor_alive(&aid) {
+                break;
+            } else if max < Instant::elapsed(&start) {
+                panic!("Timed out waiting for actor to stop!");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
 
         system.trigger_and_await_shutdown();
     }
@@ -884,23 +845,35 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default());
 
         // FIXME (Issue #63) Create a processor type that doesn't use state.
-        let aid = system.spawn((), |_: &mut (), _: &Context, message: &Message| {
-            if let Some(msg) = message.content_as::<SystemMsg>() {
-                match &*msg {
-                    SystemMsg::Start => Status::Processed,
-                    SystemMsg::Stop => Status::Processed,
-                    m => panic!("unexpected message: {:?}", m),
+        let aid = system
+            .spawn((), |_: &mut (), _: &Context, message: &Message| {
+                if let Some(msg) = message.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Start => Ok(Status::Processed),
+                        SystemMsg::Stop => Ok(Status::Processed),
+                        m => panic!("unexpected message: {:?}", m),
+                    }
+                } else {
+                    panic!("Unknown Message received");
                 }
-            } else {
-                panic!("Unknown Message received");
-            }
-        });
+            })
+            .unwrap();
 
         // Send a message to the actor.
         assert_eq!(true, system.is_actor_alive(&aid));
-        aid.send_new(SystemMsg::Stop);
+        aid.send_new(SystemMsg::Stop).unwrap();
         await_received(&aid, 2, 1000).unwrap(); // Remember they always get `Start` as well!
-        assert_eq!(false, system.is_actor_alive(&aid));
+
+        let max = Duration::from_millis(200);
+        let start = Instant::now();
+        loop {
+            if !system.is_actor_alive(&aid) {
+                break;
+            } else if max < Instant::elapsed(&start) {
+                panic!("Timed out waiting for actor to stop!");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
 
         system.trigger_and_await_shutdown();
     }
