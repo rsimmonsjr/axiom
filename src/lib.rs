@@ -66,20 +66,31 @@
 //! ```rust
 //! use axiom::*;
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
 //!
 //! let aid = system.spawn(
 //!     0 as usize,
 //!     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
-//!  );
+//!  ).unwrap();
 //!
-//! aid.send(Message::new(11));
-//! aid.send_new(17); // This will wrap the value in a Message for you!
+//! aid.send(Message::new(11)).unwrap();
+//!
+//! // It is worth noting that you probably wouldn't just unwrap in real code but deal with
+//! // the result as a panic in Axiom will take down a dispatcher thread and potentially
+//! // hang the system.
+//!
+//! // This will wrap the value in a Message for you!
+//! aid.send_new(17).unwrap();
 //!
 //! // We can also create and send separately using just `send`, not `send_new`.
 //! let m = Message::new(19);
 //! aid.send(m).unwrap();
+//!
+//! // Another neat capability is to send a message after some time has elapsed.
+//! aid.send_after(Message::new(7), Duration::from_millis(10)).unwrap();
+//! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //!
 //! This code creates an actor system, spawns an actor and finally sends the actor a message.
@@ -119,13 +130,13 @@
 //!             self.handle_i32(&*msg)
 //!         } else {
 //!             panic!("Failed to dispatch properly");
-//!             Status::Stop
+//!             Ok(Status::Stop)
 //!         }
 //!     }
 //! }
 //!
 //! let data = Data { value: 0 };
-//! let aid = system.spawn( data, Data::handle);
+//! let aid = system.spawn( data, Data::handle).unwrap();
 //!
 //! aid.send_new(11).unwrap();
 //! aid.send_new(true).unwrap();
@@ -210,7 +221,7 @@ impl std::error::Error for AxiomError {
     }
 }
 
-/// A type for a result from a processor used in an actor.
+/// A type for a result from an actor's message processor.
 pub type AxiomResult = Result<Status, AxiomError>;
 
 #[cfg(test)]
@@ -227,8 +238,8 @@ mod tests {
             .try_init();
     }
 
-    /// A function that just returns [`Status::Processed`] which can be used as a handler for
-    /// a simple actor.
+    /// A function that just returns `Ok(Status::Processed)` which can be used as a handler for
+    /// a simple dummy actor.
     pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> AxiomResult {
         Ok(Status::Processed)
     }
@@ -251,7 +262,7 @@ mod tests {
     }
 
     /// This test shows how the simplest actor can be built and used. This actor uses a closure
-    /// that simply returns that the message is processed.
+    /// that simply returns that the message is processed without doing anything with it.
     #[test]
     fn test_simplest_actor() {
         init_test_log();
@@ -444,7 +455,9 @@ mod tests {
                 // Start messages happen only once so we keep them last.
                 match &*msg {
                     SystemMsg::Start => {
-                        // Now we will spawn a new actor to handle our pong and send to it.
+                        // Now we will spawn a new actor to handle our pong and send to it. Note
+                        // that although we use unwrap on the `send_new` here, that is a bad
+                        // idea in a real system because actor panics will take down the system.
                         let pong_aid = context.system.spawn(0, pong).unwrap();
                         pong_aid
                             .send_new(PingPong::Ping(context.aid.clone()))
@@ -462,6 +475,8 @@ mod tests {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
+                        // Note that although we use unwrap on the `send_new` here, that is a bad
+                        // idea in a real system because actor panics will take down the system.
                         from.send_new(PingPong::Pong).unwrap();
                         Ok(Status::Processed)
                     }

@@ -94,7 +94,8 @@ impl std::fmt::Debug for ActorSender {
 /// The inner data of an [`ActorId`].
 ///
 /// This is kept separate to make serialization possible without duplicating all of the data
-/// associated with the [`ActorId`].
+/// associated with the [`ActorId`]. It also makes it easier when cloning and referring to an
+/// `aid` as the user doesnt have to put `Arc<ActorId>` all over thier code.
 struct ActorIdData {
     /// See [`ActorId::uuid()`]
     uuid: Uuid,
@@ -215,8 +216,7 @@ impl ActorId {
     /// Attempts to send a message to the actor with the given [`ActorId`] and returns
     /// `std::Result::Ok` when the send was successful or a `std::Result::Err<AxiomError>`
     /// if something went wrong with the send. Note that if a user just calls `send(msg).unwrap()`,
-    /// a panic could take down the dispatcher thread and thus
-    /// eventually hang the process.
+    /// a panic could take down the dispatcher thread and thus eventually hang the process.
     ///
     /// # Examples
     /// ```
@@ -227,8 +227,8 @@ impl ActorId {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-    ///  );
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///  ).unwrap();
     ///
     /// match aid.send(Message::new(11)) {
     ///     Ok(_) => println!("OK Then!"),
@@ -285,8 +285,8 @@ impl ActorId {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-    ///  );
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///  ).unwrap();
     ///
     /// match aid.send_new(11) {
     ///     Ok(_) => println!("OK Then!"),
@@ -303,9 +303,10 @@ impl ActorId {
     /// Schedules the given message to be sent after a minimum of the specified duration. Note
     /// that axiom doesn't guarantee that the message will be sent on exactly now + duration but
     /// rather that _at least_ the duration will pass before the message is sent to the actor.
-    /// This message will return an `Err` if the actor has been stopped or `Ok` if the message
-    /// was scheduled to be sent. If the actor is stopped before the duration passes then the
-    /// scheduled message will never get to the actor.
+    /// Axiom will try to send as close as possible without going under the amount but precise
+    /// timing should not be depended on.  This message will return an `Err` if the actor has been
+    /// stopped or `Ok` if the message was scheduled to be sent. If the actor is stopped before
+    /// the duration passes then the scheduled message will never get to the actor.
     pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
         match &self.data.sender {
             ActorSender::Local {
@@ -348,8 +349,8 @@ impl ActorId {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-    ///  );
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///  ).unwrap();
     ///
     /// match aid.send_new_after(11, Duration::from_millis(1)) {
     ///     Ok(_) => println!("OK Then!"),
@@ -486,7 +487,9 @@ impl std::fmt::Display for Context {
 /// A type for a function that processes messages for an actor.
 ///
 /// This will be passed to a spawn function to specify the function used for managing the state of
-/// the actor based on the messages passed to the actor. The processor takes three arguments:
+/// the actor based on the messages passed to the actor. The result of a processor is used to
+/// determine the status of an actor. If the actor returns an `AxiomError` then it will be stopped
+/// as if the actor had returned `Stop`. The processor takes three arguments:
 /// * `state`   - A mutable reference to the current state of the actor.
 /// * `aid`     - The reference to the [`ActorId`] for this actor.
 /// * `message` - The reference to the current message to process.
@@ -819,7 +822,17 @@ mod tests {
         assert_eq!(true, system.is_actor_alive(&aid));
         aid.send_new(11 as i32).unwrap();
         await_received(&aid, 2, 1000).unwrap(); // Remember they always get `Start` as well!
-        assert_eq!(false, system.is_actor_alive(&aid));
+
+        let max = Duration::from_millis(200);
+        let start = Instant::now();
+        loop {
+            if !system.is_actor_alive(&aid) {
+                break;
+            } else if max < Instant::elapsed(&start) {
+                panic!("Timed out waiting for actor to stop!");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
 
         system.trigger_and_await_shutdown();
     }
@@ -850,7 +863,17 @@ mod tests {
         assert_eq!(true, system.is_actor_alive(&aid));
         aid.send_new(SystemMsg::Stop).unwrap();
         await_received(&aid, 2, 1000).unwrap(); // Remember they always get `Start` as well!
-        assert_eq!(false, system.is_actor_alive(&aid));
+
+        let max = Duration::from_millis(200);
+        let start = Instant::now();
+        loop {
+            if !system.is_actor_alive(&aid) {
+                break;
+            } else if max < Instant::elapsed(&start) {
+                panic!("Timed out waiting for actor to stop!");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
 
         system.trigger_and_await_shutdown();
     }

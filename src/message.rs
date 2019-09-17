@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 
 pub trait ActorMessage: Send + Sync + Any {
     /// Gets a bincode serialized version of the message.
+    /// FIXME have this return a result so not all messages need to be serializable.
     fn to_bincode(&self) -> Vec<u8>;
 }
 

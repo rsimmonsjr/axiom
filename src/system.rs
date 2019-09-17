@@ -323,6 +323,8 @@ impl ActorSystem {
                         Actor::receive(actor);
                     }
                 }
+
+                // FIXME Refactor this into a function so all threads can utilize it.
                 let (mutex, condvar) = &*system.data.running_thread_count;
                 let mut count = mutex.lock().unwrap();
                 *count = *count - 1;
@@ -336,6 +338,7 @@ impl ActorSystem {
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
     /// delays have elapesed.
+    /// FIXME Add a graceful shutdown to this thread and notifications.
     fn start_send_after_thread(&self) -> JoinHandle<()> {
         let system = self.clone();
         let delayed_messages = self.data.delayed_messages.clone();
@@ -604,8 +607,8 @@ impl ActorSystem {
     ///
     /// let aid = system.spawn(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, _message: &Message| Status::Processed,
-    /// );
+    ///     |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
+    /// ).unwrap();
     /// ```
     pub fn spawn<F, State>(&self, state: State, processor: F) -> Result<ActorId, AxiomError>
     where
@@ -635,8 +638,8 @@ impl ActorSystem {
     /// let aid = system.spawn_named(
     ///     "alpha",
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Status::Processed,
-    /// );
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    /// ).unwrap();
     /// ```
     pub fn spawn_named<F, State>(
         &self,
