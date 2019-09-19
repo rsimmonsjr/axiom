@@ -16,7 +16,7 @@ use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
 use std::fmt;
 use std::marker::{Send, Sync};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -223,7 +223,7 @@ struct ActorSystemData {
     aids_by_name: Arc<DashMap<String, ActorId>>,
     /// Holds a map of monitors where the key is the `aid` of the actor being monitored and
     /// the value is a vector of `aid`s that are monitoring the actor.
-    monitoring_by_monitored: Arc<DashMap<ActorId, Vec<ActorId>>>,
+    monitoring_by_monitored: Arc<DashMap<ActorId, HashSet<ActorId>>>,
     /// Holds a map of information objects about links to remote actor systems.
     remotes: Arc<DashMap<Uuid, RemoteInfo>>,
     /// Holds the messages that have been enqueued for delayed send.
@@ -783,8 +783,8 @@ impl ActorSystem {
             .get_raw_mut_from_key(&monitored);
         let monitoring_vec = monitoring_by_monitored
             .entry(monitored.clone())
-            .or_insert(Vec::new());
-        monitoring_vec.push(monitoring.clone());
+            .or_insert(HashSet::new());
+        monitoring_vec.insert(monitoring.clone());
     }
 
     /// Asynchronously send a message to the system actors on all connected actor systems.
@@ -1125,9 +1125,9 @@ mod tests {
         {
             // Validate the monitors are there in a block to release mutex afterwards.
             let monitoring_by_monitored = &system.data.monitoring_by_monitored;
-            let m_vec = monitoring_by_monitored.get(&monitored).unwrap();
-            assert!(m_vec.contains(&monitoring1));
-            assert!(m_vec.contains(&monitoring2));
+            let m_set = monitoring_by_monitored.get(&monitored).unwrap();
+            assert!(m_set.contains(&monitoring1));
+            assert!(m_set.contains(&monitoring2));
         }
 
         // Stop the actor and it should be out of the monitors map.
