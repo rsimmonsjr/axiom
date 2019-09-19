@@ -635,6 +635,8 @@ impl Actor {
                     Ok(Status::Stop) => {
                         actor.receiver.pop().unwrap();
                         actor.context.system.stop_actor(&actor.context.aid);
+                        // Actor stopping, dont process more messages.
+                        break;
                     }
                     Err(e) => {
                         actor.receiver.pop().unwrap();
@@ -643,6 +645,8 @@ impl Actor {
                             "[{}] Returned an error when processing: {:?}",
                             actor.context.aid, e
                         );
+                        // Actor stopping, dont process more messages.
+                        break;
                     }
                 };
             } else {
