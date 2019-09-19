@@ -19,12 +19,10 @@
 //! This example is extremely strict. If the FSM at any time gets out of synch with expectations
 //! panics ensue. Some FSM implementations might be quite a bit more lose, preferring to ignore
 //! badly timeds messages. This is largely up to the user.
-//!
-//! FIXME There should be some way to abort the whole program other than panicing one actor.
 
 use axiom::*;
+use log::error;
 use log::LevelFilter;
-use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -63,25 +61,8 @@ impl Fork {
         }
     }
 
-    #[inline]
-    fn print_state(&mut self, context: &Context, info: &str) {
-        debug!(
-            "[{}] {} ==> owned_by: {}, clean: {}",
-            context.aid.name().unwrap(),
-            info,
-            self.owned_by
-                .as_ref()
-                .map_or("_".to_string(), |a| a.name().unwrap()),
-            self.clean,
-        );
-    }
-
     /// Request that a fork be sent to a philosopher.
     fn fork_requested(&mut self, context: &Context, requester: &ActorId) -> AxiomResult {
-        self.print_state(
-            context,
-            &format!("Fork Requested by {}", requester.name().unwrap()),
-        );
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
@@ -102,10 +83,6 @@ impl Fork {
     /// The philosopher that is the current owner of the fork has put it down, making it available
     /// for other philosophers to pick up.
     fn fork_put_down(&mut self, context: &Context, sender: &ActorId) -> AxiomResult {
-        self.print_state(
-            context,
-            &format!("Fork put down by {}", sender.name().unwrap()),
-        );
         match &self.owned_by {
             Some(owner) => {
                 if owner == sender {
@@ -135,10 +112,6 @@ impl Fork {
     /// will mark the fork as dirty and make it available to be sent to another philosopher if
     /// they request the fork.
     fn using_fork(&mut self, context: &Context, sender: &ActorId) -> AxiomResult {
-        self.print_state(
-            context,
-            &format!("Using Fork from {}", sender.name().unwrap()),
-        );
         match self.owned_by {
             Some(ref owner) => {
                 if *owner == *sender {
@@ -275,18 +248,6 @@ impl Philosopher {
         }
     }
 
-    #[inline]
-    fn print_state(&mut self, context: &Context, info: &str) {
-        debug!(
-            "[{}] {} ==> state: {:?}, left: {:?}, right: {:?}",
-            context.aid.name().unwrap(),
-            info,
-            self.state,
-            (self.has_left_fork, self.left_fork_requested),
-            (self.has_right_fork, self.right_fork_requested),
-        );
-    }
-
     /// Changes the philosopher to a state of eating.
     fn begin_eating(&mut self, context: &Context) -> Result<(), AxiomError> {
         self.metrics.time_hungry += Instant::elapsed(&self.last_state_change);
@@ -310,11 +271,9 @@ impl Philosopher {
     /// Otherwise they have to wait for the other fork to begin eating.
     fn fork_received(&mut self, context: &Context, fork_aid: &ActorId) -> AxiomResult {
         if self.left_fork_aid == *fork_aid {
-            self.print_state(context, "Got Left Fork");
             self.has_left_fork = true;
             self.left_fork_requested = false;
         } else if self.right_fork_aid == *fork_aid {
-            self.print_state(context, "Got Right Fork");
             self.has_right_fork = true;
             self.right_fork_requested = false;
         } else {
@@ -407,13 +366,15 @@ impl Philosopher {
     /// actor sending this message and it will only do so if the fork is dirty.
     fn give_up_fork(&mut self, context: &Context, fork_aid: &ActorId) -> AxiomResult {
         if self.left_fork_aid == *fork_aid {
-            self.print_state(context, "Gave Up Left Fork");
-            self.has_left_fork = false;
-            fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
+            if self.has_left_fork {
+                self.has_left_fork = false;
+                fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
+            }
         } else if self.right_fork_aid == *fork_aid {
-            self.print_state(context, "Gave Up Right Fork");
-            self.has_right_fork = false;
-            fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
+            if self.has_right_fork {
+                self.has_right_fork = false;
+                fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
+            }
         } else {
             error!(
                 "[{}] Unknown fork asked for: {}:\n left ==>  {}\n right ==> {}",
@@ -497,8 +458,8 @@ pub fn main() {
     // FIXME Let the user pass in the number of philosophers at the table, time slice
     // and runtime as command line parameters.
     let count = 5 as usize;
-    let time_slice = Duration::from_millis(100);
-    let run_time = Duration::from_millis(2000);
+    let time_slice = Duration::from_millis(10);
+    let run_time = Duration::from_millis(500);
     let mut forks: Vec<ActorId> = Vec::with_capacity(count);
     let mut results: HashMap<ActorId, Option<Metrics>> = HashMap::with_capacity(count);
 

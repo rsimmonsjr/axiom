@@ -386,6 +386,16 @@ impl ActorId {
         self.data.name.clone()
     }
 
+    /// Returns the name assigned to the ActorId if it is not a `None` and otherwise returns the
+    /// uuid of the actor as a string.
+    #[inline]
+    pub fn name_or_uuid(&self) -> String {
+        match &self.data.name {
+            Some(value) => value.to_string(),
+            None => self.data.uuid.to_string(),
+        }
+    }
+
     /// Determines if this actor lives on the local actor system or another system in the same
     /// process. Actors that are local to each other can exchange large amounts of data
     /// efficiently through passing [`Arc`]s.
@@ -591,7 +601,6 @@ impl Actor {
         while Instant::elapsed(&start) < system.config().time_slice {
             // If there isn't a message, another dispatcher thread beat us to it, no big deal.
             if let Ok(message) = actor.receiver.peek() {
-                println!("[{}] Processing message", actor.context.aid);
                 // In this case there is a message in the channel that we have to process. We
                 // will time the result and log a warning if it took too long.
                 let start_process = Instant::now();
@@ -619,10 +628,15 @@ impl Actor {
                 match result {
                     Ok(Status::Processed) => actor.receiver.pop().unwrap(),
                     Ok(Status::Skipped) => actor.receiver.skip().unwrap(),
-                    Ok(Status::ResetSkip) => actor.receiver.reset_skip().unwrap(),
+                    Ok(Status::ResetSkip) => {
+                        actor.receiver.pop().unwrap();
+                        actor.receiver.reset_skip().unwrap();
+                    }
                     Ok(Status::Stop) => {
                         actor.receiver.pop().unwrap();
                         actor.context.system.stop_actor(&actor.context.aid);
+                        // Actor stopping, dont process more messages.
+                        break;
                     }
                     Err(e) => {
                         actor.receiver.pop().unwrap();
@@ -631,6 +645,8 @@ impl Actor {
                             "[{}] Returned an error when processing: {:?}",
                             actor.context.aid, e
                         );
+                        // Actor stopping, dont process more messages.
+                        break;
                     }
                 };
             } else {
@@ -639,15 +655,8 @@ impl Actor {
             }
         }
 
-        println!(
-            "[{}] Post Process: {}",
-            actor.context.aid,
-            actor.receiver.receivable()
-        );
-
         // Reschedule the actor if it is still alive and has more content.
         if system.is_actor_alive(&actor.context.aid) && actor.receiver.receivable() > 0 {
-            println!("[{}] Rescheduling", actor.context.aid);
             actor.context.system.reschedule(actor.clone());
         }
     }
