@@ -90,7 +90,8 @@ pub enum WireMessage {
 pub struct ActorSystemConfig {
     /// The size of the thread pool which governs how many worker threads there are in the system.
     /// The number of threads should be carefully considered to have sufficient concurrency but
-    /// not overschedule the CPU on the target hardware. The default value is 4.
+    /// not overschedule the CPU on the target hardware. The default value is 4 * the number of
+    /// logical CPUs.
     pub threads_size: u16,
     /// The threshold at which the dispatcher thread will warn the user that the message took too
     /// long to process. If this warning is being logged then the user probably should reconsider
@@ -132,7 +133,7 @@ impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
-            threads_size: 4,
+            threads_size: (num_cpus::get() * 4) as u16,
             warn_threshold: Duration::from_millis(1),
             time_slice: Duration::from_millis(1),
             work_channel_size: 100,
