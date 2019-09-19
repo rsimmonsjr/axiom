@@ -660,11 +660,6 @@ impl ActorSystem {
     /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
     /// `receive` if the actor has more messages that are receivable.
     pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
-        println!(
-            "[{}] reschedule =>=>=> {}",
-            actor.context.aid,
-            self.data.sender.receivable()
-        );
         self.data
             .sender
             .send_await_timeout(actor, self.data.config.work_channel_timeout)

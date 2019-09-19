@@ -29,18 +29,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
+use uuid::*;
 
 /// A command sent to a fork actor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ForkCommand {
     /// A command sent when a fork is requested.
-    RequestFork(ActorId),
+    RequestFork(Uuid, ActorId),
     /// Mark the fork being used which will mark it dirty.
-    UsingFork(ActorId),
+    UsingFork(Uuid, ActorId),
     /// Sent to a fork to indicate that it was put down and no longer is in use. This will
     /// allow the fork to be sent to the next user. The `ActorId` is the id of the current
     /// holder of the fork.
-    ForkPutDown(ActorId),
+    ForkPutDown(Uuid, ActorId),
 }
 
 /// A fork for use in the problem. This represents a single resource that other resources need
@@ -63,35 +64,35 @@ impl Fork {
         }
     }
 
-    #[inline]
-    fn print_state(&mut self, context: &Context, info: &str) {
-        debug!(
-            "[{}] {} ==> owned_by: {}, clean: {}",
-            context.aid.name().unwrap(),
-            info,
-            self.owned_by
-                .as_ref()
-                .map_or("_".to_string(), |a| a.name().unwrap()),
-            self.clean,
-        );
-    }
-
     /// Request that a fork be sent to a philosopher.
     fn fork_requested(&mut self, context: &Context, requester: &ActorId) -> AxiomResult {
-        self.print_state(
-            context,
-            &format!("Fork Requested by {}", requester.name().unwrap()),
-        );
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
+                    println!(
+                        "[{:?}] Skipping request for clean fork from {:?}.",
+                        context.aid.name_or_uuid(),
+                        requester.name_or_uuid()
+                    );
                     Ok(Status::Skipped)
                 } else {
+                    println!(
+                        "[{:?}] Request for dirty fork from {:?} asking owner {:?} to give it up.",
+                        context.aid.name_or_uuid(),
+                        requester.name_or_uuid(),
+                        owner.name_or_uuid()
+                    );
                     owner.send_new(Command::GiveUpFork(context.aid.clone()))?;
                     Ok(Status::Skipped)
                 }
             }
             None => {
+                println!(
+                    "[{:?}] Request for fork from {:?} sending to  {:?}.",
+                    context.aid.name_or_uuid(),
+                    requester.name_or_uuid(),
+                    requester.name_or_uuid()
+                );
                 self.owned_by = Some(requester.clone());
                 requester.send_new(Command::ReceiveFork(context.aid.clone()))?;
                 Ok(Status::Processed)
@@ -102,15 +103,16 @@ impl Fork {
     /// The philosopher that is the current owner of the fork has put it down, making it available
     /// for other philosophers to pick up.
     fn fork_put_down(&mut self, context: &Context, sender: &ActorId) -> AxiomResult {
-        self.print_state(
-            context,
-            &format!("Fork put down by {}", sender.name().unwrap()),
-        );
         match &self.owned_by {
             Some(owner) => {
                 if owner == sender {
                     self.owned_by = None;
                     self.clean = true;
+                    println!(
+                        "[{:?}] Fork put down from {:?}",
+                        context.aid.name_or_uuid(),
+                        sender.name_or_uuid()
+                    );
                     // Resetting the skip allows fork requests to be processed.
                     Ok(Status::ResetSkip)
                 } else {
@@ -135,13 +137,14 @@ impl Fork {
     /// will mark the fork as dirty and make it available to be sent to another philosopher if
     /// they request the fork.
     fn using_fork(&mut self, context: &Context, sender: &ActorId) -> AxiomResult {
-        self.print_state(
-            context,
-            &format!("Using Fork from {}", sender.name().unwrap()),
-        );
         match self.owned_by {
             Some(ref owner) => {
                 if *owner == *sender {
+                    println!(
+                        "[{:?}] Using fork from owner {:?}",
+                        context.aid.name_or_uuid(),
+                        sender.name_or_uuid()
+                    );
                     self.clean = false;
                     // Resetting the skip allows fork requests to be processed now that the fork
                     // has been marked as being dirty.
@@ -163,9 +166,30 @@ impl Fork {
     pub fn handle(&mut self, context: &Context, message: &Message) -> AxiomResult {
         if let Some(msg) = message.content_as::<ForkCommand>() {
             match &*msg {
-                ForkCommand::RequestFork(requester) => self.fork_requested(context, &requester),
-                ForkCommand::UsingFork(owner) => self.using_fork(context, &owner),
-                ForkCommand::ForkPutDown(owner) => self.fork_put_down(context, &owner),
+                ForkCommand::RequestFork(uuid, requester) => {
+                    println!(
+                        "[{:?}] Handling ForkCommand {:?}",
+                        context.aid.name_or_uuid(),
+                        uuid,
+                    );
+                    self.fork_requested(context, &requester)
+                }
+                ForkCommand::UsingFork(uuid, owner) => {
+                    println!(
+                        "[{:?}] Handling ForkCommand {:?}",
+                        context.aid.name_or_uuid(),
+                        uuid,
+                    );
+                    self.using_fork(context, &owner)
+                }
+                ForkCommand::ForkPutDown(uuid, owner) => {
+                    println!(
+                        "[{:?}] Handling ForkCommand {:?}",
+                        context.aid.name_or_uuid(),
+                        uuid,
+                    );
+                    self.fork_put_down(context, &owner)
+                }
             }
         } else {
             Ok(Status::Processed)
@@ -296,9 +320,9 @@ impl Philosopher {
         // Now that we are eating we will tell the fork that we are using it,
         // thus marking the fork as dirty.
         self.left_fork_aid
-            .send_new(ForkCommand::UsingFork(context.aid.clone()))?;
+            .send_new(ForkCommand::UsingFork(Uuid::new_v4(), context.aid.clone()))?;
         self.right_fork_aid
-            .send_new(ForkCommand::UsingFork(context.aid.clone()))?;
+            .send_new(ForkCommand::UsingFork(Uuid::new_v4(), context.aid.clone()))?;
 
         // Schedule to stop eating after an eating time slice elapsed.
         let msg = Message::new(Command::StopEating(self.metrics.state_change_count));
@@ -332,13 +356,17 @@ impl Philosopher {
     fn request_missing_forks(&mut self, context: &Context) -> Result<(), AxiomError> {
         if !self.has_left_fork && !self.left_fork_requested {
             self.left_fork_requested = true;
-            self.left_fork_aid
-                .send_new(ForkCommand::RequestFork(context.aid.clone()))?;
+            self.left_fork_aid.send_new(ForkCommand::RequestFork(
+                Uuid::new_v4(),
+                context.aid.clone(),
+            ))?;
         }
         if !self.has_right_fork && !self.right_fork_requested {
             self.right_fork_requested = true;
-            self.right_fork_aid
-                .send_new(ForkCommand::RequestFork(context.aid.clone()))?;
+            self.right_fork_aid.send_new(ForkCommand::RequestFork(
+                Uuid::new_v4(),
+                context.aid.clone(),
+            ))?;
         }
         Ok(())
     }
@@ -407,13 +435,23 @@ impl Philosopher {
     /// actor sending this message and it will only do so if the fork is dirty.
     fn give_up_fork(&mut self, context: &Context, fork_aid: &ActorId) -> AxiomResult {
         if self.left_fork_aid == *fork_aid {
-            self.print_state(context, "Gave Up Left Fork");
-            self.has_left_fork = false;
-            fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
+            if self.has_left_fork {
+                self.print_state(context, "Gave Up Left Fork");
+                self.has_left_fork = false;
+                fork_aid.send_new(ForkCommand::ForkPutDown(
+                    Uuid::new_v4(),
+                    context.aid.clone(),
+                ))?;
+            }
         } else if self.right_fork_aid == *fork_aid {
-            self.print_state(context, "Gave Up Right Fork");
-            self.has_right_fork = false;
-            fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
+            if self.has_right_fork {
+                self.print_state(context, "Gave Up Right Fork");
+                self.has_right_fork = false;
+                fork_aid.send_new(ForkCommand::ForkPutDown(
+                    Uuid::new_v4(),
+                    context.aid.clone(),
+                ))?;
+            }
         } else {
             error!(
                 "[{}] Unknown fork asked for: {}:\n left ==>  {}\n right ==> {}",
@@ -498,7 +536,7 @@ pub fn main() {
     // and runtime as command line parameters.
     let count = 5 as usize;
     let time_slice = Duration::from_millis(100);
-    let run_time = Duration::from_millis(2000);
+    let run_time = Duration::from_millis(500);
     let mut forks: Vec<ActorId> = Vec::with_capacity(count);
     let mut results: HashMap<ActorId, Option<Metrics>> = HashMap::with_capacity(count);
 

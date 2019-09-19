@@ -89,12 +89,10 @@ impl GameResults {
 
 impl GameResults {
     fn gather(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
-        println!("============> Handling With GameResults");
         // Receive messages from the Game actors and aggregate their results
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
             self.results
                 .insert(game_msg.aid.clone(), game_msg.results_vec.clone());
-            println!("Handling GameMsg");
         }
 
         if let Some(sys_msg) = msg.content_as::<SystemMsg>() {
@@ -102,7 +100,6 @@ impl GameResults {
                 // This is the first code that will run in the actor. It spawns the Game actors,
                 // registers them to its monitoring list, then sends them a start signal
                 SystemMsg::Start => {
-                    println!("[{}] ==> Handling Start", ctx.aid);
                     let game_conditions = Game::default();
                     println!("Starting funds: ${}", game_conditions.funds);
                     println!("Wager per round: ${}", game_conditions.wager);
@@ -117,7 +114,6 @@ impl GameResults {
                         ctx.system.monitor(&ctx.aid, &aid);
                         aid.send_new(ctx.aid.clone()).unwrap();
                     }
-                    println!("[{}] ==> Start Done", ctx.aid);
                 }
                 // This code runs each time a monitored actor stops. Once all Game actors are finished,
                 // the actor system will be shut down.
