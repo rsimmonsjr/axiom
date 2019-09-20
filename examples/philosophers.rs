@@ -471,9 +471,9 @@ pub fn main() {
     for i in 0..count {
         let name = format!("Fork{}", i);
         let fork = system
-            .actor()
+            .spawn()
             .name(&name)
-            .spawn(Fork::new(), Fork::handle)
+            .with(Fork::new(), Fork::handle)
             .unwrap();
         forks.push(fork);
     }
@@ -493,9 +493,9 @@ pub fn main() {
         let state = Philosopher::new(time_slice, forks[left].clone(), forks[right].clone());
 
         let philosopher = system
-            .actor()
+            .spawn()
             .name(names[left])
-            .spawn(state, Philosopher::handle)
+            .with(state, Philosopher::handle)
             .unwrap();
         results.insert(philosopher, None);
     }
@@ -504,9 +504,9 @@ pub fn main() {
     // request metrics of all of the actors and then print the metrics when all collected
     // and shut down the actor system.
     let _shutdown = system
-        .actor()
+        .spawn()
         .name("Manager")
-        .spawn(
+        .with(
             results,
             move |state: &mut HashMap<ActorId, Option<Metrics>>,
                   context: &Context,

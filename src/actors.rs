@@ -225,7 +225,7 @@ impl ActorId {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
-    /// let aid = system.actor().spawn(
+    /// let aid = system.spawn().with(
     ///     0 as usize,
     ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
     ///  ).unwrap();
@@ -283,7 +283,7 @@ impl ActorId {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
-    /// let aid = system.actor().spawn(
+    /// let aid = system.spawn().with(
     ///     0 as usize,
     ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
     ///  ).unwrap();
@@ -347,7 +347,7 @@ impl ActorId {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
-    /// let aid = system.actor().spawn(
+    /// let aid = system.spawn().with(
     ///     0 as usize,
     ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
     ///  ).unwrap();
@@ -524,7 +524,7 @@ trait Handler: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'stati
 impl<F> Handler for F where F: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
 
 /// A builder that can be used to create and spawn an actor. To get a builder, the user would ask
-/// the actor system to create one using `system.actor()` and then to spawn the actor with the
+/// the actor system to create one using `system.spawn()` and then to spawn the actor with the
 /// `spawn` method on the builder. See [`ActorSystem::actor`] for more information and examples.
 pub struct ActorBuilder {
     /// The System that the actor builder was created on.
@@ -537,10 +537,12 @@ pub struct ActorBuilder {
 }
 
 impl ActorBuilder {
-    /// Spawns the actor configured with this builder on the system, consuming the builder in the
-    /// process. See `ActorSystem::actor` for more information and examples.
-    /// FIXME Consider implementing `spawn_stateless`
-    pub fn spawn<F, State>(self, state: State, processor: F) -> Result<ActorId, AxiomError>
+    /// Completes the spawning of the the actor configured with this builder on the system,
+    /// consuming the builder in the process and using the provided state and handler. See
+    /// `ActorSystem::spawn` for more information and examples.
+    ///
+    /// FIXME Consider implementing `using` to spawn a stateless actor.
+    pub fn with<F, State>(self, state: State, processor: F) -> Result<ActorId, AxiomError>
     where
         State: Send + Sync + 'static,
         F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
@@ -720,7 +722,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -738,7 +740,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().name("A").spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -758,7 +760,7 @@ mod tests {
     #[test]
     fn test_actor_id_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().spawn(0 as usize, simple_handler).unwrap();
+        let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
         system.init_current(); // Required by ActorId serialization.
 
         // This check forces the test to break here if someone changes the default.
@@ -810,8 +812,8 @@ mod tests {
         }
 
         let aid = system
-            .actor()
-            .spawn(
+            .spawn()
+            .with(
                 0,
                 |_state: &mut i32, context: &Context, message: &Message| {
                     if let Some(msg) = message.content_as::<ActorId>() {
@@ -839,7 +841,7 @@ mod tests {
     #[test]
     fn test_cant_send_to_stopped() {
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().spawn(0 as usize, simple_handler).unwrap();
+        let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
         system.stop_actor(&aid);
         assert_eq!(false, system.is_actor_alive(&aid));
 
@@ -859,8 +861,8 @@ mod tests {
 
         // FIXME See if there is some way to support processors without state without () stuff.
         let aid = system
-            .actor()
-            .spawn((), |_: &mut (), _: &Context, message: &Message| {
+            .spawn()
+            .with((), |_: &mut (), _: &Context, message: &Message| {
                 if let Some(_msg) = message.content_as::<i32>() {
                     Ok(Status::Stop)
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
@@ -902,8 +904,8 @@ mod tests {
 
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
-            .actor()
-            .spawn((), |_: &mut (), _: &Context, message: &Message| {
+            .spawn()
+            .with((), |_: &mut (), _: &Context, message: &Message| {
                 if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
                         SystemMsg::Start => Ok(Status::Processed),

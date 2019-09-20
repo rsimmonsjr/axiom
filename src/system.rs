@@ -292,9 +292,9 @@ impl ActorSystem {
         // The system actor is a unique actor on the system registered with the name "System".
         // This actor provides core functionality that other actors will utilize.
         system
-            .actor()
+            .spawn()
             .name("System")
-            .spawn(false, system_actor_processor)
+            .with(false, system_actor_processor)
             .unwrap();
 
         system
@@ -614,11 +614,11 @@ impl ActorSystem {
     ///
     /// let state = 0 as usize;
     ///
-    /// let aid1 = system.actor().spawn(state, handler).unwrap();
-    /// let aid2 = system.actor().name("Foo").spawn(state, handler).unwrap();
-    /// let aid3 = system.actor().channel_size(10).spawn(state, handler).unwrap();
+    /// let aid1 = system.spawn().with(state, handler).unwrap();
+    /// let aid2 = system.spawn().name("Foo").with(state, handler).unwrap();
+    /// let aid3 = system.spawn().channel_size(10).with(state, handler).unwrap();
     /// ```
-    pub fn actor(&self) -> ActorBuilder {
+    pub fn spawn(&self) -> ActorBuilder {
         ActorBuilder {
             system: self.clone(),
             name: None,
@@ -883,7 +883,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().with(0, simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_uuid(&aid.uuid()).unwrap();
@@ -900,7 +900,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().name("A").spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_name(&aid.name().unwrap()).unwrap();
@@ -917,7 +917,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().name("A").spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         let found = system.find_aid(&aid.system_uuid(), &aid.uuid()).unwrap();
         assert!(ActorId::ptr_eq(&aid, &found));
@@ -935,7 +935,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().name("A").spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
@@ -962,7 +962,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().name("A").spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
 
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
@@ -984,9 +984,9 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default());
         thread::sleep(Duration::from_millis(10));
 
-        let aid1 = system.actor().name("A").spawn(0, simple_handler).unwrap();
+        let aid1 = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid1, 1, 1000).unwrap();
-        let aid2 = system.actor().name("B").spawn(0, simple_handler).unwrap();
+        let aid2 = system.spawn().name("B").with(0, simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
         aid1.send_after(Message::new(11), Duration::from_millis(100))
@@ -1020,7 +1020,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let aid = system.actor().spawn(0, simple_handler).unwrap();
+        let aid = system.spawn().with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap(); // Now it is started for sure.
 
         // We force remove the actor from the system without calling stop so now it cannot
@@ -1079,15 +1079,15 @@ mod tests {
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        let monitored = system.actor().spawn(0 as usize, simple_handler).unwrap();
-        let not_monitoring = system.actor().spawn(0 as usize, simple_handler).unwrap();
+        let monitored = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let not_monitoring = system.spawn().with(0 as usize, simple_handler).unwrap();
         let monitoring1 = system
-            .actor()
-            .spawn(monitored.clone(), monitor_handler)
+            .spawn()
+            .with(monitored.clone(), monitor_handler)
             .unwrap();
         let monitoring2 = system
-            .actor()
-            .spawn(monitored.clone(), monitor_handler)
+            .spawn()
+            .with(monitored.clone(), monitor_handler)
             .unwrap();
         system.monitor(&monitoring1, &monitored);
         system.monitor(&monitoring2, &monitored);
@@ -1119,22 +1119,22 @@ mod tests {
         let state = 0 as usize;
 
         let aid1 = system
-            .actor()
+            .spawn()
             .name("A")
-            .spawn(state, simple_handler)
+            .with(state, simple_handler)
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
         let aid2 = system
-            .actor()
+            .spawn()
             .name("B")
-            .spawn(state, simple_handler)
+            .with(state, simple_handler)
             .unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
         // attempt returns an error to be handled.
-        let result = system.actor().name("A").spawn(state, simple_handler);
+        let result = system.spawn().name("A").with(state, simple_handler);
         assert_eq!(Err(AxiomError::NameAlreadyUsed("A".to_string())), result);
 
         // Verify that the same actor has "A" name and is still up.
@@ -1149,9 +1149,9 @@ mod tests {
 
         // Now we should be able to crate a new actor with the name bravo.
         let aid3 = system
-            .actor()
+            .spawn()
             .name("B")
-            .spawn(state, simple_handler)
+            .with(state, simple_handler)
             .unwrap();
         await_received(&aid3, 1, 1000).unwrap();
         let found2 = system.find_aid_by_name("B").unwrap();
@@ -1177,8 +1177,8 @@ mod tests {
 
         system1.init_current();
         let aid = system1
-            .actor()
-            .spawn((), |_: &mut (), context: &Context, message: &Message| {
+            .spawn()
+            .with((), |_: &mut (), context: &Context, message: &Message| {
                 if let Some(msg) = message.content_as::<Request>() {
                     msg.reply_to.send_new(Reply {}).unwrap();
                     context.system.trigger_shutdown();
@@ -1194,8 +1194,8 @@ mod tests {
 
         let serialized = bincode::serialize(&aid).unwrap();
         system2
-            .actor()
-            .spawn(
+            .spawn()
+            .with(
                 (),
                 move |_: &mut (), context: &Context, message: &Message| {
                     if let Some(_) = message.content_as::<Reply>() {
@@ -1234,9 +1234,9 @@ mod tests {
         let (system1, system2) = start_and_connect_two_systems();
 
         let aid1 = system1
-            .actor()
+            .spawn()
             .name("A")
-            .spawn((), |_: &mut (), context: &Context, _: &Message| {
+            .with((), |_: &mut (), context: &Context, _: &Message| {
                 context.system.trigger_shutdown();
                 Ok(Status::Processed)
             })
@@ -1244,8 +1244,8 @@ mod tests {
         await_received(&aid1, 1, 1000).unwrap();
 
         system2
-            .actor()
-            .spawn(
+            .spawn()
+            .with(
                 (),
                 move |_: &mut (), context: &Context, message: &Message| {
                     if let Some(msg) = message.content_as::<SystemActorMessage>() {

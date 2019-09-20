@@ -74,7 +74,7 @@
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
 //!
-//! let aid = system.actor().spawn(
+//! let aid = system.spawn().with(
 //!     0 as usize,
 //!     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
 //!  ).unwrap();
@@ -142,7 +142,7 @@
 //! }
 //!
 //! let data = Data { value: 0 };
-//! let aid = system.actor().name("Fred").spawn(data, Data::handle).unwrap();
+//! let aid = system.spawn().name("Fred").with(data, Data::handle).unwrap();
 //!
 //! aid.send_new(11).unwrap();
 //! aid.send_new(true).unwrap();
@@ -278,8 +278,8 @@ mod tests {
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
         let aid = system
-            .actor()
-            .spawn(
+            .spawn()
+            .with(
                 0 as usize,
                 |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
             )
@@ -312,7 +312,7 @@ mod tests {
             }
         }
 
-        let aid = system.actor().spawn(Data {}, Data::handle).unwrap();
+        let aid = system.spawn().with(Data {}, Data::handle).unwrap();
 
         // Send a message to the actor.
         aid.send_new(11).unwrap();
@@ -353,7 +353,7 @@ mod tests {
             }
         };
 
-        let aid = system.actor().spawn(starting_state, closure).unwrap();
+        let aid = system.spawn().with(starting_state, closure).unwrap();
 
         // First message will always be the SystemMsg::Start.
         assert_eq!(1, aid.sent().unwrap());
@@ -421,7 +421,7 @@ mod tests {
 
         let data = Data { value: 0 };
 
-        let aid = system.actor().spawn(data, Data::handle).unwrap();
+        let aid = system.spawn().with(data, Data::handle).unwrap();
 
         // Send some messages to the actor.
         aid.send_new(11).unwrap();
@@ -464,7 +464,7 @@ mod tests {
                         // Now we will spawn a new actor to handle our pong and send to it. Note
                         // that although we use unwrap on the `send_new` here, that is a bad
                         // idea in a real system because actor panics will take down the system.
-                        let pong_aid = context.system.actor().spawn(0, pong).unwrap();
+                        let pong_aid = context.system.spawn().with(0, pong).unwrap();
                         pong_aid
                             .send_new(PingPong::Ping(context.aid.clone()))
                             .unwrap();
@@ -494,7 +494,7 @@ mod tests {
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.actor().spawn(0, ping).unwrap();
+        system.spawn().with(0, ping).unwrap();
         system.await_shutdown();
 
         assert_eq!(2 + 2, 4);
