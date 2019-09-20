@@ -37,7 +37,7 @@ pub fn main() {
     system.init_current();
 
     // Spawn the actor and send the message.
-    let aid = system.spawn(true, hello).unwrap();
+    let aid = system.spawn().with(true, hello).unwrap();
     aid.send(Message::new(HelloMessages::Greet)).unwrap();
 
     // The actor will trigger shutdown, we just wait for it.
