@@ -109,7 +109,9 @@ impl GameResults {
                         let name = format!("Game{}", i);
                         let aid = ctx
                             .system
-                            .spawn_named(&name, game_conditions, Game::play)
+                            .actor()
+                            .name(&name)
+                            .spawn(game_conditions, Game::play)
                             .unwrap();
                         ctx.system.monitor(&ctx.aid, &aid);
                         aid.send_new(ctx.aid.clone()).unwrap();
@@ -153,7 +155,9 @@ fn main() {
 
     // Spawn the results aggregator, which will in turn spawn the Game actors.
     system
-        .spawn_named("Manager", GameResults::new(NUM_GAMES), GameResults::gather)
+        .actor()
+        .name("Manager")
+        .spawn(GameResults::new(NUM_GAMES), GameResults::gather)
         .unwrap();
 
     // Wait for the actor system to shut down.

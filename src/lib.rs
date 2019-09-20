@@ -7,20 +7,28 @@
 //! rather a new implementation deriving inspiration from the good parts of those models.
 //!
 //! ### What's New
-//! * 2019-??-??: 0.0.8
-//!   * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
+//! * 2019-??-??: 0.1.0
+//!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId` as the
+//!   mechanism for looking up actors doesn't make sense the way it was before.
+//!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
 //!   * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`.
+//!   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
+//!   that the user must manage.
+//!   * BREAKING CHANGE: All actor procesors now should return `AxiomResult` which will allow them
+//!   to use the `?` syntax for all functions that return `AxiomError` and return their own errors.
+//!   * BREAKING CHANGE: Actors are now spawned with the builder pattern. This allows the
+//!   configuration of an actor and leaves the door open for future flexibility. See documentation
+//!   for more details.
+//!   * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
 //!   * `Processor` functions can get a reference to the `ActorId` of the actor from `Context`.
 //!   * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
 //!   * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
-//!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId`.
 //!   * Calling `system.init_current()` is unneeded unless deserializing `aid`s outside a `Processor`.
 //!   * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`.
 //!   * Changed internal maps to use `dashmap` which expands dependencies but increases performance.
 //!   * New methods `send_new` and `send_new_after` are available to shorten boilerplate.
 //!   * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
 //!   * Added a method `system_actor_aid` to easily look up the `System` actor.
-//!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
 //!   * Added additional configuration options to `ActorSystemConfig`.
 //!   * System will warn if an actor takes longer than the configured `warn_threshold` to process a
 //!   message.
@@ -29,10 +37,6 @@
 //!   * The defailt `message_channel_size` is now configurable for the actor system as a whole.
 //!   * Instead of waiting forever on a send, the system will wait for the configured
 //!   `send_timeout` before returning a timeout error to the caller.
-//!   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
-//!   that the user must manage.
-//!   * BREAKING CHANGE: All actor procesors now should return `AxiomResult` which will allow them
-//!   to use the `?` syntax for all functions that return `AxiomError` and return their own errors.
 //!
 //! [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 //!
@@ -70,7 +74,7 @@
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
 //!
-//! let aid = system.spawn(
+//! let aid = system.actor().spawn(
 //!     0 as usize,
 //!     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
 //!  ).unwrap();
@@ -93,10 +97,12 @@
 //! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //!
-//! This code creates an actor system, spawns an actor and finally sends the actor a message.
-//! That is really all there is to it but of course it doesn't end there. If you want to create
-//! an actor with a struct that is simple as well. Let's create one that handles a couple of
-//! different message types:
+//! This code creates an actor system, fetches a builder for an actor, spawns an actor and finally
+//! sends the actor a message. Creating an Axiom actor is literally that easy but there is a lot
+//! more functionality available as well.
+//!
+//! If you want to create an actor with a struct that is simple as well. Let's create one that
+//! handles a couple of different message types:
 //!
 //! ```rust
 //! use axiom::*;
@@ -136,14 +142,14 @@
 //! }
 //!
 //! let data = Data { value: 0 };
-//! let aid = system.spawn( data, Data::handle).unwrap();
+//! let aid = system.actor().name("Fred").spawn(data, Data::handle).unwrap();
 //!
 //! aid.send_new(11).unwrap();
 //! aid.send_new(true).unwrap();
 //! aid.send_new(false).unwrap();
 //! ```
 //!
-//! This code creates an actor out of an arbitrary struct. Since the only requirement to make
+//! This code creates a named actor out of an arbitrary struct. Since the only requirement to make
 //! an actor is to have a function that is compliant with the [`axiom::actors::Processor`] trait,
 //! anything can be an actor. If this struct had been declared somewhere outside of your control
 //! you could use it in an actor as state by declaring your own handler function and making the
@@ -157,7 +163,6 @@
 //! There is a lot more to learn and explore and your best resource is the test code for Axiom.
 //! The developers have a belief that test code should be well architected and well commented to
 //! act as a set of examples for users of Axiom.
-//!
 
 pub mod actors;
 pub mod message;
@@ -273,6 +278,7 @@ mod tests {
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
         // but when that bug goes away this will be even simpler.
         let aid = system
+            .actor()
             .spawn(
                 0 as usize,
                 |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
@@ -306,7 +312,7 @@ mod tests {
             }
         }
 
-        let aid = system.spawn(Data {}, Data::handle).unwrap();
+        let aid = system.actor().spawn(Data {}, Data::handle).unwrap();
 
         // Send a message to the actor.
         aid.send_new(11).unwrap();
@@ -347,7 +353,7 @@ mod tests {
             }
         };
 
-        let aid = system.spawn(starting_state, closure).unwrap();
+        let aid = system.actor().spawn(starting_state, closure).unwrap();
 
         // First message will always be the SystemMsg::Start.
         assert_eq!(1, aid.sent().unwrap());
@@ -415,7 +421,7 @@ mod tests {
 
         let data = Data { value: 0 };
 
-        let aid = system.spawn(data, Data::handle).unwrap();
+        let aid = system.actor().spawn(data, Data::handle).unwrap();
 
         // Send some messages to the actor.
         aid.send_new(11).unwrap();
@@ -458,7 +464,7 @@ mod tests {
                         // Now we will spawn a new actor to handle our pong and send to it. Note
                         // that although we use unwrap on the `send_new` here, that is a bad
                         // idea in a real system because actor panics will take down the system.
-                        let pong_aid = context.system.spawn(0, pong).unwrap();
+                        let pong_aid = context.system.actor().spawn(0, pong).unwrap();
                         pong_aid
                             .send_new(PingPong::Ping(context.aid.clone()))
                             .unwrap();
@@ -488,7 +494,7 @@ mod tests {
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default());
-        system.spawn(0, ping).unwrap();
+        system.actor().spawn(0, ping).unwrap();
         system.await_shutdown();
 
         assert_eq!(2 + 2, 4);
