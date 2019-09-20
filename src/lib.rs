@@ -74,10 +74,13 @@
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default());
 //!
-//! let aid = system.spawn().with(
-//!     0 as usize,
-//!     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
-//!  ).unwrap();
+//! let aid = system
+//!     .spawn()
+//!     .with(
+//!         0 as usize,
+//!         |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
+//!     )
+//!     .unwrap();
 //!
 //! aid.send(Message::new(11)).unwrap();
 //!
