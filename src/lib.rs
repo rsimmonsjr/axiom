@@ -100,9 +100,9 @@
 //! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //!
-//! This code creates an actor system, fetches a builder for an actor, spawns an actor and finally
-//! sends the actor a message. Creating an Axiom actor is literally that easy but there is a lot
-//! more functionality available as well.
+//! This code creates an actor system, fetches a builder for an actor via the `spawn()` metod,
+//! spawns an actor and finally sends the actor a message. Creating an Axiom actor is literally
+//! that easy but there is a lot more functionality available as well.
 //!
 //! If you want to create an actor with a struct that is simple as well. Let's create one that
 //! handles a couple of different message types:
@@ -160,8 +160,8 @@
 //!
 //! *It's important to keep in mind that the starting state is moved into the actor and you
 //! will not have external access to it afterwards.* This is by design and although you could
-//! conceivably use a [`std::sync::Arc`] to a structure as state, that would definitely be a bad
-//! idea as it would break the rules we laid out for actors.
+//! conceivably use a [`Arc`] or [`Mutex`] enclosing a structure as state, that would definitely
+//! be a bad idea as it would break the rules we laid out for actors.
 //!
 //! There is a lot more to learn and explore and your best resource is the test code for Axiom.
 //! The developers have a belief that test code should be well architected and well commented to
