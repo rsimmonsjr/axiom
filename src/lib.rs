@@ -4,7 +4,7 @@
 //! Axiom brings a highly-scalable actor model to the Rust language based on the many lessons
 //! learned over years of Actor model implementations in Akka and Erlang. Axiom is, however,
 //! not a direct re-implementation of either of the two aforementioned actor models but
-//! rather a new implementation deriving inspiration from the good parts of those models.
+//! rather a new implementation deriving inspiration from the good parts of those projects.
 //!
 //! ### What's New
 //! * 2019-??-??: 0.1.0
@@ -13,14 +13,15 @@
 //!   all of the changes listed below.
 //!   * BREAKING CHANGE: `Status::Processed` has been renamed to `Status::Done`.
 //!   * BREAKING CHANGE: `Status::Skipped` has been renamed to `Status::Skip`.
-//!   * BREAKING CHANGE: `Status::Reset` has been renamed to `Status::Reset`.
+//!   * BREAKING CHANGE: `Status::ResetSkip` has been renamed to `Status::Reset`.
+//!   * BREAKING CHANGE: `ActorError` has been moved to top level and renamed to `AxiomError`.
 //!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId` as the
 //!   mechanism for looking up actors doesn't make sense the way it was before.
 //!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
 //!   * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`.
 //!   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
 //!   that the user must manage.
-//!   * BREAKING CHANGE: All actor procesors now should return `AxiomResult` which will allow them
+//!   * BREAKING CHANGE: All actor processors now should return `AxiomResult` which will allow them
 //!   to use the `?` syntax for all functions that return `AxiomError` and return their own errors.
 //!   * BREAKING CHANGE: Actors are now spawned with the builder pattern. This allows the
 //!   configuration of an actor and leaves the door open for future flexibility. See documentation
@@ -29,18 +30,22 @@
 //!   * `Processor` functions can get a reference to the `ActorId` of the actor from `Context`.
 //!   * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
 //!   * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
-//!   * Calling `system.init_current()` is unneeded unless deserializing `aid`s outside a `Processor`.
+//!   * Calling `system.init_current()` is unneeded unless deserializing `ActorId`s outside a
+//!   `Processor`.
 //!   * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`.
-//!   * Changed internal maps to use `dashmap` which expands dependencies but increases performance.
+//!   * Changed internal maps to use crate `dashmap` which expands dependencies but increases
+//!   performance.
 //!   * New methods `send_new` and `send_new_after` are available to shorten boilerplate.
-//!   * Added a named system actor, `System`, that is started as the 1st actor in an `ActorSystem`.
+//!   * Added a named system actor, which is registered under the name `System`, that is started
+//!   as the 1st actor in an `ActorSystem`.
 //!   * Added a method `system_actor_aid` to easily look up the `System` actor.
 //!   * Added additional configuration options to `ActorSystemConfig`.
 //!   * System will warn if an actor takes longer than the configured `warn_threshold` to process a
 //!   message.
 //!   * Instead of processing one message per receive, the system will now process pending messages
 //!   up until the configured `time_slice`, allowing optimized processing for quick messages.
-//!   * The defailt `message_channel_size` is now configurable for the actor system as a whole.
+//!   * The default `message_channel_size` for actors is now configurable for the actor system as
+//!   a whole.
 //!   * Instead of waiting forever on a send, the system will wait for the configured
 //!   `send_timeout` before returning a timeout error to the caller.
 //!
@@ -63,7 +68,7 @@
 //! practice which is important for developers creating actors based on Axiom. In Erlang and
 //! Elixir rule five cannot be violated because of the structure of the language but this also
 //! leads to performance limitations. It's better to allow internal mutable state and encourage
-//! the good practice of not sending mutable state as messages.
+//! the good practice of not sending mutable messages.
 //!
 //! What is important to understand is that these rules combined together makes each actor operate
 //! like a micro-service in the memory space of the program using them. Since actor messages are
@@ -94,19 +99,18 @@
 //! // the result as a panic in Axiom will take down a dispatcher thread and potentially
 //! // hang the system.
 //!
-//! // This will wrap the value in a Message for you!
+//! // This will wrap the value `17` in a Message for you!
 //! aid.send_new(17).unwrap();
 //!
 //! // We can also create and send separately using just `send`, not `send_new`.
-//! let m = Message::new(19);
-//! aid.send(m).unwrap();
+//! let message = Message::new(19);
+//! aid.send(message).unwrap();
 //!
 //! // Another neat capability is to send a message after some time has elapsed.
 //! aid.send_after(Message::new(7), Duration::from_millis(10)).unwrap();
 //! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
-//!
-//! This code creates an actor system, fetches a builder for an actor via the `spawn()` metod,
+//! This code creates an actor system, fetches a builder for an actor via the `spawn()` method,
 //! spawns an actor and finally sends the actor a message. Creating an Axiom actor is literally
 //! that easy but there is a lot more functionality available as well.
 //!
@@ -192,7 +196,7 @@ use serde::{Deserialize, Serialize};
 pub enum AxiomError {
     /// Error sent when attempting to send to an actor that has already been stopped. A stopped
     /// actor cannot accept any more messages and is shut down. The holder of an [`ActorId`] to
-    /// a stopped actor should throw away the [`ActorId`] as the actor can never be started again.
+    /// a stopped actor should throw the [`ActorId`] away as the actor can never be started again.
     ActorAlreadyStopped,
 
     /// An error returned when an actor is already using a local name at the time the user tries
@@ -207,19 +211,20 @@ pub enum AxiomError {
     /// Used when unable to send to an actor's message channel within the scheduled timeout
     /// configured in the actor system. This could result from the actor's channel being too
     /// small to accomodate the message flow, the lack of thread count to process messages fast
-    /// ennough to keep up with the flow or something wrong with the actor itself that it is
-    /// taking too long to cleare the messages.
+    /// enough to keep up with the flow or something wrong with the actor itself that it is
+    /// taking too long to clear the messages.
     SendTimedOut(ActorId),
 
     /// Used when unable to schedule the actor for work in the work channel. This could be a
-    /// result of having a work channel that is too small to accomodate the number of actors
+    /// result of having a work channel that is too small to accommodate the number of actors
     /// being concurrently scheduled, not enough threads to process actors in the channel fast
-    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of time
-    /// or not finish at all.
+    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of
+    /// time or not finish at all.
     UnableToSchedule,
 
     /// Returned by actors when there is an error in the actor. The optional enclosed string
-    /// will be sent to monitoring actors and can tell them why the actor errored.
+    /// will be sent to monitoring actors and can tell the monitoring actors the nature of the
+    /// error that occurred.
     ActorError(Option<String>),
 }
 
@@ -311,8 +316,8 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default());
 
         // We declare a basic struct that has a handle method that does basically nothing.
-        // Subsequently we will create that struct when we spawn the actor and then send the
-        // actor a message.
+        // Subsequently we will create that struct as a starting state when we spawn the actor
+        // and then send the actor a message.
         struct Data {}
 
         impl Data {
@@ -331,7 +336,7 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// This test shows how a closure based actor can be used and process different kinds of
+    /// This test shows how a closure based actor can be created to process different kinds of
     /// messages and mutate the actor's state based upon the messages passed. Note that the
     /// state of the actor is not available outside the actor itself.
     #[test]
@@ -464,19 +469,17 @@ mod tests {
                         context.system.trigger_shutdown();
                         Ok(Status::Done)
                     }
-                    _ => panic!("Unexpected message"),
+                    _ => Err(AxiomError::ActorError(Some(
+                        "Unexpected message".to_string(),
+                    ))),
                 }
             } else if let Some(msg) = message.content_as::<SystemMsg>() {
                 // Start messages happen only once so we keep them last.
                 match &*msg {
                     SystemMsg::Start => {
-                        // Now we will spawn a new actor to handle our pong and send to it. Note
-                        // that although we use unwrap on the `send_new` here, that is a bad
-                        // idea in a real system because actor panics will take down the system.
-                        let pong_aid = context.system.spawn().with(0, pong).unwrap();
-                        pong_aid
-                            .send_new(PingPong::Ping(context.aid.clone()))
-                            .unwrap();
+                        // Now we will spawn a new actor to handle our pong and send to it.
+                        let pong_aid = context.system.spawn().with(0, pong)?;
+                        pong_aid.send_new(PingPong::Ping(context.aid.clone()))?;
                         Ok(Status::Done)
                     }
                     _ => Ok(Status::Done),
@@ -490,12 +493,12 @@ mod tests {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
-                        // Note that although we use unwrap on the `send_new` here, that is a bad
-                        // idea in a real system because actor panics will take down the system.
-                        from.send_new(PingPong::Pong).unwrap();
+                        from.send_new(PingPong::Pong)?;
                         Ok(Status::Done)
                     }
-                    _ => panic!("Unexpected message"),
+                    _ => Err(AxiomError::ActorError(Some(
+                        "Unexpected message".to_string(),
+                    ))),
                 }
             } else {
                 Ok(Status::Done)

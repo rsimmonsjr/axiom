@@ -3,8 +3,8 @@
 //! These are the core components that make up the features of Axiom. The actor model is designed
 //! to allow the user maximum flexibility. The actors can skip messages if they choose, enabling
 //! them to work as a *finite state machine* without having to move messages around. Actors are
-//! created by calling `spawn` with any kind of fuction or closure that implements the `Processor`
-//! trait.
+//! created by calling `system::spawn().with()` with any kind of fuction or closure that
+//! implements the `Processor` trait.
 
 use crate::message::*;
 use crate::system::*;
@@ -35,9 +35,7 @@ pub enum Status {
     /// of the channel until an [`Status::Reset`] is returned from an actor's processor.
     /// This enables an actor to skip messages while working on a process and then clear the skip
     /// cursor and resume normal processing. This functionality is critical for actors that
-    /// implement a finite state machine and thus might temporarily change the implementation of
-    /// the message processor and then switch back to a state where the previously sent messages
-    /// are processed.
+    /// implement a finite state machine.
     Skip,
 
     /// Marks the message as processed and clears the skip cursor on the channel. A skip cursor
@@ -56,9 +54,7 @@ pub enum Status {
 /// An enum that holds a sender for an actor.
 ///
 /// An [`ActorId`] uses the sender to send messages to the destination actor. Messages that are
-/// sent to actors running on this actor system are wrapped in an Arc for efficiency. Those that
-/// are sent to another actor system are sent via serializing the message to the other system
-/// which will then use an internal local sender to relay the message on the actual actor.
+/// sent to actors running on this actor system are wrapped in an Arc for efficiency.
 enum ActorSender {
     /// A sender used for sending messages to actors running on the same actor system.
     Local {
@@ -71,10 +67,9 @@ enum ActorSender {
         system: ActorSystem,
     },
 
-    /// A sender that is used when an actor is on another actor system. The system will use
-    /// serialization to send messages to the actor if the actor is in another process. The
-    /// developer should take note of when actors are not local in order to make sure that
-    /// the code isn't serializing enormous data structures.
+    /// A sender that is used when an actor is on another actor system. Messages are wrapped in a
+    /// [`WireMessage`] struct and it will be up to the cluster implementation to get the messages
+    /// to the remote system.
     Remote { sender: SeccSender<WireMessage> },
 }
 
@@ -301,10 +296,10 @@ impl ActorId {
     }
 
     /// Schedules the given message to be sent after a minimum of the specified duration. Note
-    /// that axiom doesn't guarantee that the message will be sent on exactly now + duration but
+    /// that Axiom doesn't guarantee that the message will be sent on exactly now + duration but
     /// rather that _at least_ the duration will pass before the message is sent to the actor.
     /// Axiom will try to send as close as possible without going under the amount but precise
-    /// timing should not be depended on.  This message will return an `Err` if the actor has been
+    /// timing should not be depended on.  This method will return an `Err` if the actor has been
     /// stopped or `Ok` if the message was scheduled to be sent. If the actor is stopped before
     /// the duration passes then the scheduled message will never get to the actor.
     pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
@@ -524,15 +519,15 @@ trait Handler: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'stati
 impl<F> Handler for F where F: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
 
 /// A builder that can be used to create and spawn an actor. To get a builder, the user would ask
-/// the actor system to create one using `system.spawn()` and then to spawn the actor with the
-/// `spawn` method on the builder. See [`ActorSystem::actor`] for more information and examples.
+/// the actor system to create one using `system.spawn()` and then to spawn the actor by means of
+/// the the `with` method on the builder. See [`ActorSystem::actor`] for more information.
 pub struct ActorBuilder {
     /// The System that the actor builder was created on.
     pub(crate) system: ActorSystem,
     /// The optional name of the actor which defaults to `None` meaning the actor will be unnamed.
     pub name: Option<String>,
-    /// The size of the message channel to use which defaults to `None` meaning the default for the
-    /// actor system will be used for the message channel.
+    /// The size of the message channel for the actor which defaults to `None`; meaning the
+    /// default for the actor system will be used for the message channel.
     pub channel_size: Option<u16>,
 }
 
@@ -571,9 +566,9 @@ impl ActorBuilder {
 /// The implementation of the actor in the system. Please see overview and library documentation
 /// for more detail.
 pub(crate) struct Actor {
-    /// The AID associated with this actor.
+    /// The context data for the actor containg the `aid` as well as other immutable data.
     pub context: Context,
-    /// Receiver for the actor channel.
+    /// Receiver for the actor's message channel.
     receiver: SeccReceiver<Message>,
     /// The function that processes messages that are sent to the actor wrapped in a closure to
     /// erase the state type that the actor is managing. Note that this is in a mutex because the
@@ -663,8 +658,8 @@ impl Actor {
                 }
 
                 // If the message was a system stop message then we override the actor returned
-                // result with a stop. The override means actors that don't do anything special
-                // can essentially ignore processing stop.
+                // result with a 'Status::Stop'. The override means actors that don't do anything
+                // special can essentially ignore processing stop.
                 if let Some(m) = message.content_as::<SystemMsg>() {
                     if let SystemMsg::Stop = *m {
                         result = Ok(Status::Stop)
@@ -692,7 +687,7 @@ impl Actor {
                             "[{}] Returned an error when processing: {:?}",
                             actor.context.aid, e
                         );
-                        // Actor stopping, dont process more messages.
+                        // Actor stopping, don't process more messages.
                         break;
                     }
                 };
@@ -702,7 +697,7 @@ impl Actor {
             }
         }
 
-        // Reschedule the actor if it is still alive and has more content.
+        // Reschedule the actor if it is still alive and has more messages.
         if system.is_actor_alive(&actor.context.aid) && actor.receiver.receivable() > 0 {
             actor.context.system.reschedule(actor.clone());
         }
@@ -753,7 +748,7 @@ mod tests {
 
     /// Tests serialization and deserialization of `ActorId`s. This verifies that deserialized
     /// `aid`s on the same actor system should just be the same `aid` as well as the fact that
-    /// when deserialized on other actor systems the `aid`'s sender should be a `remote`.
+    /// when deserialized on other actor systems the `aid`'s sender should be a remote aid.
     ///
     /// FIXME (Issue #70) Return error when deserializing an ActorId if a remote is not connected
     /// instead of panic.
@@ -832,7 +827,7 @@ mod tests {
         aid.send_new(aid.clone()).unwrap();
         aid.send_new(Op::Aid(aid.clone())).unwrap();
 
-        // Wait for the start and our message to get there because test is asynchronous.
+        // Wait for the Start and our message to get there because test is asynchronous.
         await_received(&aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
@@ -859,7 +854,6 @@ mod tests {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default());
 
-        // FIXME See if there is some way to support processors without state without () stuff.
         let aid = system
             .spawn()
             .with((), |_: &mut (), _: &Context, message: &Message| {

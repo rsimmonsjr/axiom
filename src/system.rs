@@ -1,10 +1,10 @@
 //! Implements the [`ActorSystem`] and related types of Axiom.
 //!
-//! When the actor system starts up, a number of worker threads will be spawned that will
-//! constantly try to pull work from the work channel and process messages with the actor. The
-//! actor will then be re-sent to the work channel if there are more messages for that actor
-//! to process. This continues constantly until the actor system is shutdown and all actors
-//! are stopped.
+//! When the actor system starts up, a number of dispatcher threads will be spawned that will
+//! constantly try to pull work from the work channel and process messages with the actor. When
+//! the time slice expires The actor will then be re-sent to the work channel if there are more
+//! messages for that actor to process. This continues constantly until the actor system is
+//! shutdown and all actors are stopped.
 //!
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
@@ -48,7 +48,6 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
-    /// FIXME (Issue #73) Allow Actors to return stop reason values that must be serializable.
     Stopped(ActorId),
 }
 
@@ -87,6 +86,19 @@ pub enum WireMessage {
 /// means.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ActorSystemConfig {
+    /// The default size for the channel that is created for each actor. This can be overridden on
+    /// a per-actor basis during spawning as well. Making the default channel size bigger allows
+    /// for more bandwidth in sending messages to actors but also takes more memory. Also the
+    /// user should consider if their actor needs a large channel then it might need to be
+    /// refactored or the threads size should be increased because messages arent being processed
+    /// fast enough. The default value for this is 32.
+    pub message_channel_size: u16,
+    /// Max duration to wait between attempts to send to an actor's message channel. This is used
+    /// to poll a busy channel that is at its capacity limit. The larger this value is, the longer
+    /// `send` will wait for capacity in the channel but the user should be aware that if the
+    /// system is often waiting on capacity that channel may be too small or the actor may need to
+    /// be refactored to process messages faster.  The default value is 1 millisecond.
+    pub send_timeout: Duration,
     /// The size of the thread pool which governs how many worker threads there are in the system.
     /// The number of threads should be carefully considered to have sufficient concurrency but
     /// not overschedule the CPU on the target hardware. The default value is 4 * the number of
@@ -97,35 +109,32 @@ pub struct ActorSystemConfig {
     /// how their message processing works and refactor big tasks into a number of smaller tasks.
     /// The default value is 1 millisecond.
     pub warn_threshold: Duration,
-    /// This controls how long a processor will max spend working on messages for an actor before
+    /// This controls how long a processor will spend working on messages for an actor before
     /// yielding to work on other actors in the system. The dispatcher will continue to pluck
-    /// messages off the actor's channel and process them until this time slice is exceeded. The
-    /// default value is 1 millisecond.
+    /// messages off the actor's channel and process them until this time slice is exceeded. Note
+    /// that actors themselves can exceed this in processing a single message and if so, only one
+    /// message will be processed before yielding. The default value is 1 millisecond.
     pub time_slice: Duration,
     /// The number of slots to allocate for the work channel. This is the channel that the worker
     /// threads use to schedule work on actors. The more traffic the actor system takes and the
-    /// longer the messages take to process, the bigger this should be. The default value is 100.
+    /// longer the messages take to process, the bigger this should be. Ideally the actor will be
+    /// in the work channel a maximum of 1 time no matter how many messages it has pending.
+    /// However, this can vary depending upon processing dynamics that might rarely have an actor
+    /// in the channel twice. The default value is 100.
     pub work_channel_size: u16,
     /// The maximum amount of time to wait to be able to schedule an actor for work before
-    /// reporting an error to the user. The default is 1 millisecond.
+    /// reporting an error to the user. If this is timing out then the user should increase
+    /// the work channel size to accomodate the flow. The default is 1 millisecond.
     pub work_channel_timeout: Duration,
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
-    /// getting enough work to justify their existence. The default value is 10 milliseconds.
+    /// getting enough work to justify their existence. Note that the actual system uses `Condvar`
+    /// mechanics of the `secc` crate so usually polling is not a big concern. However there are
+    /// circumstances where `Condvar` notifications can be missed so the polling is in place to
+    /// compensate for this. See `secc::SeccReceiver::receive_await_timeout` for more information.
+    /// The default value is 10 milliseconds.
     pub thread_wait_time: Duration,
-    /// The default size for the channel that is created for each actor. Making the channel
-    /// bigger allows for more bandwidth in sending messages to actors but also takes more
-    /// memory. Also the user should consider if their actor needs a large channel then it might
-    /// need to be refactored or the threads size should be increased because messages arent
-    /// being processed fast enough. The default value for this is 32.
-    pub message_channel_size: u16,
-    /// Max duration to wait between attempts to send to an actor's message channel. This is used
-    /// to poll a busy channel that is at its capacity limit. The larger this value is, the longer
-    /// `send` will wait for capacity in the channel but the user should be aware that if the
-    /// system is often waiting on capacity that channel may be too small or the actor may need to
-    /// be refactored to process messages faster.  The default value is 1 millisecond.
-    pub send_timeout: Duration,
 }
 
 impl Default for ActorSystemConfig {
@@ -159,7 +168,7 @@ pub struct RemoteInfo {
     _handle: JoinHandle<()>,
 }
 
-/// Stores a message that will be sent with a delay to an actor.
+/// Stores a message that will be sent to an actor with a delay.
 struct DelayedMessage {
     /// A unique identifier for a message.
     uuid: Uuid,
@@ -167,7 +176,7 @@ struct DelayedMessage {
     destination: ActorId,
     /// The minimum instant that the message should be sent.
     instant: Instant,
-    /// The message to send.
+    /// The message to sent.
     message: Message,
 }
 
@@ -200,8 +209,8 @@ struct ActorSystemData {
     config: ActorSystemConfig,
     /// Sender side of the work channel. When an actor gets a message and its pending count
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
-    /// resent to the channel by a thread after handling a message if it has more messages
-    /// to process.
+    /// resent to the channel by a thread after handling a time slice of messages if it has more
+    /// messages to process.
     sender: SeccSender<Arc<Actor>>,
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
@@ -240,9 +249,9 @@ pub struct ActorSystem {
 }
 
 impl ActorSystem {
-    /// Creates an actor system with the given config. The user should benchmark how
-    /// many slots in the work channel, the number of threads they need and so on in order
-    /// to satisfy the requirements of the software they are creating.
+    /// Creates an actor system with the given config. The user should benchmark how many slots
+    /// are needed in the work channel, the number of threads they need in the system and and so
+    /// on in order to satisfy the requirements of the software they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
             secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
@@ -302,12 +311,13 @@ impl ActorSystem {
 
     /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
     /// threads constantly grab at the work channel trying to get the next [`ActorId`] off the
-    /// channel.  When they get an [`ActorId`] they will process the message using the actor
-    /// registed for that [`ActorId`] and then check to see if the actor has more receivable
-    /// messages. If the actor has more message then the [`ActorId`] for the actor will be re-sent
-    /// to the work channel to process the next message. This process allows thousands of actors
-    /// to run and not take up resources if they have no messages to process but also prevents one
-    /// super busy actor from starving out other actors that get messages only occasionally.
+    /// channel. When they get an [`ActorId`] they will process messages using the processor
+    /// registered for that [`ActorId`] for one time slice. After the time slice, the dispatcher
+    /// thread will then check to see if the actor has more receivable messages. If the actor has
+    /// more messages then the [`ActorId`] for the actor will be re-sent to the work channel to
+    /// process the next message. This allows thousands of actors to run and not take up resources
+    /// if they have no messages to process but also prevents one super busy actor from starving
+    /// out other actors that get messages only occasionally.
     fn start_dispatcher_thread(&self, number: u16) -> JoinHandle<()> {
         // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
         // long in the channel.
@@ -339,7 +349,7 @@ impl ActorSystem {
     }
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
-    /// delays have elapesed.
+    /// delays have elapsed.
     /// FIXME Add a graceful shutdown to this thread and notifications.
     fn start_send_after_thread(&self) -> JoinHandle<()> {
         let system = self.clone();
@@ -388,9 +398,8 @@ impl ActorSystem {
             .map(|info| info.sender.clone())
     }
 
-    /// Adds a connection to a remote actor system. The remote info contains the information
-    /// about the remote. When the connection is established the actor system will announce
-    /// itself to the the remote system with a [`WireMessage::Hello`].
+    /// Adds a connection to a remote actor system. When the connection is established the
+    /// actor system will announce itself to the remote system with a [`WireMessage::Hello`].
     pub fn connect(
         &self,
         sender: SeccSender<WireMessage>,
@@ -413,7 +422,7 @@ impl ActorSystem {
                 Err(e) => panic!("Expected to read a Hello message {:?}", e),
             };
 
-        // Starts a thread to read incomming wire messages and process them.
+        // Starts a thread to read incoming wire messages and process them.
         let system = self.clone();
         let receiver_clone = receiver.clone();
         let thread_timeout = self.data.config.thread_wait_time;
@@ -461,8 +470,7 @@ impl ActorSystem {
     }
 
     /// A helper function to process a wire message from another actor system. The passed uuid
-    /// is the uuid of the remote that sent the message and the sender is the sender to that
-    /// remote to facilitate replying to the remote.
+    /// is the uuid of the remote that sent the message.
     ///
     /// FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
     fn process_wire_message(&self, _uuid: &Uuid, wire_message: &WireMessage) {
@@ -528,8 +536,8 @@ impl ActorSystem {
         self.data.shutdown_triggered.store(true, Ordering::Relaxed);
     }
 
-    /// Awaits for the actor system to be shutdown using a relatively CPU minimal condvar as
-    /// a signalling mechanism. This function will block until all actor system threads have
+    /// Awaits for the actor system to be shutdown using a relatively CPU minimal `Condvar` as
+    /// a signaling mechanism. This function will block until all actor system threads have
     /// stopped.
     pub fn await_shutdown(&self) {
         let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
@@ -537,8 +545,8 @@ impl ActorSystem {
         let _condvar_guard = condvar.wait(guard).unwrap();
     }
 
-    /// Awaits for the actor system to be shutdown using a relatively CPU minimal condvar as
-    /// a signalling mechanism. This function will block until all actor system threads have
+    /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
+    /// a signaling mechanism. This function will block until all actor system threads have
     /// stopped or the timeout has expired. This function will return true if the system
     /// shutdown without the timeout expiring and false if the system failed to shutdown before
     /// the timeout expired or an error occurred.
@@ -548,7 +556,7 @@ impl ActorSystem {
         match condvar.wait_timeout(guard, timeout) {
             Ok((_, timeout)) => !timeout.timed_out(),
             Err(err) => {
-                error!("Error while waiting for system to shitdown: {}", err);
+                error!("Error while waiting for system to shutdown: {}", err);
                 false
             }
         }
@@ -597,9 +605,8 @@ impl ActorSystem {
         Ok(aid)
     }
 
-    /// Creates a builder for this actor system that allows a user to build actors using a chained
-    /// syntax while optionally providing configuration parameters if desired. This builder will
-    /// consumed in a final call to spawn the configured actor on the actor system.
+    /// Creates a single use builder for this actor system that allows a user to build actors
+    /// using a chained syntax while optionally providing configuration parameters if desired.
     ///
     /// # Examples
     /// ```
@@ -627,7 +634,7 @@ impl ActorSystem {
     }
 
     /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
-    /// `receive` if the actor has more messages that are receivable.
+    /// a time slice if the actor has more messages that are receivable.
     pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
         self.data
             .sender
@@ -670,8 +677,6 @@ impl ActorSystem {
     ///
     /// This is something that should rarely be called from the outside as it is much better to
     /// send the actor a [`SystemMsg::Stop`] message and allow it to stop gracefully.
-    ///
-    /// FIXME (Issue #73) Add ability for Actors to return a reason that they stopped via a trait.
     pub fn stop_actor(&self, aid: &ActorId) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
@@ -732,9 +737,7 @@ impl ActorSystem {
         }
     }
 
-    /// Returns the [`ActorId`] to the "System" actor for this actor system. The actor for
-    /// the returned `aid` is started when the actor system is started and provides additional
-    /// actor system functionality.
+    /// Returns the [`ActorId`] to the "System" actor for this actor system.
     pub fn system_actor_aid(&self) -> ActorId {
         self.find_aid_by_name(&"System").unwrap()
     }
@@ -765,7 +768,8 @@ impl ActorSystem {
 
     /// Schedules a `message` to be sent to the `destination` [`ActorId`] after a `delay`. Note
     /// That this method makes a best attempt at sending the message on time but the message may
-    /// not be sent on exactly the delay passed but will never be sent before that delay.
+    /// not be sent on exactly the delay passed. However, the message will never be sent before
+    /// the given delay.
     pub(crate) fn send_after(&self, message: Message, destination: ActorId, delay: Duration) {
         let instant = Instant::now().checked_add(delay).unwrap();
         let entry = DelayedMessage {
@@ -792,7 +796,7 @@ impl fmt::Debug for ActorSystem {
     }
 }
 
-/// Messages that are sent to and received from the System Actor.
+/// Messages that are sent to and received from the System Actor.ActorId
 #[derive(Serialize, Deserialize, Debug)]
 enum SystemActorMessage {
     /// Finds an actor by name.
@@ -810,7 +814,7 @@ enum SystemActorMessage {
 }
 
 /// A processor for the system actor.
-/// FIXME Refactor into a full struct based actor.
+/// FIXME Issue #89: Refactor into a full struct based actor in another file.
 fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) -> AxiomResult {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
@@ -860,7 +864,7 @@ mod tests {
         (system1, system2)
     }
 
-    /// Helper to wait for 2 actor systems to shutdown or panic if they dont do so within
+    /// Helper to wait for 2 actor systems to shutdown or panic if they don't do so within
     /// 2000 milliseconds.
     fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
         let timeout = Duration::from_millis(2000);
@@ -955,7 +959,7 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// This test verifies that the system can send a message after a particular timeframe.
+    /// This test verifies that the system can send a message after a particular delay.
     /// FIXME need separate test for remotes.
     #[test]
     fn test_send_after() {
@@ -1110,8 +1114,9 @@ mod tests {
     }
 
     /// This test verifies that the concept of named actors works properly. When a user wants
-    /// to declare a named actor they cannot register the same name twice and when the actor
-    /// stops the name should be removed from the registered names and be available again.
+    /// to declare a named actor they cannot register the same name twice. When the actor using
+    /// the name currently stops the name should be removed from the registered names and be
+    /// available again.
     #[test]
     fn test_named_actor_restrictions() {
         init_test_log();
@@ -1147,7 +1152,7 @@ mod tests {
         assert_eq!(None, system.find_aid_by_name("B"));
         assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid()));
 
-        // Now we should be able to crate a new actor with the name bravo.
+        // Now we should be able to crate a new actor with the name "B".
         let aid3 = system
             .spawn()
             .name("B")
@@ -1160,7 +1165,7 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// Tests that remote actors can send and recieve messages between each other.
+    /// Tests that remote actors can send and receive messages between each other.
     #[test]
     fn test_remote_actors() {
         // In this test our messages are just structs.
@@ -1225,7 +1230,7 @@ mod tests {
         await_two_system_shutdown(system1, system2);
     }
 
-    /// Tests the ability to find an aid on a remote system by name using a SystemActor. This
+    /// Tests the ability to find an aid on a remote system by name using a `SystemActor`. This
     /// also serves as a test for cross system actor communication as well as testing broadcast
     /// to multiple system actors in the cluster.
     #[test]

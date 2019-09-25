@@ -33,9 +33,6 @@ pub fn main() {
     let config = ActorSystemConfig::default();
     let system = ActorSystem::create(config);
 
-    // Have to do this since we want to call from outside actor system.
-    system.init_current();
-
     // Spawn the actor and send the message.
     let aid = system.spawn().with(true, hello).unwrap();
     aid.send(Message::new(HelloMessages::Greet)).unwrap();
