@@ -609,7 +609,7 @@ impl ActorSystem {
     ///
     /// fn handler(count: &mut usize, _: &Context, _: &Message) -> AxiomResult {
     ///     *count += 1;
-    ///     Ok(Status::Processed)    
+    ///     Ok(Status::Done)    
     /// }
     ///
     /// let state = 0 as usize;
@@ -831,18 +831,18 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
                         reply_to, error
                     )
                 });
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
-            _ => Ok(Status::Processed),
+            _ => Ok(Status::Done),
         }
     } else if let Some(msg) = message.content_as::<SystemMsg>() {
         match &*msg {
-            SystemMsg::Start => Ok(Status::Processed),
-            _ => Ok(Status::Processed),
+            SystemMsg::Start => Ok(Status::Done),
+            _ => Ok(Status::Done),
         }
     } else {
         error!("Unhandled message received.");
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 }
 
@@ -1068,9 +1068,9 @@ mod tests {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
                         assert!(ActorId::ptr_eq(state, aid));
-                        Ok(Status::Processed)
+                        Ok(Status::Done)
                     }
-                    SystemMsg::Start => Ok(Status::Processed),
+                    SystemMsg::Start => Ok(Status::Done),
                     _ => panic!("Received some other message!"),
                 }
             } else {
@@ -1184,7 +1184,7 @@ mod tests {
                     context.system.trigger_shutdown();
                     Ok(Status::Stop)
                 } else if let Some(_) = message.content_as::<SystemMsg>() {
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 } else {
                     panic!("Unexpected message received!");
                 }
@@ -1211,9 +1211,9 @@ mod tests {
                                         reply_to: context.aid.clone(),
                                     })
                                     .unwrap();
-                                Ok(Status::Processed)
+                                Ok(Status::Done)
                             }
-                            _ => Ok(Status::Processed),
+                            _ => Ok(Status::Done),
                         }
                     } else {
                         panic!("Unexpected message received!");
@@ -1238,7 +1238,7 @@ mod tests {
             .name("A")
             .with((), |_: &mut (), context: &Context, _: &Message| {
                 context.system.trigger_shutdown();
-                Ok(Status::Processed)
+                Ok(Status::Done)
             })
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
@@ -1255,7 +1255,7 @@ mod tests {
                                     assert_eq!(target.uuid(), aid1.uuid());
                                     target.send_new(true).unwrap();
                                     context.system.trigger_shutdown();
-                                    Ok(Status::Processed)
+                                    Ok(Status::Done)
                                 } else {
                                     panic!("Didn't find AID.");
                                 }
@@ -1270,7 +1270,7 @@ mod tests {
                                     name: "A".to_string(),
                                 },
                             ));
-                            Ok(Status::Processed)
+                            Ok(Status::Done)
                         } else {
                             panic!("Unexpected message received!");
                         }

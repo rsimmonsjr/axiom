@@ -8,6 +8,12 @@
 //!
 //! ### What's New
 //! * 2019-??-??: 0.1.0
+//!   * A lot of breaking changes have been introduced in an effort to keep them all in one release
+//!   so that the API can stabilize. Please see examples and other sources for help in integrating
+//!   all of the changes listed below.
+//!   * BREAKING CHANGE: `Status::Processed` has been renamed to `Status::Done`.
+//!   * BREAKING CHANGE: `Status::Skipped` has been renamed to `Status::Skip`.
+//!   * BREAKING CHANGE: `Status::Reset` has been renamed to `Status::Reset`.
 //!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId` as the
 //!   mechanism for looking up actors doesn't make sense the way it was before.
 //!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
@@ -78,7 +84,7 @@
 //!     .spawn()
 //!     .with(
 //!         0 as usize,
-//!         |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
+//!         |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
 //!     )
 //!     .unwrap();
 //!
@@ -124,12 +130,12 @@
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Ok(Status::Processed)
+//!         Ok(Status::Done)
 //!     }
 //!
 //!     fn handle_i32(&mut self, message: &i32) -> AxiomResult {
 //!         self.value += *message;
-//!         Ok(Status::Processed)
+//!         Ok(Status::Done)
 //!     }
 //!
 //!     fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
@@ -246,10 +252,10 @@ mod tests {
             .try_init();
     }
 
-    /// A function that just returns `Ok(Status::Processed)` which can be used as a handler for
+    /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
     pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> AxiomResult {
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and
@@ -284,7 +290,7 @@ mod tests {
             .spawn()
             .with(
                 0 as usize,
-                |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Processed),
+                |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
             )
             .unwrap();
 
@@ -311,7 +317,7 @@ mod tests {
 
         impl Data {
             fn handle(&mut self, _context: &Context, _message: &Message) -> AxiomResult {
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
 
@@ -341,16 +347,16 @@ mod tests {
             // Attempt to downcast to expected message.
             if let Some(_msg) = message.content_as::<SystemMsg>() {
                 *state += 1;
-                Ok(Status::Processed)
+                Ok(Status::Done)
             } else if let Some(msg) = message.content_as::<i32>() {
                 assert_eq!(expected[*state - 1], *msg);
                 assert_eq!(*state, context.aid.received().unwrap());
                 *state += 1;
-                Ok(Status::Processed)
+                Ok(Status::Done)
             } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                 // Note that we put this last because it only is ever received once, we
                 // want the most frequently received messages first.
-                Ok(Status::Processed)
+                Ok(Status::Done)
             } else {
                 panic!("Failed to dispatch properly");
             }
@@ -399,12 +405,12 @@ mod tests {
                 } else {
                     self.value -= 1;
                 }
-                Ok(Status::Processed) // This assertion will fail but we still have to return.
+                Ok(Status::Done) // This assertion will fail but we still have to return.
             }
 
             fn handle_i32(&mut self, message: &i32) -> AxiomResult {
                 self.value += *message;
-                Ok(Status::Processed) // This assertion will fail but we still have to return.
+                Ok(Status::Done) // This assertion will fail but we still have to return.
             }
 
             fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
@@ -415,7 +421,7 @@ mod tests {
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 } else {
                     panic!("Failed to dispatch properly");
                 }
@@ -456,7 +462,7 @@ mod tests {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
-                        Ok(Status::Processed)
+                        Ok(Status::Done)
                     }
                     _ => panic!("Unexpected message"),
                 }
@@ -471,12 +477,12 @@ mod tests {
                         pong_aid
                             .send_new(PingPong::Ping(context.aid.clone()))
                             .unwrap();
-                        Ok(Status::Processed)
+                        Ok(Status::Done)
                     }
-                    _ => Ok(Status::Processed),
+                    _ => Ok(Status::Done),
                 }
             } else {
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
 
@@ -487,12 +493,12 @@ mod tests {
                         // Note that although we use unwrap on the `send_new` here, that is a bad
                         // idea in a real system because actor panics will take down the system.
                         from.send_new(PingPong::Pong).unwrap();
-                        Ok(Status::Processed)
+                        Ok(Status::Done)
                     }
                     _ => panic!("Unexpected message"),
                 }
             } else {
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
 

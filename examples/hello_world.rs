@@ -25,7 +25,7 @@ fn hello(_state: &mut bool, context: &Context, message: &Message) -> AxiomResult
         println!("Hello World from Actor: {:?}", context.aid);
         ActorSystem::current().trigger_shutdown();
     }
-    Ok(Status::Processed)
+    Ok(Status::Done)
 }
 
 pub fn main() {

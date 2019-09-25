@@ -28,23 +28,23 @@ pub enum Status {
     /// The message was processed and can be removed from the channel. Note that this doesn't
     /// necessarily mean that anything was done with the message, just that it can be removed.  
     /// It is up to the actor to decide what, if anything, to do with the message.
-    Processed,
+    Done,
 
     /// The message was skipped and should remain in the channel. Once a message is skipped a skip
     /// cursor will be created in the actor's message channel which will act as the actual head
-    /// of the channel until an [`Status::ResetSkip`] is returned from an actor's processor.
+    /// of the channel until an [`Status::Reset`] is returned from an actor's processor.
     /// This enables an actor to skip messages while working on a process and then clear the skip
     /// cursor and resume normal processing. This functionality is critical for actors that
     /// implement a finite state machine and thus might temporarily change the implementation of
     /// the message processor and then switch back to a state where the previously sent messages
     /// are processed.
-    Skipped,
+    Skip,
 
     /// Marks the message as processed and clears the skip cursor on the channel. A skip cursor
-    /// is present when a message has been skipped by an actor returning [`Status::Skipped`]
+    /// is present when a message has been skipped by an actor returning [`Status::Skip`]
     /// from a call to the actor's message processor. If no skip cursor is set than this status
-    /// is semantically the same as [`Status::Processed`].
-    ResetSkip,
+    /// is semantically the same as [`Status::Done`].
+    Reset,
 
     /// Returned from an actor when the actor wants the system to stop the actor. When this status
     /// is returned the actor's [`ActorId`] will no longer send any messages and the actor
@@ -227,7 +227,7 @@ impl ActorId {
     ///
     /// let aid = system.spawn().with(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Done),
     ///  ).unwrap();
     ///
     /// match aid.send(Message::new(11)) {
@@ -285,7 +285,7 @@ impl ActorId {
     ///
     /// let aid = system.spawn().with(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Done),
     ///  ).unwrap();
     ///
     /// match aid.send_new(11) {
@@ -349,7 +349,7 @@ impl ActorId {
     ///
     /// let aid = system.spawn().with(
     ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Processed),
+    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Done),
     ///  ).unwrap();
     ///
     /// match aid.send_new_after(11, Duration::from_millis(1)) {
@@ -673,9 +673,9 @@ impl Actor {
 
                 // Handle the result of the processing.
                 match result {
-                    Ok(Status::Processed) => actor.receiver.pop().unwrap(),
-                    Ok(Status::Skipped) => actor.receiver.skip().unwrap(),
-                    Ok(Status::ResetSkip) => {
+                    Ok(Status::Done) => actor.receiver.pop().unwrap(),
+                    Ok(Status::Skip) => actor.receiver.skip().unwrap(),
+                    Ok(Status::Reset) => {
                         actor.receiver.pop().unwrap();
                         actor.receiver.reset_skip().unwrap();
                     }
@@ -823,7 +823,7 @@ mod tests {
                             Op::Aid(a) => assert!(ActorId::ptr_eq(&context.aid, &a)),
                         }
                     }
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 },
             )
             .unwrap();
@@ -867,7 +867,7 @@ mod tests {
                     Ok(Status::Stop)
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
-                        SystemMsg::Start => Ok(Status::Processed),
+                        SystemMsg::Start => Ok(Status::Done),
                         m => panic!("unexpected message: {:?}", m),
                     }
                 } else {
@@ -908,8 +908,8 @@ mod tests {
             .with((), |_: &mut (), _: &Context, message: &Message| {
                 if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
-                        SystemMsg::Start => Ok(Status::Processed),
-                        SystemMsg::Stop => Ok(Status::Processed),
+                        SystemMsg::Start => Ok(Status::Done),
+                        SystemMsg::Stop => Ok(Status::Done),
                         m => panic!("unexpected message: {:?}", m),
                     }
                 } else {

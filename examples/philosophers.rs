@@ -66,16 +66,16 @@ impl Fork {
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
-                    Ok(Status::Skipped)
+                    Ok(Status::Skip)
                 } else {
                     owner.send_new(Command::GiveUpFork(context.aid.clone()))?;
-                    Ok(Status::Skipped)
+                    Ok(Status::Skip)
                 }
             }
             None => {
                 self.owned_by = Some(requester.clone());
                 requester.send_new(Command::ReceiveFork(context.aid.clone()))?;
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
     }
@@ -89,13 +89,13 @@ impl Fork {
                     self.owned_by = None;
                     self.clean = true;
                     // Resetting the skip allows fork requests to be processed.
-                    Ok(Status::ResetSkip)
+                    Ok(Status::Reset)
                 } else {
                     error!(
                         "[{}] fork_put_down() from non-owner: {} real owner is: {}",
                         context.aid, sender, owner
                     );
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 }
             }
             None => {
@@ -103,7 +103,7 @@ impl Fork {
                     "[{}] fork_put_down() from non-owner: {} real owner is: None:",
                     context.aid, sender
                 );
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
     }
@@ -118,15 +118,15 @@ impl Fork {
                     self.clean = false;
                     // Resetting the skip allows fork requests to be processed now that the fork
                     // has been marked as being dirty.
-                    Ok(Status::ResetSkip)
+                    Ok(Status::Reset)
                 } else {
                     error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 }
             }
             _ => {
                 error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
     }
@@ -141,7 +141,7 @@ impl Fork {
                 ForkCommand::ForkPutDown(owner) => self.fork_put_down(context, &owner),
             }
         } else {
-            Ok(Status::Processed)
+            Ok(Status::Done)
         }
     }
 }
@@ -284,7 +284,7 @@ impl Philosopher {
         if self.has_left_fork && self.has_right_fork {
             self.begin_eating(context)?;
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Helper to request forks that the philosopher doesnt have.
@@ -330,7 +330,7 @@ impl Philosopher {
                 };
             }
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
@@ -356,7 +356,7 @@ impl Philosopher {
                 self.begin_thinking(context)?;
             }
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Processes a command to a philosopher to give up a fork. Note that this can be received
@@ -392,7 +392,7 @@ impl Philosopher {
             }
             _ => (),
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// A function that handles sending metrics to an actor that requests the metrics.
@@ -403,7 +403,7 @@ impl Philosopher {
             aid: context.aid.clone(),
             metrics: self.metrics,
         })?;
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Handle a message for a dining philosopher, mostly dispatching to another method to
@@ -425,12 +425,12 @@ impl Philosopher {
                 // message types first.
                 SystemMsg::Start => {
                     context.aid.send_new(Command::BecomeHungry(0))?;
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 }
-                _ => Ok(Status::Processed),
+                _ => Ok(Status::Done),
             }
         } else {
-            Ok(Status::Processed)
+            Ok(Status::Done)
         }
     }
 }
@@ -539,7 +539,7 @@ pub fn main() {
                         context.aid.send_after(msg, run_time)?;
                     }
                 }
-                Ok(Status::Processed)
+                Ok(Status::Done)
             },
         )
         .unwrap();
