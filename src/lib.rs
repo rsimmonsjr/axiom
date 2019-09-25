@@ -184,7 +184,7 @@
 //! act as a set of examples for users of Axiom.
 //!
 //! # Detailed Examples
-//! * [Hello World]https://github.com/rsimmonsjr/axiom/blob/master/examples/hello_world.rs): The
+//! * [Hello World](https://github.com/rsimmonsjr/axiom/blob/master/examples/hello_world.rs): The
 //! obligatory introduction to any computer system.
 //! * [Dining Philosophers](https://github.com/rsimmonsjr/axiom/blob/master/examples/philosophers.rs):
 //! An example of using Axiom to solve a classic Finite State Machine problem in computer science.
