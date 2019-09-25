@@ -7,14 +7,14 @@
 //!   * Communication with Enumeration based messages.
 //!   * Skipping messages in the channel to defer processing.
 //!   * Implementation of finite state machine semantics with differential processing.
-//!   * Concurrent, Independent processing.
-//!   * Ability to send messages to self; stopping eating and getting hungry send to self.
+//!   * Ability to send messages to self; i.e. `EtopEating and `BecomeHungry`.
 //!   * Ability to send messages after a specified time frame.
 //!   * Ability to create an actor from a closure (the actor collecting metrics and shutting down).
 //!   * Ability to inject data into a state of an actor (merics map).
 //!   * Ability to send the same message to several targets without copying (requesting metrics).
 //!   * Ability to use an enum, `ForkCommand` and `Command` as a message.
 //!   * Ability to use a struct, `MetricsReply` and `EndSimulation` as a message.
+//!   * Use of `enum` as well as `struct` values for messages.
 //!  
 //! This example is extremely strict. If the FSM at any time gets out of synch with expectations
 //! panics ensue. Some FSM implementations might be quite a bit more lose, preferring to ignore
@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 pub enum ForkCommand {
     /// A command sent when a fork is requested.
     RequestFork(ActorId),
-    /// Mark the fork being used which will mark it dirty.
+    /// Mark the fork as being used which will mark it dirty.
     UsingFork(ActorId),
     /// Sent to a fork to indicate that it was put down and no longer is in use. This will
     /// allow the fork to be sent to the next user. The `ActorId` is the id of the current
@@ -41,8 +41,7 @@ pub enum ForkCommand {
     ForkPutDown(ActorId),
 }
 
-/// A fork for use in the problem. This represents a single resource that other resources need
-/// in order to solve problems in a distributed sytem.
+/// A fork for use in the problem.
 #[derive(Eq, PartialEq)]
 struct Fork {
     /// A flag to indicate if the fork is clean or not.
@@ -66,16 +65,16 @@ impl Fork {
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
-                    Ok(Status::Skipped)
+                    Ok(Status::Skip)
                 } else {
                     owner.send_new(Command::GiveUpFork(context.aid.clone()))?;
-                    Ok(Status::Skipped)
+                    Ok(Status::Skip)
                 }
             }
             None => {
                 self.owned_by = Some(requester.clone());
                 requester.send_new(Command::ReceiveFork(context.aid.clone()))?;
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
     }
@@ -89,13 +88,13 @@ impl Fork {
                     self.owned_by = None;
                     self.clean = true;
                     // Resetting the skip allows fork requests to be processed.
-                    Ok(Status::ResetSkip)
+                    Ok(Status::Reset)
                 } else {
                     error!(
                         "[{}] fork_put_down() from non-owner: {} real owner is: {}",
                         context.aid, sender, owner
                     );
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 }
             }
             None => {
@@ -103,7 +102,7 @@ impl Fork {
                     "[{}] fork_put_down() from non-owner: {} real owner is: None:",
                     context.aid, sender
                 );
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
     }
@@ -118,15 +117,15 @@ impl Fork {
                     self.clean = false;
                     // Resetting the skip allows fork requests to be processed now that the fork
                     // has been marked as being dirty.
-                    Ok(Status::ResetSkip)
+                    Ok(Status::Reset)
                 } else {
                     error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 }
             }
             _ => {
                 error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
-                Ok(Status::Processed)
+                Ok(Status::Done)
             }
         }
     }
@@ -141,7 +140,7 @@ impl Fork {
                 ForkCommand::ForkPutDown(owner) => self.fork_put_down(context, &owner),
             }
         } else {
-            Ok(Status::Processed)
+            Ok(Status::Done)
         }
     }
 }
@@ -149,15 +148,15 @@ impl Fork {
 /// The state of a philosopher at the table.
 #[derive(Debug)]
 enum PhilosopherState {
-    /// Has no forks and is thinking.
+    /// Philosopher is thinking.
     Thinking,
-    /// Philosopher is hungry and waiting for forks.
+    /// Philosopher is hungry and waiting for one or more forks.
     Hungry,
     /// Has both forks and is eating.
     Eating,
 }
 
-/// A command sent to an actor.
+/// A command sent to a Philosopher actor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Command {
     /// Command to start eating. The u16 is the current state change number when sent this will
@@ -284,7 +283,7 @@ impl Philosopher {
         if self.has_left_fork && self.has_right_fork {
             self.begin_eating(context)?;
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Helper to request forks that the philosopher doesnt have.
@@ -303,11 +302,9 @@ impl Philosopher {
     }
 
     /// The philosopher is being instructed to get hungry which will cause them to ask for the
-    /// forks to eat. Note that the philosopher will have to have both forks to start eating.
-    /// Once a philosopher starts eating, the forks will be sent a message indicating they are
-    /// being used. Note that since this is sent as a scheduled message it may arrive later
-    /// after the philosopher has changed state. For this reason we track the state change count
-    /// and compare it with the number in the message.
+    /// forks to eat. Note that since the `BecomeHungry` message is sent as a scheduled message
+    /// it may arrive after the philosopher has already changed state. For this reason we track
+    /// the state change count and compare it with the number in the message.
     fn become_hungry(&mut self, context: &Context, state_num: u16) -> AxiomResult {
         if self.metrics.state_change_count == state_num {
             if self.has_left_fork && self.has_right_fork {
@@ -330,7 +327,7 @@ impl Philosopher {
                 };
             }
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
@@ -356,7 +353,7 @@ impl Philosopher {
                 self.begin_thinking(context)?;
             }
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Processes a command to a philosopher to give up a fork. Note that this can be received
@@ -392,7 +389,7 @@ impl Philosopher {
             }
             _ => (),
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// A function that handles sending metrics to an actor that requests the metrics.
@@ -403,7 +400,7 @@ impl Philosopher {
             aid: context.aid.clone(),
             metrics: self.metrics,
         })?;
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 
     /// Handle a message for a dining philosopher, mostly dispatching to another method to
@@ -425,12 +422,12 @@ impl Philosopher {
                 // message types first.
                 SystemMsg::Start => {
                     context.aid.send_new(Command::BecomeHungry(0))?;
-                    Ok(Status::Processed)
+                    Ok(Status::Done)
                 }
-                _ => Ok(Status::Processed),
+                _ => Ok(Status::Done),
             }
         } else {
-            Ok(Status::Processed)
+            Ok(Status::Done)
         }
     }
 }
@@ -487,7 +484,7 @@ pub fn main() {
         "Thomas Jefferson",
     ];
 
-    // Spawn the philosopher actors clockwise from top of table.i
+    // Spawn the philosopher actors clockwise from top of table.
     for left in 0..count {
         let right = if left == 0 { count - 1 } else { left - 1 };
         let state = Philosopher::new(time_slice, forks[left].clone(), forks[right].clone());
@@ -539,7 +536,7 @@ pub fn main() {
                         context.aid.send_after(msg, run_time)?;
                     }
                 }
-                Ok(Status::Processed)
+                Ok(Status::Done)
             },
         )
         .unwrap();

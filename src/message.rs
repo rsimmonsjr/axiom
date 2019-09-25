@@ -38,7 +38,6 @@ where
 
 /// The message content in a message.
 enum MessageContent {
-    // FIXME (Issue #66) Investigate if it is possible to get rid of the inner arc.
     /// The message is a local message.
     Local(Arc<dyn ActorMessage + 'static>),
     /// The message is from remote and has the given hash of a [`std::any::TypeId`] and the
@@ -188,10 +187,10 @@ impl Message {
                         MessageContent::Local(content) => content.clone().downcast::<T>(),
                         // This thread got the write lock and the content is still remote.
                         MessageContent::Remote(content) => {
-                            // We deserialize the content and replace it in the message.
+                            // We deserialize the content and replace it in the message with a
+                            // new local variant.
                             match bincode::deserialize::<T>(&content) {
                                 Ok(concrete) => {
-                                    // with a new local variant.
                                     let new_value: Arc<T> = Arc::new(concrete);
                                     *write_guard = MessageContent::Local(new_value.clone());
                                     drop(write_guard);

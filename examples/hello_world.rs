@@ -25,16 +25,13 @@ fn hello(_state: &mut bool, context: &Context, message: &Message) -> AxiomResult
         println!("Hello World from Actor: {:?}", context.aid);
         ActorSystem::current().trigger_shutdown();
     }
-    Ok(Status::Processed)
+    Ok(Status::Done)
 }
 
 pub fn main() {
     // First we initialize the actor system using the default config.
     let config = ActorSystemConfig::default();
     let system = ActorSystem::create(config);
-
-    // Have to do this since we want to call from outside actor system.
-    system.init_current();
 
     // Spawn the actor and send the message.
     let aid = system.spawn().with(true, hello).unwrap();

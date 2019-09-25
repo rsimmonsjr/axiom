@@ -41,7 +41,7 @@ impl Game {
                 .unwrap();
             return Ok(Status::Stop);
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 }
 
@@ -136,7 +136,7 @@ impl GameResults {
                 _ => {}
             }
         }
-        Ok(Status::Processed)
+        Ok(Status::Done)
     }
 }
 
