@@ -1,4 +1,10 @@
 //! Implementation of a highly-scalable and ergonomic actor model for Rust
+//!
+//! [![Latest version](https://img.shields.io/crates/v/axiom.svg)](https://crates.io/crates/axiom)
+//! [![Build Status](https://api.travis-ci.org/rsimmonsjr/axiom.svg?branch=master)](https://travis-ci.org/rsimmonsjr/axiom)
+//! [![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/rsimmonsjr/axiom.svg)](https://isitmaintained.com/project/rsimmonsjr/axiom)
+//! [![License](https://img.shields.io/crates/l/axiom.svg)](https://github.com/rsimmonsjr/axiom#license)
+//!
 //! # Axiom
 //!
 //! Axiom brings a highly-scalable actor model to the Rust language based on the many lessons
@@ -176,6 +182,44 @@
 //! There is a lot more to learn and explore and your best resource is the test code for Axiom.
 //! The developers have a belief that test code should be well architected and well commented to
 //! act as a set of examples for users of Axiom.
+//!
+//! # Detailed Examples
+//! * [Hello World]https://github.com/rsimmonsjr/axiom/blob/master/examples/hello_world.rs): The
+//! obligatory introduction to any computer system.
+//! * [Dining Philosophers](https://github.com/rsimmonsjr/axiom/blob/master/examples/philosophers.rs):
+//! An example of using Axiom to solve a classic Finite State Machine problem in computer science.
+//! * [Monte Carlo](https://github.com/rsimmonsjr/axiom/blob/master/examples/montecarlo.rs): An
+//! example of how to use Axiom for parallel computation.
+//!
+//! ## Design Principals of Axiom
+//!
+//! Based on previous experience with other actor models I wanted to design Axiom around some
+//! core principles:
+//! 1. **At its core an actor is just an function that processes messages.** The simplest actor is
+//! a function that takes a message and simply ignores it. The benefit to the functional approach
+//! over the Akka model is that it allows the user to create actors easily and simply. This is
+//! the notion of _micro module programming_; the notion of building a complex system from the
+//! smallest components. Software based on the actor model can get complicated; keeping it simple
+//! at the core is fundamental to solid architecture.
+//! 2. **Actors can be a Finite State Machine (FSM).** Actors receive and process messages
+//! nominally in the order received. However, there are certain circumstances where an actor has
+//! to change to another state and process other messages, skipping certain messages to be
+//! processed later.
+//! 3. **When skipping messages, the messages must not move.** Akka allows the skipping of messages
+//! by _stashing_ the message in another data structure and then restoring this stash later. This
+//! process has many inherent flaws. Instead Axiom allows an actor to skip messages in its
+//! channel but leave them where they are, increasing performance and avoiding many problems.
+//! 4. **Actors use a bounded capacity channel.** In Axiom the message capacity for the actor's
+//! channel is bounded, resulting in greater simplicity and an emphasis on good actor design.
+//! 5. **Axiom should be kept as small as possible.** Axiom is the core of the actor model and
+//! should not be expanded to include everything possible for actors. That should be the
+//! job of libraries that extend Axiom. Axiom itself should be an example of _micro module
+//! programming_.
+//! 6. **The tests are the best place for examples.** The tests of Axiom will be extensive and
+//! well maintained and should be a resource for those wanting to use Axiom. They should not
+//! be a dumping ground for copy-paste or throwaway code. The best tests will look like
+//! architected code.  
+//! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
 pub mod actors;
 pub mod message;
