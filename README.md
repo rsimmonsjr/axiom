@@ -17,14 +17,16 @@ rather a new implementation deriving inspiration from the good parts of those pr
   * A lot of breaking changes have been introduced in an effort to keep them all in one release
   so that the API can stabilize. Please see examples and other sources for help in integrating
   all of the changes listed below.
+  * BREAKING CHANGE: `ActorId` has been renamed to `Aid` to facilitate communication and lower
+  confusion between the `uuid` field in the `Aid` and the `Aid` itself.
   * BREAKING CHANGE: `Status::Processed` has been renamed to `Status::Done`.
   * BREAKING CHANGE: `Status::Skipped` has been renamed to `Status::Skip`.
   * BREAKING CHANGE: `Status::ResetSkip` has been renamed to `Status::Reset`.
   * BREAKING CHANGE: `ActorError` has been moved to top level and renamed to `AxiomError`.
-  * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId` as the
+  * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `Aid` as the
   mechanism for looking up actors doesn't make sense the way it was before.
   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
-  * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`.
+  * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `Aid`.
   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
   that the user must manage.
   * BREAKING CHANGE: All actor processors now should return `AxiomResult` which will allow them
@@ -32,13 +34,13 @@ rather a new implementation deriving inspiration from the good parts of those pr
   * BREAKING CHANGE: Actors are now spawned with the builder pattern. This allows the
   configuration of an actor and leaves the door open for future flexibility. See documentation
   for more details.
-  * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
-  * `Processor` functions can get a reference to the `ActorId` of the actor from `Context`.
+  * Created a `Context` type that holds references to the `Aid` and `ActorSystem`.
+  * `Processor` functions can get a reference to the `Aid` of the actor from `Context`.
   * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
   * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
-  * Calling `system.init_current()` is unneeded unless deserializing `ActorId`s outside a
+  * Calling `system.init_current()` is unneeded unless deserializing `Aid`s outside a
   `Processor`.
-  * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`.
+  * Metrics methods like `received()` in `Aid` return `Result` instead of using `panic!`.
   * Changed internal maps to use crate `dashmap` which expands dependencies but increases
   performance.
   * New methods `send_new` and `send_new_after` are available to shorten boilerplate.

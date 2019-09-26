@@ -147,14 +147,21 @@ impl<'de> Deserialize<'de> for Aid {
         let serialized_form = AidSerializedForm::deserialize(deserializer)?;
 
         let system = ActorSystem::current();
-        // We will look up the aid in the table and return it to the caller if it exists otherwise
-        // it must be a remote aid.
-        // FIXME (Issue #67) Add error if the system_uuid is the same but the `Aid` is not
-        // found.
+        // We will look up the aid in the actor system and return a clone to the caller if found;
+        // otherwise the Aid must be a on a remote actor system.
         match system.find_aid_by_uuid(&serialized_form.uuid) {
             Some(aid) => Ok(aid.clone()),
             None => {
-                if let Some(sender) = system.remote_sender(&serialized_form.system_uuid) {
+                if serialized_form.system_uuid == system.uuid() {
+                    // This could happen if you get an Aid to an actor that has already been
+                    // stopped and then attempt to deserialize it.
+                    Err(serde::de::Error::custom(format!(
+                        "{:?}:{} system uuid matches but the uuid was not found.",
+                        serialized_form.name, serialized_form.uuid,
+                    )))
+                } else if let Some(sender) = system.remote_sender(&serialized_form.system_uuid) {
+                    // This serialized Aid is on another actor system so we will create a remote
+                    // sender for the Aid and return the result.
                     Ok(Aid {
                         data: Arc::new(AidData {
                             uuid: serialized_form.uuid,
@@ -164,8 +171,12 @@ impl<'de> Deserialize<'de> for Aid {
                         }),
                     })
                 } else {
-                    let msg = format!("Unknown actor system {:?}", serialized_form.system_uuid);
-                    Err(serde::de::Error::custom(msg))
+                    // This can happen if you get an Aid to deserialize that is on another actor
+                    // system but the other actor system has been disconnected.
+                    Err(serde::de::Error::custom(format!(
+                        "{:?}:{} Unable to find a connection for remote system.",
+                        serialized_form.name, serialized_form.uuid,
+                    )))
                 }
             }
         }
@@ -933,43 +944,57 @@ mod tests {
     /// FIXME (Issue #70) Return error when deserializing an Aid if a remote is not connected
     /// instead of panic.
     #[test]
-    fn test_actor_id_serialization() {
+    fn test_aid_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
-        let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid1 = system.spawn().with(0 as usize, simple_handler).unwrap();
         system.init_current(); // Required by Aid serialization.
 
         // This check forces the test to break here if someone changes the default.
-        match aid.data.sender {
+        match aid1.data.sender {
             ActorSender::Local { .. } => (),
             _ => panic!("The sender should be `Local`"),
         }
 
-        let serialized = bincode::serialize(&aid).unwrap();
-        let deserialized: Aid = bincode::deserialize(&serialized).unwrap();
+        let aid1_serialized = bincode::serialize(&aid1).unwrap();
+        let aid1_deserialized: Aid = bincode::deserialize(&aid1_serialized).unwrap();
 
-        // In this case the resulting aid should be identical to the serialized one because
+        // In this case the resulting Aid should be identical to the serialized one because
         // we have the same actor system in a thread-local.
-        assert!(Aid::ptr_eq(&aid, &deserialized));
+        assert!(Aid::ptr_eq(&aid1, &aid1_deserialized));
+
+        // Spawn an actor and serialize the value but then stop the actor and try and deserialize
+        // and we should get an error.
+        let aid2 = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid2_serialized = bincode::serialize(&aid2).unwrap();
+        system.stop_actor(&aid2);
+        let aid2_deserialized = bincode::deserialize::<Aid>(&aid2_serialized);
+        assert!(aid2_deserialized.is_err());
 
         // If we deserialize on another actor system in another thread it should be a remote aid.
         let handle = thread::spawn(move || {
             let system2 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
             system2.init_current();
             // Connect the systems so the remote channel can be used.
-            ActorSystem::connect_with_channels(system, system2);
+            ActorSystem::connect_with_channels(&system, &system2);
 
-            let deserialized: Aid = bincode::deserialize(&serialized).unwrap();
+            let deserialized: Aid = bincode::deserialize(&aid1_serialized).unwrap();
             match deserialized.data.sender {
                 ActorSender::Remote { .. } => {
-                    assert_eq!(aid.uuid(), deserialized.uuid());
-                    assert_eq!(aid.system_uuid(), deserialized.system_uuid());
-                    assert_eq!(aid.name(), deserialized.name());
+                    assert_eq!(aid1.uuid(), deserialized.uuid());
+                    assert_eq!(aid1.system_uuid(), deserialized.system_uuid());
+                    assert_eq!(aid1.name(), deserialized.name());
                 }
                 _ => panic!(
                     "The sender should be `Remote` but was {:?}",
-                    aid.data.sender
+                    aid1.data.sender
                 ),
             }
+
+            // Disconnecting the remote then attempting to deserialize the Aid should result in a
+            // deserialization error.
+            system2.disconnect(aid1.system_uuid()).unwrap();
+            let aid1_deserialized = bincode::deserialize::<Aid>(&aid1_serialized);
+            assert!(aid1_deserialized.is_err());
         });
 
         handle.join().unwrap();
@@ -977,7 +1002,7 @@ mod tests {
 
     /// Tests that an Aid can be used as a message alone and inside another value.
     #[test]
-    fn test_actor_id_as_message() {
+    fn test_aid_as_message() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 

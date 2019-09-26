@@ -503,16 +503,25 @@ impl ActorSystem {
         uuid
     }
 
+    /// Disconnects this actor system from the remote actor system with the given UUID.
+    /// FIXME Connectivity management needs a lot of work and testing.
+    pub fn disconnect(&self, system_uuid: Uuid) -> Result<(), AxiomError> {
+        self.data.remotes.remove(&system_uuid);
+        Ok(())
+    }
+
     /// Connects two actor systems using two channels directly. This can be used as a utility
     /// in testing or to link two actor systems directly within the same process.
-    pub fn connect_with_channels(system1: ActorSystem, system2: ActorSystem) {
+    pub fn connect_with_channels(system1: &ActorSystem, system2: &ActorSystem) {
         let (tx1, rx1) = secc::create::<WireMessage>(32, system1.data.config.thread_wait_time);
         let (tx2, rx2) = secc::create::<WireMessage>(32, system2.data.config.thread_wait_time);
 
         // We will do this in 2 threads because one connect would block waiting on a message
         // from the other actor system, causing a deadlock.
-        let h1 = thread::spawn(move || system1.connect(tx1, rx2));
-        let h2 = thread::spawn(move || system2.connect(tx2, rx1));
+        let system1_clone = system1.clone();
+        let system2_clone = system2.clone();
+        let h1 = thread::spawn(move || system1_clone.connect(tx1, rx2));
+        let h2 = thread::spawn(move || system2_clone.connect(tx2, rx1));
 
         // Wait for the completion of the connection.
         h1.join().unwrap();
@@ -920,7 +929,7 @@ mod tests {
     fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {
         let system1 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         let system2 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
-        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
+        ActorSystem::connect_with_channels(&system1, &system2);
         (system1, system2)
     }
 
@@ -1126,7 +1135,7 @@ mod tests {
     fn test_connect_with_channels() {
         let system1 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         let system2 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
-        ActorSystem::connect_with_channels(system1.clone(), system2.clone());
+        ActorSystem::connect_with_channels(&system1, &system2);
         {
             system1
                 .data
