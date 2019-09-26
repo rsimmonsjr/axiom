@@ -101,7 +101,7 @@ pub struct ActorSystemConfig {
     pub send_timeout: Duration,
     /// The size of the thread pool which governs how many worker threads there are in the system.
     /// The number of threads should be carefully considered to have sufficient concurrency but
-    /// not overschedule the CPU on the target hardware. The default value is 4 * the number of
+    /// not over-schedule the CPU on the target hardware. The default value is 4 * the number of
     /// logical CPUs.
     pub threads_size: u16,
     /// The threshold at which the dispatcher thread will warn the user that the message took too
@@ -124,7 +124,7 @@ pub struct ActorSystemConfig {
     pub work_channel_size: u16,
     /// The maximum amount of time to wait to be able to schedule an actor for work before
     /// reporting an error to the user. If this is timing out then the user should increase
-    /// the work channel size to accomodate the flow. The default is 1 millisecond.
+    /// the work channel size to accommodate the flow. The default is 1 millisecond.
     pub work_channel_timeout: Duration,
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
@@ -547,18 +547,28 @@ impl ActorSystem {
 
     /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
     /// a signaling mechanism. This function will block until all actor system threads have
-    /// stopped or the timeout has expired. This function will return true if the system
-    /// shutdown without the timeout expiring and false if the system failed to shutdown before
-    /// the timeout expired or an error occurred.
-    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> bool {
+    /// stopped or the timeout has expired. The function returns an `Ok` with the Duration
+    /// that it waited or an `Err` if the system didn't shut down in time or something else went
+    /// wrong.
+    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> Result<Duration, AxiomError> {
+        let start = Instant::now();
         let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
         let guard = mutex.lock().unwrap();
         match condvar.wait_timeout(guard, timeout) {
-            Ok((_, timeout)) => !timeout.timed_out(),
-            Err(err) => {
-                error!("Error while waiting for system to shutdown: {}", err);
-                false
+            Ok((_, result)) => {
+                if result.timed_out() {
+                    Err(AxiomError::ShutdownError(format!(
+                        "Timed Out after: {:?}",
+                        timeout
+                    )))
+                } else {
+                    Ok(Instant::elapsed(&start))
+                }
             }
+            Err(e) => Err(AxiomError::ShutdownError(format!(
+                "Error occurred: {:?}",
+                e
+            ))),
         }
     }
 
@@ -870,15 +880,35 @@ mod tests {
         let timeout = Duration::from_millis(2000);
 
         let h1 = thread::spawn(move || {
-            assert_eq!(true, system1.await_shutdown_with_timeout(timeout));
+            system1.await_shutdown_with_timeout(timeout).unwrap();
         });
 
         let h2 = thread::spawn(move || {
-            assert_eq!(true, system2.await_shutdown_with_timeout(timeout));
+            system2.await_shutdown_with_timeout(timeout).unwrap();
         });
 
         h1.join().unwrap();
         h2.join().unwrap();
+    }
+
+    /// Test that verifies that the actor system shutdown mechanisms that wait for a specific
+    /// timeout work properly.
+    #[test]
+    fn test_shutdown_await_timeout() {
+        use std::time::Duration;
+
+        let system = ActorSystem::create(ActorSystemConfig::default());
+        system
+            .spawn()
+            .with((), |_state: &mut (), context: &Context, _: &Message| {
+                thread::sleep(Duration::from_millis(5));
+                context.system.trigger_shutdown();
+                Ok(Status::Done)
+            })
+            .unwrap();
+        system
+            .await_shutdown_with_timeout(Duration::from_millis(1000))
+            .unwrap();
     }
 
     /// This test verifies that an actor can be found by its uuid.
@@ -993,7 +1023,7 @@ mod tests {
         let aid2 = system.spawn().name("B").with(0, simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
-        aid1.send_after(Message::new(11), Duration::from_millis(100))
+        aid1.send_after(Message::new(11), Duration::from_millis(200))
             .unwrap();
         thread::sleep(Duration::from_millis(5));
 
@@ -1004,11 +1034,13 @@ mod tests {
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(1, aid2.received().unwrap());
 
-        thread::sleep(Duration::from_millis(46));
+        // We overshoot the timing on the asserts because when the tests are run the CPU is
+        // busy and the timing can be difficult. This happens sometimes running tests.
+        thread::sleep(Duration::from_millis(55));
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(160));
         assert_eq!(2, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 

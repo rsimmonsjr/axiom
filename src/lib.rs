@@ -270,6 +270,11 @@ pub enum AxiomError {
     /// will be sent to monitoring actors and can tell the monitoring actors the nature of the
     /// error that occurred.
     ActorError(Option<String>),
+
+    /// Returned when attempting to call `ActorSystem::await_shutdown_with_timeout` and the
+    /// timeout expires while wairing for the actor system to shutdown or some other error occurrs
+    /// while awaiting the shutdown.
+    ShutdownError(String),
 }
 
 impl std::fmt::Display for AxiomError {

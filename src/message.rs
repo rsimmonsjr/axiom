@@ -122,8 +122,6 @@ impl Message {
     /// let arc = Arc::new(11);
     /// let msg = Message::new(arc);
     /// ```
-    ///
-    /// FIXME (Issue #64) Support this in `Aid::send_new()` and `Aid::try_send_new()`.
     pub fn from_arc<T>(value: Arc<T>) -> Message
     where
         T: 'static + ActorMessage,
