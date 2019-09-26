@@ -226,6 +226,7 @@
 pub mod actors;
 pub mod message;
 pub mod system;
+pub mod tcp_cluster;
 
 pub use crate::actors::Aid;
 pub use crate::actors::Context;
@@ -234,6 +235,7 @@ pub use crate::message::Message;
 pub use crate::system::ActorSystem;
 pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
+pub use crate::system::WireMessage;
 
 use serde::{Deserialize, Serialize};
 
