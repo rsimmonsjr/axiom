@@ -137,6 +137,56 @@ pub struct ActorSystemConfig {
     pub thread_wait_time: Duration,
 }
 
+impl ActorSystemConfig {
+    /// Return a new config with the changed `message_channel_size`.
+    pub fn message_channel_size(mut self, value: u16) -> Self {
+        self.message_channel_size = value;
+        self
+    }
+
+    /// Return a new config with the changed `send_timeout`.
+    pub fn send_timeout(mut self, value: Duration) -> Self {
+        self.send_timeout = value;
+        self
+    }
+
+    /// Return a new config with the changed `threads_size`.
+    pub fn threads_size(mut self, value: u16) -> Self {
+        self.threads_size = value;
+        self
+    }
+
+    /// Return a new config with the changed `warn_threshold`.
+    pub fn warn_threshold(mut self, value: Duration) -> Self {
+        self.warn_threshold = value;
+        self
+    }
+
+    /// Return a new config with the changed `time_slice`.
+    pub fn time_slice(mut self, value: Duration) -> Self {
+        self.time_slice = value;
+        self
+    }
+
+    /// Return a new config with the changed `work_channel_size`.
+    pub fn work_channel_size(mut self, value: u16) -> Self {
+        self.work_channel_size = value;
+        self
+    }
+
+    /// Return a new config with the changed `work_channel_timeout`.
+    pub fn work_channel_timeout(mut self, value: Duration) -> Self {
+        self.work_channel_timeout = value;
+        self
+    }
+
+    /// Return a new config with the changed `thread_wait_time`.
+    pub fn thread_wait_time(mut self, value: Duration) -> Self {
+        self.thread_wait_time = value;
+        self
+    }
+}
+
 impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {

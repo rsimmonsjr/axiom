@@ -330,7 +330,7 @@ mod tests {
     fn test_simplest_actor() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
