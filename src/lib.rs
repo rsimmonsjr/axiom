@@ -17,6 +17,8 @@
 //!   * A lot of breaking changes have been introduced in an effort to keep them all in one release
 //!   so that the API can stabilize. Please see examples and other sources for help in integrating
 //!   all of the changes listed below.
+//!   * BREAKING CHANGE: `ActorId` has been renamed to `Aid` to facilitate communication and lower
+//!   confusion between the `uuid` field in the `Aid` and the `Aid` itself.
 //!   * BREAKING CHANGE: `Status::Processed` has been renamed to `Status::Done`.
 //!   * BREAKING CHANGE: `Status::Skipped` has been renamed to `Status::Skip`.
 //!   * BREAKING CHANGE: `Status::ResetSkip` has been renamed to `Status::Reset`.
