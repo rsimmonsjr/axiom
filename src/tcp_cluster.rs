@@ -17,6 +17,7 @@ use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -38,8 +39,8 @@ struct ConnectionData {
     pub rx_handle: JoinHandle<()>,
 }
 
-/// Data for the [`ClusterMgr`].
-struct ClusterMgrData {
+/// Data for the [`TcpClusterMgr`].
+struct TcpClusterMgrData {
     /// Address that this manager is listening for connections on.
     listen_address: SocketAddr,
     /// Actor System that this manager is attached to.
@@ -53,16 +54,18 @@ struct ClusterMgrData {
 }
 
 #[derive(Clone)]
-pub struct ClusterMgr {
-    data: Arc<ClusterMgrData>,
+pub struct TcpClusterMgr {
+    data: Arc<TcpClusterMgrData>,
 }
 
-impl ClusterMgr {
-    pub fn create(system: ActorSystem, address: SocketAddr) -> ClusterMgr {
-        let result = ClusterMgr {
-            data: Arc::new(ClusterMgrData {
+impl TcpClusterMgr {
+    /// Creates a new manager attached to the given actor system that manages connections to other
+    /// [`TcpClusterMgr`]s.
+    pub fn create(system: &ActorSystem, address: SocketAddr) -> TcpClusterMgr {
+        let result = TcpClusterMgr {
+            data: Arc::new(TcpClusterMgrData {
                 listen_address: address,
-                system,
+                system: system.clone(),
                 listener: RwLock::new(None),
                 connections: RwLock::new(HashMap::new()),
                 running: AtomicBool::new(true),
@@ -70,7 +73,18 @@ impl ClusterMgr {
         };
 
         {
-            let join_handle = result.start_tcp_listener();
+            // We will create a condvar so we wait for the listener to be up before the function
+            // returning to the caller of this function. Note that we lock before starting the
+            // listener so that we dont miss a notify and loop endlessly.
+            let pair = Arc::new((Mutex::new(false), Condvar::new()));
+            let (mutex, condvar) = &*pair;
+            let mut started = mutex.lock().unwrap();
+            let join_handle = result.start_tcp_listener(pair.clone());
+            while !*started {
+                started = condvar.wait(started).unwrap();
+            }
+
+            // We store the handle for the thread for later shutdown reasons.
             let mut handle = result.data.listener.write().unwrap();
             *handle = Some(join_handle);
         }
@@ -78,20 +92,26 @@ impl ClusterMgr {
         result
     }
 
-    // Starts a TCP listener that listens for incomming connections from other [`ClusterMgr`]s
+    // Starts a TCP listener that listens for incomming connections from other [`TcpClusterMgr`]s
     // and then creates a remote channel thread with the other actor system.
-    pub fn start_tcp_listener(&self) -> JoinHandle<()> {
+    fn start_tcp_listener(&self, pair: Arc<(Mutex<bool>, Condvar)>) -> JoinHandle<()> {
         let system = self.data.system.clone();
         let address = self.data.listen_address.clone();
         let manager = self.clone();
         thread::spawn(move || {
             system.init_current();
             let sys_uuid = system.uuid();
-
-            // FIXME Allow port to be configurable
             let listener = TcpListener::bind(address).unwrap();
             info!("{}: Listening for connections on {}.", sys_uuid, address);
 
+            // Notify the cluster manager that the listener is ready.
+            let (mutex, condvar) = &*pair;
+            let mut started = mutex.lock().unwrap();
+            *started = true;
+            condvar.notify_all();
+            drop(started);
+
+            // Starts a loop waiting for connections from other managers.
             // FIXME Create a Shutdown Mechanism
             while manager.data.running.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -110,7 +130,7 @@ impl ClusterMgr {
         })
     }
 
-    /// Connects to another [`ClusterMgr`] with TCP at the given socket address.
+    /// Connects to another [`TcpClusterMgr`] with TCP at the given socket address.
     pub fn connect(&self, address: SocketAddr, timeout: Duration) -> std::io::Result<()> {
         // FIXME Error handling needs to be improved.
         let stream = TcpStream::connect_timeout(&address, timeout)?;
@@ -124,9 +144,11 @@ impl ClusterMgr {
 
         // FIXME: Allow channel size and poll to be configurable.
         let (sender, receiver) = secc::create::<WireMessage>(32, Duration::from_millis(10));
+        let system_uuid = self.data.system.connect(&sender, &receiver);
+
+        // Create the threads that manage the connections between the two systems.
         let tx_handle = self.start_tx_thread(arc_stream.clone(), receiver.clone());
         let rx_handle = self.start_rx_thread(arc_stream.clone(), sender.clone());
-        let system_uuid = self.data.system.connect(sender.clone(), receiver.clone());
 
         let data = ConnectionData {
             system_uuid,
@@ -209,13 +231,13 @@ mod tests {
 
         let socket_addr1 = SocketAddr::from(([127, 0, 0, 1], 7717));
         let system1 = ActorSystem::create(ActorSystemConfig::default());
-        let cluster_mgr1 = ClusterMgr::create(system1, socket_addr1);
+        let cluster_mgr1 = TcpClusterMgr::create(&system1, socket_addr1);
 
         let socket_addr2 = SocketAddr::from(([127, 0, 0, 1], 7727));
         let system2 = ActorSystem::create(ActorSystemConfig::default());
-        let _cluster_mgr2 = ClusterMgr::create(system2, socket_addr2);
+        let _cluster_mgr2 = TcpClusterMgr::create(&system2, socket_addr2);
 
-        thread::sleep(Duration::from_millis(5000));
+        // thread::sleep(Duration::from_millis(5000));
         cluster_mgr1
             .connect(socket_addr2, Duration::from_millis(2000))
             .unwrap();

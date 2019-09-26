@@ -452,8 +452,8 @@ impl ActorSystem {
     /// actor system will announce itself to the remote system with a [`WireMessage::Hello`].
     pub fn connect(
         &self,
-        sender: SeccSender<WireMessage>,
-        receiver: SeccReceiver<WireMessage>,
+        sender: &SeccSender<WireMessage>,
+        receiver: &SeccReceiver<WireMessage>,
     ) -> Uuid {
         // Announce ourselves to the other system and get their info.
         let hello = WireMessage::Hello {
@@ -492,8 +492,8 @@ impl ActorSystem {
         // Save the info and thread to the remotes map.
         let info = RemoteInfo {
             system_uuid: system_actor_aid.system_uuid().clone(),
-            sender,
-            receiver: receiver,
+            sender: sender.clone(),
+            receiver: receiver.clone(),
             _handle: handle,
             system_actor_aid,
         };
@@ -520,8 +520,8 @@ impl ActorSystem {
         // from the other actor system, causing a deadlock.
         let system1_clone = system1.clone();
         let system2_clone = system2.clone();
-        let h1 = thread::spawn(move || system1_clone.connect(tx1, rx2));
-        let h2 = thread::spawn(move || system2_clone.connect(tx2, rx1));
+        let h1 = thread::spawn(move || system1_clone.connect(&tx1, &rx2));
+        let h2 = thread::spawn(move || system2_clone.connect(&tx2, &rx1));
 
         // Wait for the completion of the connection.
         h1.join().unwrap();
@@ -613,21 +613,26 @@ impl ActorSystem {
         let start = Instant::now();
         let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
         let guard = mutex.lock().unwrap();
-        match condvar.wait_timeout(guard, timeout) {
-            Ok((_, result)) => {
-                if result.timed_out() {
-                    Err(AxiomError::ShutdownError(format!(
-                        "Timed Out after: {:?}",
-                        timeout
-                    )))
-                } else {
-                    Ok(Instant::elapsed(&start))
+        // Since it's possible the system is already shutdown, we check first.
+        if *guard == 0 {
+            Ok(Instant::elapsed(&start))
+        } else {
+            match condvar.wait_timeout(guard, timeout) {
+                Ok((_, result)) => {
+                    if result.timed_out() {
+                        Err(AxiomError::ShutdownError(format!(
+                            "Timed Out after: {:?}",
+                            timeout
+                        )))
+                    } else {
+                        Ok(Instant::elapsed(&start))
+                    }
                 }
+                Err(e) => Err(AxiomError::ShutdownError(format!(
+                    "Error occurred: {:?}",
+                    e
+                ))),
             }
-            Err(e) => Err(AxiomError::ShutdownError(format!(
-                "Error occurred: {:?}",
-                e
-            ))),
         }
     }
 
@@ -936,14 +941,14 @@ mod tests {
     /// Helper to wait for 2 actor systems to shutdown or panic if they don't do so within
     /// 2000 milliseconds.
     fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
-        let timeout = Duration::from_millis(2000);
+        let timeout = Duration::from_millis(1000);
 
         let h1 = thread::spawn(move || {
-            system1.await_shutdown_with_timeout(timeout).unwrap();
+            assert!(system1.await_shutdown_with_timeout(timeout).is_ok(),);
         });
 
         let h2 = thread::spawn(move || {
-            system2.await_shutdown_with_timeout(timeout).unwrap();
+            assert!(system2.await_shutdown_with_timeout(timeout).is_ok(),);
         });
 
         h1.join().unwrap();
@@ -965,9 +970,14 @@ mod tests {
                 Ok(Status::Done)
             })
             .unwrap();
-        system
+        assert!(system
             .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .unwrap();
+            .is_ok(),);
+
+        // Validate that if the system is already shutdown the method doesn't hang.
+        assert!(system
+            .await_shutdown_with_timeout(Duration::from_millis(1000))
+            .is_ok(),);
     }
 
     /// This test verifies that an actor can be found by its uuid.
