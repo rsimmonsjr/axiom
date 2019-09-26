@@ -217,18 +217,31 @@ impl Aid {
     /// ```
     /// use axiom::*;
     /// use std::sync::Arc;
+    /// use std::time::Duration;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
-    /// let aid = system.spawn().with(
-    ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Done),
-    ///  ).unwrap();
+    /// let aid = system
+    ///     .spawn()
+    ///     .with(
+    ///         0 as usize,
+    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///             if let Some(_) = message.content_as::<i32>() {
+    ///                 context.system.trigger_shutdown();
+    ///             }
+    ///             Ok(Status::Done)
+    ///        },
+    ///     )
+    ///     .unwrap();
     ///
     /// match aid.send(Message::new(11)) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
+    ///
+    /// system
+    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
+    ///     .unwrap();
     /// ```
     pub fn send(&self, message: Message) -> Result<(), AxiomError> {
         match &self.data.sender {
@@ -265,28 +278,80 @@ impl Aid {
         }
     }
 
+    /// Shortcut for calling `send(Message::from_arc(arc))` This method will internally wrap the
+    /// `Arc` passed into a `Message` and try to send it. Note that using this method is much
+    /// more efficient than `send_new` if you want to send an `Arc` that you already have.
+    /// The `Arc` sent will be transferred to the ownership of the `Aid`.
+    ///
+    /// use axiom::*;
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    ///
+    /// let aid = system
+    ///     .spawn()
+    ///     .with(
+    ///         0 as usize,
+    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///             if let Some(_) = message.content_as::<i32>() {
+    ///                 context.system.trigger_shutdown();
+    ///             }
+    ///             Ok(Status::Done)
+    ///        },
+    ///     )
+    ///     .unwrap();
+    ///
+    /// let arc = Arc::new(11);
+    /// match aid.send_arc(arc.clone()) {
+    ///     Ok(_) => println!("OK Then!"),
+    ///     Err(e) => println!("Ooops {:?}", e),
+    /// }
+    ///
+    /// system
+    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
+    ///     .unwrap();
+    /// ```
+    pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AxiomError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.send(Message::from_arc(value))
+    }
+
     /// Shortcut for calling `send(Message::new(value))` This method will internally wrap
     /// whatever it is passed into a `Message` and try to send it. This method would not be
     /// appropriate if you want to re-send a message as it would wrap the message again with the
     /// same result as if the the code called `aid.send(Message::new(Message::new(value)))`.
     /// If the code wishes to resend a message it should just call just call `send(msg)`.
     ///
-    /// # Examples
-    /// ```
     /// use axiom::*;
     /// use std::sync::Arc;
+    /// use std::time::Duration;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
-    /// let aid = system.spawn().with(
-    ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Done),
-    ///  ).unwrap();
+    /// let aid = system
+    ///     .spawn()
+    ///     .with(
+    ///         0 as usize,
+    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///             if let Some(_) = message.content_as::<i32>() {
+    ///                 context.system.trigger_shutdown();
+    ///             }
+    ///             Ok(Status::Done)
+    ///        },
+    ///     )
+    ///     .unwrap();
     ///
     /// match aid.send_new(11) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
+    ///
+    /// system
+    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
+    ///     .unwrap();
     /// ```
     pub fn send_new<T>(&self, value: T) -> Result<(), AxiomError>
     where
@@ -302,6 +367,37 @@ impl Aid {
     /// timing should not be depended on.  This method will return an `Err` if the actor has been
     /// stopped or `Ok` if the message was scheduled to be sent. If the actor is stopped before
     /// the duration passes then the scheduled message will never get to the actor.
+    ///
+    /// # Examples
+    /// ```
+    /// use axiom::*;
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    ///
+    /// let aid = system
+    ///     .spawn()
+    ///     .with(
+    ///         0 as usize,
+    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///             if let Some(_) = message.content_as::<i32>() {
+    ///                 context.system.trigger_shutdown();
+    ///             }
+    ///             Ok(Status::Done)
+    ///        },
+    ///     )
+    ///     .unwrap();
+    ///
+    /// match aid.send_after(Message::new(11), Duration::from_millis(1)) {
+    ///     Ok(_) => println!("OK Then!"),
+    ///     Err(e) => println!("Ooops {:?}", e),
+    /// }
+    ///
+    /// system
+    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
+    ///     .unwrap();
+    /// ```
     pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
         match &self.data.sender {
             ActorSender::Local {
@@ -328,6 +424,49 @@ impl Aid {
         }
     }
 
+    /// Shortcut for calling `send_after(Message::from_arc(arc))` This method will internally
+    /// wrap the `Arc` passed into a `Message` and try to send it. Note that using this method is
+    /// much more efficient than `send_new_after` if you want to send an `Arc` that you already
+    /// have.
+    ///
+    /// # Examples
+    /// ```
+    /// use axiom::*;
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    ///
+    /// let aid = system
+    ///     .spawn()
+    ///     .with(
+    ///         0 as usize,
+    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///             if let Some(_) = message.content_as::<i32>() {
+    ///                 context.system.trigger_shutdown();
+    ///             }
+    ///             Ok(Status::Done)
+    ///        },
+    ///     )
+    ///     .unwrap();
+    ///
+    /// let arc = Arc::new(11);
+    /// match aid.send_arc_after(arc.clone(), Duration::from_millis(1)) {
+    ///     Ok(_) => println!("OK Then!"),
+    ///     Err(e) => println!("Ooops {:?}", e),
+    /// }
+    ///
+    /// system
+    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
+    ///     .unwrap();
+    /// ```
+    pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AxiomError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.send_after(Message::from_arc(value), duration)
+    }
+
     /// Shortcut for calling `send_after(Message::new(value))` This method will internally wrap
     /// whatever it is passed into a `Message` and try to send it. This method would not be
     /// appropriate if you want to re-send a message as it would wrap the message again with the
@@ -342,15 +481,27 @@ impl Aid {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default());
     ///
-    /// let aid = system.spawn().with(
-    ///     0 as usize,
-    ///     |_state: &mut usize, _context: &Context, message: &Message| Ok(Status::Done),
-    ///  ).unwrap();
+    /// let aid = system
+    ///     .spawn()
+    ///     .with(
+    ///         0 as usize,
+    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///             if let Some(_) = message.content_as::<i32>() {
+    ///                 context.system.trigger_shutdown();
+    ///             }
+    ///             Ok(Status::Done)
+    ///        },
+    ///     )
+    ///     .unwrap();
     ///
     /// match aid.send_new_after(11, Duration::from_millis(1)) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
+    ///
+    /// system
+    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
+    ///     .unwrap();
     /// ```
     pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AxiomError>
     where
@@ -709,6 +860,35 @@ mod tests {
     use super::*;
     use crate::tests::*;
     use std::thread;
+
+    #[test]
+    fn test_send_examples() {
+        use std::time::Duration;
+
+        let system = ActorSystem::create(ActorSystemConfig::default());
+
+        let aid = system
+            .spawn()
+            .with(
+                0 as usize,
+                move |_state: &mut usize, context: &Context, message: &Message| {
+                    if let Some(_) = message.content_as::<i32>() {
+                        context.system.trigger_shutdown();
+                    }
+                    Ok(Status::Done)
+                },
+            )
+            .unwrap();
+
+        match aid.send(Message::new(11)) {
+            Ok(_) => println!("OK Then!"),
+            Err(e) => println!("Ooops {:?}", e),
+        }
+
+        system
+            .await_shutdown_with_timeout(Duration::from_millis(1000))
+            .unwrap();
+    }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
     /// unnamed actors.
