@@ -45,7 +45,7 @@ pub enum Status {
     Reset,
 
     /// Returned from an actor when the actor wants the system to stop the actor. When this status
-    /// is returned the actor's [`ActorId`] will no longer send any messages and the actor
+    /// is returned the actor's [`Aid`] will no longer send any messages and the actor
     /// instance itself will be removed from the actors table in the [`ActorSystem`]. The user is
     /// advised to do any cleanup needed before returning [`Status::Stop`].
     Stop,
@@ -53,7 +53,7 @@ pub enum Status {
 
 /// An enum that holds a sender for an actor.
 ///
-/// An [`ActorId`] uses the sender to send messages to the destination actor. Messages that are
+/// An [`Aid`] uses the sender to send messages to the destination actor. Messages that are
 /// sent to actors running on this actor system are wrapped in an Arc for efficiency.
 enum ActorSender {
     /// A sender used for sending messages to actors running on the same actor system.
@@ -86,51 +86,51 @@ impl std::fmt::Debug for ActorSender {
     }
 }
 
-/// The inner data of an [`ActorId`].
+/// The inner data of an [`Aid`].
 ///
 /// This is kept separate to make serialization possible without duplicating all of the data
-/// associated with the [`ActorId`]. It also makes it easier when cloning and referring to an
-/// `aid` as the user doesnt have to put `Arc<ActorId>` all over thier code.
-struct ActorIdData {
-    /// See [`ActorId::uuid()`]
+/// associated with the [`Aid`]. It also makes it easier when cloning and referring to an
+/// `aid` as the user doesnt have to put `Arc<Aid>` all over thier code.
+struct AidData {
+    /// See [`Aid::uuid()`]
     uuid: Uuid,
-    /// See [`ActorId::system_uuid()`]
+    /// See [`Aid::system_uuid()`]
     system_uuid: Uuid,
-    /// See [`ActorId::name()`]
+    /// See [`Aid::name()`]
     name: Option<String>,
     /// The handle to the sender side for the actor's message channel.
     sender: ActorSender,
 }
 
-/// A helper type to make [`ActorId`] serialization cleaner.
+/// A helper type to make [`Aid`] serialization cleaner.
 #[derive(Serialize, Deserialize)]
-struct ActorIdSerializedForm {
+struct AidSerializedForm {
     uuid: Uuid,
     system_uuid: Uuid,
     name: Option<String>,
 }
 
-/// Encapsulates an ID to an actor and is often referred to as an `aid`.
+/// Encapsulates an Actor ID and is used to send messages to the actor.
 ///
 /// This is a unique reference to the actor within the entire cluster and can be used to send
-/// messages to the actor regardless of location. The [`ActorId`] does the heavy lifting of
+/// messages to the actor regardless of location. The [`Aid`] does the heavy lifting of
 /// deciding where the actor is and sending the message. However it is important that the user at
 /// least has some notion of where the actor is for developing an efficient actor architecture.
 /// This `aid` can also be serialized to a remote system and then back to the system hosting the
-/// actor without issue. Often `ActorId`s are passed around an actor system so this is a common
+/// actor without issue. Often `Aid`s are passed around an actor system so this is a common
 /// use case.
 #[derive(Clone)]
-pub struct ActorId {
-    /// Holds the actual data for the [`ActorId`].
-    data: Arc<ActorIdData>,
+pub struct Aid {
+    /// Holds the actual data for the [`Aid`].
+    data: Arc<AidData>,
 }
 
-impl Serialize for ActorId {
+impl Serialize for Aid {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let serialized_form = ActorIdSerializedForm {
+        let serialized_form = AidSerializedForm {
             uuid: self.uuid(),
             system_uuid: self.system_uuid(),
             name: self.name(),
@@ -139,24 +139,24 @@ impl Serialize for ActorId {
     }
 }
 
-impl<'de> Deserialize<'de> for ActorId {
+impl<'de> Deserialize<'de> for Aid {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let serialized_form = ActorIdSerializedForm::deserialize(deserializer)?;
+        let serialized_form = AidSerializedForm::deserialize(deserializer)?;
 
         let system = ActorSystem::current();
         // We will look up the aid in the table and return it to the caller if it exists otherwise
         // it must be a remote aid.
-        // FIXME (Issue #67) Add error if the system_uuid is the same but the `ActorId` is not
+        // FIXME (Issue #67) Add error if the system_uuid is the same but the `Aid` is not
         // found.
         match system.find_aid_by_uuid(&serialized_form.uuid) {
             Some(aid) => Ok(aid.clone()),
             None => {
                 if let Some(sender) = system.remote_sender(&serialized_form.system_uuid) {
-                    Ok(ActorId {
-                        data: Arc::new(ActorIdData {
+                    Ok(Aid {
+                        data: Arc::new(AidData {
                             uuid: serialized_form.uuid,
                             system_uuid: serialized_form.system_uuid,
                             name: serialized_form.name,
@@ -172,15 +172,15 @@ impl<'de> Deserialize<'de> for ActorId {
     }
 }
 
-impl std::cmp::PartialEq for ActorId {
+impl std::cmp::PartialEq for Aid {
     fn eq(&self, other: &Self) -> bool {
         self.data.uuid == other.data.uuid && self.data.system_uuid == other.data.system_uuid
     }
 }
 
-impl std::cmp::Eq for ActorId {}
+impl std::cmp::Eq for Aid {}
 
-impl std::cmp::PartialOrd for ActorId {
+impl std::cmp::PartialOrd for Aid {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         use std::cmp::Ordering;
         // Order by name, then by system, then by uuid.  Also, sort `None` names before others.
@@ -200,15 +200,15 @@ impl std::cmp::PartialOrd for ActorId {
     }
 }
 
-impl std::cmp::Ord for ActorId {
+impl std::cmp::Ord for Aid {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.partial_cmp(other)
-            .expect("ActorId::partial_cmp() returned None; can't happen")
+            .expect("Aid::partial_cmp() returned None; can't happen")
     }
 }
 
-impl ActorId {
-    /// Attempts to send a message to the actor with the given [`ActorId`] and returns
+impl Aid {
+    /// Attempts to send a message to the actor with the given [`Aid`] and returns
     /// `std::Result::Ok` when the send was successful or a `std::Result::Err<AxiomError>`
     /// if something went wrong with the send. Note that if a user just calls `send(msg).unwrap()`,
     /// a panic could take down the dispatcher thread and thus eventually hang the process.
@@ -359,7 +359,7 @@ impl ActorId {
         self.send_after(Message::new(value), duration)
     }
 
-    /// The unique UUID for this actor within the entire cluster. The UUID for an [`ActorId`]
+    /// The unique UUID for this actor within the entire cluster. The UUID for an [`Aid`]
     /// is generated with a v4 random UUID so the chances of collision are not worth considering.
     #[inline]
     pub fn uuid(&self) -> Uuid {
@@ -381,7 +381,7 @@ impl ActorId {
         self.data.name.clone()
     }
 
-    /// Returns the name assigned to the ActorId if it is not a `None` and otherwise returns the
+    /// Returns the name assigned to the Aid if it is not a `None` and otherwise returns the
     /// uuid of the actor as a string.
     #[inline]
     pub fn name_or_uuid(&self) -> String {
@@ -408,7 +408,7 @@ impl ActorId {
     pub fn sent(&self) -> Result<usize, AxiomError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.sent()),
-            _ => Err(AxiomError::ActorIdNotLocal),
+            _ => Err(AxiomError::AidNotLocal),
         }
     }
 
@@ -417,12 +417,12 @@ impl ActorId {
     pub fn received(&self) -> Result<usize, AxiomError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.received()),
-            _ => Err(AxiomError::ActorIdNotLocal),
+            _ => Err(AxiomError::AidNotLocal),
         }
     }
 
-    /// Marks the actor referenced by the [`ActorId`] as stopped and puts mechanisms in place to
-    /// cause no more messages to be sent to the actor. Note that once stopped, an [`ActorId`] can
+    /// Marks the actor referenced by the [`Aid`] as stopped and puts mechanisms in place to
+    /// cause no more messages to be sent to the actor. Note that once stopped, an [`Aid`] can
     /// never be started again. Note that this is `pub(crate)` because the user should be sending
     /// `SystemMsg::Stop` to actors or, at worst, calling `ActorSystem::stop()` to stop an actor.
     pub(crate) fn stop(&self) -> Result<(), AxiomError> {
@@ -431,21 +431,21 @@ impl ActorId {
                 stopped.fetch_or(true, Ordering::AcqRel);
                 Ok(())
             }
-            _ => Err(AxiomError::ActorIdNotLocal),
+            _ => Err(AxiomError::AidNotLocal),
         }
     }
 
     /// Checks to see if the left and right aid actually point at the exact same actor.
-    pub fn ptr_eq(left: &ActorId, right: &ActorId) -> bool {
+    pub fn ptr_eq(left: &Aid, right: &Aid) -> bool {
         Arc::ptr_eq(&left.data, &right.data)
     }
 }
 
-impl std::fmt::Debug for ActorId {
+impl std::fmt::Debug for Aid {
     fn fmt(&self, formatter: &'_ mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             formatter,
-            "ActorId{{id: {}, system_uuid: {}, name: {:?}, is_local: {}}}",
+            "Aid{{id: {}, system_uuid: {}, name: {:?}, is_local: {}}}",
             self.data.uuid.to_string(),
             self.data.system_uuid.to_string(),
             self.data.name,
@@ -454,7 +454,7 @@ impl std::fmt::Debug for ActorId {
     }
 }
 
-impl std::fmt::Display for ActorId {
+impl std::fmt::Display for Aid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data.name {
             Some(name) => write!(f, "{}:{}", name, self.data.uuid),
@@ -463,7 +463,7 @@ impl std::fmt::Display for ActorId {
     }
 }
 
-impl Hash for ActorId {
+impl Hash for Aid {
     fn hash<H: Hasher>(&self, state: &'_ mut H) {
         self.data.uuid.hash(state);
         self.data.system_uuid.hash(state);
@@ -474,7 +474,7 @@ impl Hash for ActorId {
 /// actor system to the implementor of an actor's processor.
 #[derive(Debug)]
 pub struct Context {
-    pub aid: ActorId,
+    pub aid: Aid,
     pub system: ActorSystem,
 }
 
@@ -496,7 +496,7 @@ impl std::fmt::Display for Context {
 /// determine the status of an actor. If the actor returns an `AxiomError` then it will be stopped
 /// as if the actor had returned `Stop`. The processor takes three arguments:
 /// * `state`   - A mutable reference to the current state of the actor.
-/// * `aid`     - The reference to the [`ActorId`] for this actor.
+/// * `aid`     - The reference to the [`Aid`] for this actor.
 /// * `message` - The reference to the current message to process.
 pub trait Processor<State: Send + Sync>:
     (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync
@@ -537,7 +537,7 @@ impl ActorBuilder {
     /// `ActorSystem::spawn` for more information and examples.
     ///
     /// FIXME Consider implementing `using` to spawn a stateless actor.
-    pub fn with<F, State>(self, state: State, processor: F) -> Result<ActorId, AxiomError>
+    pub fn with<F, State>(self, state: State, processor: F) -> Result<Aid, AxiomError>
     where
         State: Send + Sync + 'static,
         F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
@@ -599,8 +599,8 @@ impl Actor {
         );
 
         // The sender will be put inside the actor id.
-        let aid = ActorId {
-            data: Arc::new(ActorIdData {
+        let aid = Aid {
+            data: Arc::new(AidData {
                 uuid: Uuid::new_v4(),
                 system_uuid: system.uuid(),
                 name: builder.name.clone(),
@@ -746,17 +746,17 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// Tests serialization and deserialization of `ActorId`s. This verifies that deserialized
+    /// Tests serialization and deserialization of `Aid`s. This verifies that deserialized
     /// `aid`s on the same actor system should just be the same `aid` as well as the fact that
     /// when deserialized on other actor systems the `aid`'s sender should be a remote aid.
     ///
-    /// FIXME (Issue #70) Return error when deserializing an ActorId if a remote is not connected
+    /// FIXME (Issue #70) Return error when deserializing an Aid if a remote is not connected
     /// instead of panic.
     #[test]
     fn test_actor_id_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default());
         let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
-        system.init_current(); // Required by ActorId serialization.
+        system.init_current(); // Required by Aid serialization.
 
         // This check forces the test to break here if someone changes the default.
         match aid.data.sender {
@@ -765,11 +765,11 @@ mod tests {
         }
 
         let serialized = bincode::serialize(&aid).unwrap();
-        let deserialized: ActorId = bincode::deserialize(&serialized).unwrap();
+        let deserialized: Aid = bincode::deserialize(&serialized).unwrap();
 
         // In this case the resulting aid should be identical to the serialized one because
         // we have the same actor system in a thread-local.
-        assert!(ActorId::ptr_eq(&aid, &deserialized));
+        assert!(Aid::ptr_eq(&aid, &deserialized));
 
         // If we deserialize on another actor system in another thread it should be a remote aid.
         let handle = thread::spawn(move || {
@@ -778,7 +778,7 @@ mod tests {
             // Connect the systems so the remote channel can be used.
             ActorSystem::connect_with_channels(system, system2);
 
-            let deserialized: ActorId = bincode::deserialize(&serialized).unwrap();
+            let deserialized: Aid = bincode::deserialize(&serialized).unwrap();
             match deserialized.data.sender {
                 ActorSender::Remote { .. } => {
                     assert_eq!(aid.uuid(), deserialized.uuid());
@@ -795,7 +795,7 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Tests that an ActorId can be used as a message alone and inside another value.
+    /// Tests that an Aid can be used as a message alone and inside another value.
     #[test]
     fn test_actor_id_as_message() {
         init_test_log();
@@ -803,7 +803,7 @@ mod tests {
 
         #[derive(Serialize, Deserialize)]
         enum Op {
-            Aid(ActorId),
+            Aid(Aid),
         }
 
         let aid = system
@@ -811,11 +811,11 @@ mod tests {
             .with(
                 0,
                 |_state: &mut i32, context: &Context, message: &Message| {
-                    if let Some(msg) = message.content_as::<ActorId>() {
-                        assert!(ActorId::ptr_eq(&context.aid, &msg));
+                    if let Some(msg) = message.content_as::<Aid>() {
+                        assert!(Aid::ptr_eq(&context.aid, &msg));
                     } else if let Some(msg) = message.content_as::<Op>() {
                         match &*msg {
-                            Op::Aid(a) => assert!(ActorId::ptr_eq(&context.aid, &a)),
+                            Op::Aid(a) => assert!(Aid::ptr_eq(&context.aid, &a)),
                         }
                     }
                     Ok(Status::Done)

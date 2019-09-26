@@ -21,10 +21,10 @@
 //!   * BREAKING CHANGE: `Status::Skipped` has been renamed to `Status::Skip`.
 //!   * BREAKING CHANGE: `Status::ResetSkip` has been renamed to `Status::Reset`.
 //!   * BREAKING CHANGE: `ActorError` has been moved to top level and renamed to `AxiomError`.
-//!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `ActorId` as the
+//!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `Aid` as the
 //!   mechanism for looking up actors doesn't make sense the way it was before.
 //!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
-//!   * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `ActorId`.
+//!   * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `Aid`.
 //!   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
 //!   that the user must manage.
 //!   * BREAKING CHANGE: All actor processors now should return `AxiomResult` which will allow them
@@ -32,13 +32,13 @@
 //!   * BREAKING CHANGE: Actors are now spawned with the builder pattern. This allows the
 //!   configuration of an actor and leaves the door open for future flexibility. See documentation
 //!   for more details.
-//!   * Created a `Context` type that holds references to the `ActorId` and `ActorSystem`.
-//!   * `Processor` functions can get a reference to the `ActorId` of the actor from `Context`.
+//!   * Created a `Context` type that holds references to the `Aid` and `ActorSystem`.
+//!   * `Processor` functions can get a reference to the `Aid` of the actor from `Context`.
 //!   * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
 //!   * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
-//!   * Calling `system.init_current()` is unneeded unless deserializing `ActorId`s outside a
+//!   * Calling `system.init_current()` is unneeded unless deserializing `Aid`s outside a
 //!   `Processor`.
-//!   * Metrics methods like `received()` in `ActorId` return `Result` instead of using `panic!`.
+//!   * Metrics methods like `received()` in `Aid` return `Result` instead of using `panic!`.
 //!   * Changed internal maps to use crate `dashmap` which expands dependencies but increases
 //!   performance.
 //!   * New methods `send_new` and `send_new_after` are available to shorten boilerplate.
@@ -225,7 +225,7 @@ pub mod actors;
 pub mod message;
 pub mod system;
 
-pub use crate::actors::ActorId;
+pub use crate::actors::Aid;
 pub use crate::actors::Context;
 pub use crate::actors::Status;
 pub use crate::message::Message;
@@ -239,8 +239,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AxiomError {
     /// Error sent when attempting to send to an actor that has already been stopped. A stopped
-    /// actor cannot accept any more messages and is shut down. The holder of an [`ActorId`] to
-    /// a stopped actor should throw the [`ActorId`] away as the actor can never be started again.
+    /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
+    /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
     ActorAlreadyStopped,
 
     /// An error returned when an actor is already using a local name at the time the user tries
@@ -248,16 +248,16 @@ pub enum AxiomError {
     /// to be registered.
     NameAlreadyUsed(String),
 
-    /// Error returned when an ActorId is not local and a user is trying to do operations that
-    /// only work on local ActorId instances.
-    ActorIdNotLocal,
+    /// Error returned when an Aid is not local and a user is trying to do operations that
+    /// only work on local Aid instances.
+    AidNotLocal,
 
     /// Used when unable to send to an actor's message channel within the scheduled timeout
     /// configured in the actor system. This could result from the actor's channel being too
     /// small to accomodate the message flow, the lack of thread count to process messages fast
     /// enough to keep up with the flow or something wrong with the actor itself that it is
     /// taking too long to clear the messages.
-    SendTimedOut(ActorId),
+    SendTimedOut(Aid),
 
     /// Used when unable to schedule the actor for work in the work channel. This could be a
     /// result of having a work channel that is too small to accommodate the number of actors
@@ -309,7 +309,7 @@ mod tests {
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and
     /// returns an `Ok<()>` when they do or an `Err<String>` when not.
-    pub fn await_received(aid: &ActorId, count: u8, timeout_ms: u64) -> Result<(), String> {
+    pub fn await_received(aid: &Aid, count: u8, timeout_ms: u64) -> Result<(), String> {
         use std::time::Instant;
         let start = Instant::now();
         let duration = Duration::from_millis(timeout_ms);
@@ -502,7 +502,7 @@ mod tests {
         /// A simple enum used as test messages.
         #[derive(Serialize, Deserialize)]
         pub enum PingPong {
-            Ping(ActorId),
+            Ping(Aid),
             Pong,
         }
 

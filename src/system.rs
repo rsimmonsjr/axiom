@@ -25,7 +25,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-// Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`ActorId`] deserializer and
+// Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
 // other types can obtain a clone if needed at any time. This will be automatically set for all
 // dispatcher threads that are processing messages with the actors.
 std::thread_local! {
@@ -48,7 +48,7 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
-    Stopped(ActorId),
+    Stopped(Aid),
 }
 
 /// A type used for sending messages to other actor systems.
@@ -57,13 +57,13 @@ pub enum WireMessage {
     /// A message sent as a response to another actor system connecting to this actor system.
     Hello {
         /// The `aid` for the system actor on the actor system sending the message.
-        system_actor_aid: ActorId,
+        system_actor_aid: Aid,
     },
     /// A container for a message from one actor on one system to an actor on another system.
     ActorMessage {
-        /// The UUID of the [`ActorId`] that the message is being sent to.
+        /// The UUID of the [`Aid`] that the message is being sent to.
         actor_uuid: Uuid,
-        /// The UUID of the system that the destination [`ActorId`] is local to.
+        /// The UUID of the system that the destination [`Aid`] is local to.
         system_uuid: Uuid,
         /// The message to be sent.
         message: Message,
@@ -72,9 +72,9 @@ pub enum WireMessage {
     DelayedActorMessage {
         /// The duration to use to delay the message.
         duration: Duration,
-        /// The UUID of the [`ActorId`] that the message is being sent to.
+        /// The UUID of the [`Aid`] that the message is being sent to.
         actor_uuid: Uuid,
-        /// The UUID of the system that the destination [`ActorId`] is local to.
+        /// The UUID of the system that the destination [`Aid`] is local to.
         system_uuid: Uuid,
         /// The message to be sent.
         message: Message,
@@ -162,7 +162,7 @@ pub struct RemoteInfo {
     /// The channel to use to receive messages from the remote system.
     pub receiver: SeccReceiver<WireMessage>,
     /// The AID to the system actor for the remote system.
-    pub system_actor_aid: ActorId,
+    pub system_actor_aid: Aid,
     /// The handle returned by the thread processing remote messages.
     /// FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
     _handle: JoinHandle<()>,
@@ -172,8 +172,8 @@ pub struct RemoteInfo {
 struct DelayedMessage {
     /// A unique identifier for a message.
     uuid: Uuid,
-    /// The ActorId that the message will be sent to.
-    destination: ActorId,
+    /// The Aid that the message will be sent to.
+    destination: Aid,
     /// The minimum instant that the message should be sent.
     instant: Instant,
     /// The message to sent.
@@ -222,17 +222,17 @@ struct ActorSystemData {
     // Stores the number of running threads with a Condvar that will be used to notify anyone
     // waiting on the condvar that all threads have exited.
     running_thread_count: Arc<(Mutex<u16>, Condvar)>,
-    /// Holds the [`Actor`] objects keyed by the [`ActorId`].
-    actors_by_aid: Arc<DashMap<ActorId, Arc<Actor>>>,
+    /// Holds the [`Actor`] objects keyed by the [`Aid`].
+    actors_by_aid: Arc<DashMap<Aid, Arc<Actor>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
-    aids_by_uuid: Arc<DashMap<Uuid, ActorId>>,
+    aids_by_uuid: Arc<DashMap<Uuid, Aid>>,
     /// Holds a map of user assigned names to actor ids set when the actors were spawned. Note
     /// that only actors with an assigned name will be in this map.
-    aids_by_name: Arc<DashMap<String, ActorId>>,
+    aids_by_name: Arc<DashMap<String, Aid>>,
     /// Holds a map of monitors where the key is the `aid` of the actor being monitored and
     /// the value is a vector of `aid`s that are monitoring the actor.
-    monitoring_by_monitored: Arc<DashMap<ActorId, HashSet<ActorId>>>,
+    monitoring_by_monitored: Arc<DashMap<Aid, HashSet<Aid>>>,
     /// Holds a map of information objects about links to remote actor systems.
     remotes: Arc<DashMap<Uuid, RemoteInfo>>,
     /// Holds the messages that have been enqueued for delayed send.
@@ -310,11 +310,11 @@ impl ActorSystem {
     }
 
     /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
-    /// threads constantly grab at the work channel trying to get the next [`ActorId`] off the
-    /// channel. When they get an [`ActorId`] they will process messages using the processor
-    /// registered for that [`ActorId`] for one time slice. After the time slice, the dispatcher
+    /// threads constantly grab at the work channel trying to get the next [`Aid`] off the
+    /// channel. When they get an [`Aid`] they will process messages using the processor
+    /// registered for that [`Aid`] for one time slice. After the time slice, the dispatcher
     /// thread will then check to see if the actor has more receivable messages. If the actor has
-    /// more messages then the [`ActorId`] for the actor will be re-sent to the work channel to
+    /// more messages then the [`Aid`] for the actor will be re-sent to the work channel to
     /// process the next message. This allows thousands of actors to run and not take up resources
     /// if they have no messages to process but also prevents one super busy actor from starving
     /// out other actors that get messages only occasionally.
@@ -503,7 +503,7 @@ impl ActorSystem {
     }
 
     /// Initializes this actor system to use for the current thread which is necessary if the
-    /// user wishes to serialize and deserialize [`ActorId`]s. Note that this can be called only
+    /// user wishes to serialize and deserialize [`Aid`]s. Note that this can be called only
     /// once per thread; on the second call it will panic. This is automatically called for all
     /// dispatcher threads that process actor messages.
     pub fn init_current(&self) {
@@ -587,7 +587,7 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: Arc<Actor>) -> Result<ActorId, AxiomError> {
+    pub(crate) fn register_actor(&self, actor: Arc<Actor>) -> Result<Aid, AxiomError> {
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
         let aids_by_name = &self.data.aids_by_name;
@@ -649,7 +649,7 @@ impl ActorSystem {
     /// the actor to the work channel.
     ///
     /// TODO Put tests verifying the resend on multiple messages.
-    pub(crate) fn schedule(&self, aid: ActorId) {
+    pub(crate) fn schedule(&self, aid: Aid) {
         let actors_by_aid = &self.data.actors_by_aid;
         match actors_by_aid.get(&aid) {
             Some(actor) => self
@@ -672,12 +672,12 @@ impl ActorSystem {
     }
 
     /// Stops an actor by shutting down its channels and removing it from the actors list and
-    /// telling the [`ActorId`] to not allow messages to be sent to the actor since the receiving
+    /// telling the [`Aid`] to not allow messages to be sent to the actor since the receiving
     /// side of the actor is gone.
     ///
     /// This is something that should rarely be called from the outside as it is much better to
     /// send the actor a [`SystemMsg::Stop`] message and allow it to stop gracefully.
-    pub fn stop_actor(&self, aid: &ActorId) {
+    pub fn stop_actor(&self, aid: &Aid) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
             let aids_by_uuid = &self.data.aids_by_uuid;
@@ -705,31 +705,31 @@ impl ActorSystem {
         }
     }
 
-    /// Checks to see if the actor with the given [`ActorId`] is alive within this actor system.
-    pub fn is_actor_alive(&self, aid: &ActorId) -> bool {
+    /// Checks to see if the actor with the given [`Aid`] is alive within this actor system.
+    pub fn is_actor_alive(&self, aid: &Aid) -> bool {
         let actors_by_aid = &self.data.actors_by_aid;
         actors_by_aid.contains_key(aid)
     }
 
-    /// Look up an [`ActorId`] by the unique UUID of the actor and either returns the located
+    /// Look up an [`Aid`] by the unique UUID of the actor and either returns the located
     /// `aid` in a [`Option::Some`] or [`Option::None`] if not found.
-    pub fn find_aid_by_uuid(&self, uuid: &Uuid) -> Option<ActorId> {
+    pub fn find_aid_by_uuid(&self, uuid: &Uuid) -> Option<Aid> {
         let aids_by_uuid = &self.data.aids_by_uuid;
         aids_by_uuid.get(uuid).map(|aid| aid.clone())
     }
 
-    /// Look up an [`ActorId`] by the user assigned name of the actor and either returns the
+    /// Look up an [`Aid`] by the user assigned name of the actor and either returns the
     /// located `aid` in a [`Option::Some`] or [`Option::None`] if not found.
-    pub fn find_aid_by_name(&self, name: &str) -> Option<ActorId> {
+    pub fn find_aid_by_name(&self, name: &str) -> Option<Aid> {
         let aids_by_name = &self.data.aids_by_name;
         aids_by_name.get(&name.to_string()).map(|aid| aid.clone())
     }
 
-    /// A helper that finds an [`ActorId`] on this system from the `system_uuid` and `actor_uuid`
+    /// A helper that finds an [`Aid`] on this system from the `system_uuid` and `actor_uuid`
     /// passed to the function. If the `system_uuid` doesn't match this system then a `None` will
     /// be returned. Also if the `system_uuid` matches but the actor is not found a `None` will
     /// be returned.
-    fn find_aid(&self, system_uuid: &Uuid, actor_uuid: &Uuid) -> Option<ActorId> {
+    fn find_aid(&self, system_uuid: &Uuid, actor_uuid: &Uuid) -> Option<Aid> {
         if self.uuid() == *system_uuid {
             self.find_aid_by_uuid(&actor_uuid)
         } else {
@@ -737,13 +737,13 @@ impl ActorSystem {
         }
     }
 
-    /// Returns the [`ActorId`] to the "System" actor for this actor system.
-    pub fn system_actor_aid(&self) -> ActorId {
+    /// Returns the [`Aid`] to the "System" actor for this actor system.
+    pub fn system_actor_aid(&self) -> Aid {
         self.find_aid_by_name(&"System").unwrap()
     }
 
     /// Adds a monitor so that `monitoring` will be informed if `monitored` stops.
-    pub fn monitor(&self, monitoring: &ActorId, monitored: &ActorId) {
+    pub fn monitor(&self, monitoring: &Aid, monitored: &Aid) {
         let mut monitoring_by_monitored = self
             .data
             .monitoring_by_monitored
@@ -766,11 +766,11 @@ impl ActorSystem {
         }
     }
 
-    /// Schedules a `message` to be sent to the `destination` [`ActorId`] after a `delay`. Note
+    /// Schedules a `message` to be sent to the `destination` [`Aid`] after a `delay`. Note
     /// That this method makes a best attempt at sending the message on time but the message may
     /// not be sent on exactly the delay passed. However, the message will never be sent before
     /// the given delay.
-    pub(crate) fn send_after(&self, message: Message, destination: ActorId, delay: Duration) {
+    pub(crate) fn send_after(&self, message: Message, destination: Aid, delay: Duration) {
         let instant = Instant::now().checked_add(delay).unwrap();
         let entry = DelayedMessage {
             uuid: Uuid::new_v4(),
@@ -796,11 +796,11 @@ impl fmt::Debug for ActorSystem {
     }
 }
 
-/// Messages that are sent to and received from the System Actor.ActorId
+/// Messages that are sent to and received from the System Actor.Aid
 #[derive(Serialize, Deserialize, Debug)]
 enum SystemActorMessage {
     /// Finds an actor by name.
-    FindByName { reply_to: ActorId, name: String },
+    FindByName { reply_to: Aid, name: String },
 
     /// A message sent as a reply to a [`SystemActorMessage::FindByName`] request.
     FindByNameResult {
@@ -808,8 +808,8 @@ enum SystemActorMessage {
         system_uuid: Uuid,
         /// The name that was searched for.
         name: String,
-        /// The ActorId in a [`Some`] if found or [`None`] if not.
-        aid: Option<ActorId>,
+        /// The Aid in a [`Some`] if found or [`None`] if not.
+        aid: Option<Aid>,
     },
 }
 
@@ -891,7 +891,7 @@ mod tests {
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_uuid(&aid.uuid()).unwrap();
-        assert!(ActorId::ptr_eq(&aid, &found));
+        assert!(Aid::ptr_eq(&aid, &found));
 
         assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
@@ -908,7 +908,7 @@ mod tests {
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_name(&aid.name().unwrap()).unwrap();
-        assert!(ActorId::ptr_eq(&aid, &found));
+        assert!(Aid::ptr_eq(&aid, &found));
 
         assert_eq!(None, system.find_aid_by_name("B"));
 
@@ -924,7 +924,7 @@ mod tests {
         let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         let found = system.find_aid(&aid.system_uuid(), &aid.uuid()).unwrap();
-        assert!(ActorId::ptr_eq(&aid, &found));
+        assert!(Aid::ptr_eq(&aid, &found));
 
         assert_eq!(None, system.find_aid(&aid.system_uuid(), &Uuid::new_v4()));
         assert_eq!(None, system.find_aid(&Uuid::new_v4(), &aid.uuid()));
@@ -1017,7 +1017,7 @@ mod tests {
 
     /// This test verifies that the system does not panic if we schedule to an actor that does
     /// not exist in the lookup map. This can happen if a message is sent to an actor after the
-    /// actor is stopped but before the system notifies the [`ActorId`] that the actor has been
+    /// actor is stopped but before the system notifies the [`Aid`] that the actor has been
     /// stopped.
     #[test]
     fn test_actor_not_in_map() {
@@ -1067,11 +1067,11 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        fn monitor_handler(state: &mut ActorId, _: &Context, message: &Message) -> AxiomResult {
+        fn monitor_handler(state: &mut Aid, _: &Context, message: &Message) -> AxiomResult {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
-                        assert!(ActorId::ptr_eq(state, aid));
+                        assert!(Aid::ptr_eq(state, aid));
                         Ok(Status::Done)
                     }
                     SystemMsg::Start => Ok(Status::Done),
@@ -1145,7 +1145,7 @@ mod tests {
         // Verify that the same actor has "A" name and is still up.
         let found1 = system.find_aid_by_name("A").unwrap();
         assert_eq!(true, system.is_actor_alive(&aid1));
-        assert!(ActorId::ptr_eq(&aid1, &found1));
+        assert!(Aid::ptr_eq(&aid1, &found1));
 
         // Stop "B" and verify that the ActorSystem's maps are cleaned up.
         system.stop_actor(&aid2);
@@ -1160,7 +1160,7 @@ mod tests {
             .unwrap();
         await_received(&aid3, 1, 1000).unwrap();
         let found2 = system.find_aid_by_name("B").unwrap();
-        assert!(ActorId::ptr_eq(&aid3, &found2));
+        assert!(Aid::ptr_eq(&aid3, &found2));
 
         system.trigger_and_await_shutdown();
     }
@@ -1171,7 +1171,7 @@ mod tests {
         // In this test our messages are just structs.
         #[derive(Serialize, Deserialize, Debug)]
         struct Request {
-            reply_to: ActorId,
+            reply_to: Aid,
         }
 
         #[derive(Serialize, Deserialize, Debug)]
@@ -1209,8 +1209,7 @@ mod tests {
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
                             SystemMsg::Start => {
-                                let target_aid: ActorId =
-                                    bincode::deserialize(&serialized).unwrap();
+                                let target_aid: Aid = bincode::deserialize(&serialized).unwrap();
                                 target_aid
                                     .send_new(Request {
                                         reply_to: context.aid.clone(),

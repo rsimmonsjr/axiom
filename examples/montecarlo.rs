@@ -25,7 +25,7 @@ impl Game {
 
     fn play(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
         // The game starts when this actor receives a go message from the GameResults actor
-        if let Some(results_aid) = msg.content_as::<ActorId>() {
+        if let Some(results_aid) = msg.content_as::<Aid>() {
             let mut current_play = 1;
             let mut results_vec = Vec::new();
             while current_play <= self.total_plays {
@@ -57,12 +57,12 @@ impl Default for Game {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GameMsg {
-    aid: ActorId,
+    aid: Aid,
     results_vec: Vec<i64>,
 }
 
 impl GameMsg {
-    fn new(aid: ActorId, vec: Vec<i64>) -> Self {
+    fn new(aid: Aid, vec: Vec<i64>) -> Self {
         Self {
             aid: aid,
             results_vec: vec,
@@ -74,7 +74,7 @@ impl GameMsg {
 struct GameResults {
     games_finished: u32,
     total_games: u32,
-    results: HashMap<ActorId, Vec<i64>>,
+    results: HashMap<Aid, Vec<i64>>,
 }
 
 impl GameResults {
