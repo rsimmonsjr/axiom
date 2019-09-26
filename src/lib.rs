@@ -89,7 +89,7 @@
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
-//! let system = ActorSystem::create(ActorSystemConfig::default());
+//! let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 //!
 //! let aid = system
 //!     .spawn()
@@ -127,7 +127,7 @@
 //! use axiom::*;
 //! use std::sync::Arc;
 //!
-//! let system = ActorSystem::create(ActorSystemConfig::default());
+//! let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 //!
 //! struct Data {
 //!     value: i32,
@@ -334,7 +334,7 @@ mod tests {
     fn test_simplest_actor() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         // We spawn the actor using a closure. Note that because of a bug in the Rust compiler
         // as of 2019-07-12 regarding type inference we have to specify all of the types manually
@@ -361,7 +361,7 @@ mod tests {
     fn test_simplest_struct_actor() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         // We declare a basic struct that has a handle method that does basically nothing.
         // Subsequently we will create that struct as a starting state when we spawn the actor
@@ -391,7 +391,7 @@ mod tests {
     fn test_dispatching_with_closure() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         let starting_state: usize = 0 as usize;
         let closure = |state: &mut usize, context: &Context, message: &Message| {
@@ -442,7 +442,7 @@ mod tests {
     fn test_dispatching_with_struct() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         // We create a basic struct with a handler and use that handler to dispatch to other
         // inherent methods in the struct. Note that we don't have to implement any traits here
@@ -553,7 +553,7 @@ mod tests {
             }
         }
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         system.spawn().with(0, ping).unwrap();
         system.await_shutdown();
 

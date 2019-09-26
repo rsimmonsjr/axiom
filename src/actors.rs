@@ -219,7 +219,7 @@ impl Aid {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
     ///
     /// let aid = system
     ///     .spawn()
@@ -287,7 +287,7 @@ impl Aid {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
     ///
     /// let aid = system
     ///     .spawn()
@@ -329,7 +329,7 @@ impl Aid {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
     ///
     /// let aid = system
     ///     .spawn()
@@ -374,7 +374,7 @@ impl Aid {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
     ///
     /// let aid = system
     ///     .spawn()
@@ -435,7 +435,7 @@ impl Aid {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
     ///
     /// let aid = system
     ///     .spawn()
@@ -479,7 +479,7 @@ impl Aid {
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default());
+    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
     ///
     /// let aid = system
     ///     .spawn()
@@ -865,7 +865,7 @@ mod tests {
     fn test_send_examples() {
         use std::time::Duration;
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         let aid = system
             .spawn()
@@ -896,7 +896,7 @@ mod tests {
     fn test_basic_info_unnamed() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         let aid = system.spawn().with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
@@ -914,7 +914,7 @@ mod tests {
     fn test_basic_info_named() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
@@ -934,7 +934,7 @@ mod tests {
     /// instead of panic.
     #[test]
     fn test_actor_id_serialization() {
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
         system.init_current(); // Required by Aid serialization.
 
@@ -953,7 +953,7 @@ mod tests {
 
         // If we deserialize on another actor system in another thread it should be a remote aid.
         let handle = thread::spawn(move || {
-            let system2 = ActorSystem::create(ActorSystemConfig::default());
+            let system2 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
             system2.init_current();
             // Connect the systems so the remote channel can be used.
             ActorSystem::connect_with_channels(system, system2);
@@ -979,7 +979,7 @@ mod tests {
     #[test]
     fn test_actor_id_as_message() {
         init_test_log();
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         #[derive(Serialize, Deserialize)]
         enum Op {
@@ -1015,7 +1015,7 @@ mod tests {
     /// Tests that messages cannot be sent to an `aid` for an actor that has been stopped.
     #[test]
     fn test_cant_send_to_stopped() {
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
         let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
         system.stop_actor(&aid);
         assert_eq!(false, system.is_actor_alive(&aid));
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn test_actor_returns_stop() {
         init_test_log();
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         let aid = system
             .spawn()
@@ -1074,7 +1074,7 @@ mod tests {
     #[test]
     fn test_actor_cannot_override_stop() {
         init_test_log();
-        let system = ActorSystem::create(ActorSystemConfig::default());
+        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
 
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
