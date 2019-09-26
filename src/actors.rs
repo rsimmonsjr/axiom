@@ -426,7 +426,7 @@ impl Aid {
 
     /// Shortcut for calling `send_after(Message::from_arc(arc))` This method will internally
     /// wrap the `Arc` passed into a `Message` and try to send it. Note that using this method is
-    /// much more efficient than `send_new_fter` if you want to send an `Arc` that you already
+    /// much more efficient than `send_new_after` if you want to send an `Arc` that you already
     /// have.
     ///
     /// # Examples

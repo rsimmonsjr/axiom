@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(1, aid2.received().unwrap());
 
         // We overshoot the timing on the asserts because when the tests are run the CPU is
-        // busy and the timing can be difficult. This happens sometimes running tests.
+        // busy and the timing can be tricky.
         thread::sleep(Duration::from_millis(55));
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());

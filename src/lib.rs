@@ -271,9 +271,8 @@ pub enum AxiomError {
     /// error that occurred.
     ActorError(Option<String>),
 
-    /// Returned when attempting to call `ActorSystem::await_shutdown_with_timeout` and the
-    /// timeout expires while wairing for the actor system to shutdown or some other error occurrs
-    /// while awaiting the shutdown.
+    /// Returned when calling `ActorSystem::await_shutdown_with_timeout` and the timeout expires
+    /// or some other error occurs while awaiting the shutdown.
     ShutdownError(String),
 }
 
