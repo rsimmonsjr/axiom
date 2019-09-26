@@ -32,13 +32,13 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ForkCommand {
     /// A command sent when a fork is requested.
-    RequestFork(ActorId),
+    RequestFork(Aid),
     /// Mark the fork as being used which will mark it dirty.
-    UsingFork(ActorId),
+    UsingFork(Aid),
     /// Sent to a fork to indicate that it was put down and no longer is in use. This will
-    /// allow the fork to be sent to the next user. The `ActorId` is the id of the current
+    /// allow the fork to be sent to the next user. The `Aid` is the id of the current
     /// holder of the fork.
-    ForkPutDown(ActorId),
+    ForkPutDown(Aid),
 }
 
 /// A fork for use in the problem.
@@ -47,7 +47,7 @@ struct Fork {
     /// A flag to indicate if the fork is clean or not.
     clean: bool,
     /// The actor that owns the fork.
-    owned_by: Option<ActorId>,
+    owned_by: Option<Aid>,
 }
 
 impl Fork {
@@ -61,7 +61,7 @@ impl Fork {
     }
 
     /// Request that a fork be sent to a philosopher.
-    fn fork_requested(&mut self, context: &Context, requester: &ActorId) -> AxiomResult {
+    fn fork_requested(&mut self, context: &Context, requester: &Aid) -> AxiomResult {
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
@@ -81,7 +81,7 @@ impl Fork {
 
     /// The philosopher that is the current owner of the fork has put it down, making it available
     /// for other philosophers to pick up.
-    fn fork_put_down(&mut self, context: &Context, sender: &ActorId) -> AxiomResult {
+    fn fork_put_down(&mut self, context: &Context, sender: &Aid) -> AxiomResult {
         match &self.owned_by {
             Some(owner) => {
                 if owner == sender {
@@ -110,7 +110,7 @@ impl Fork {
     /// The owner of the fork is notifying the fork that they are going to use the fork. This
     /// will mark the fork as dirty and make it available to be sent to another philosopher if
     /// they request the fork.
-    fn using_fork(&mut self, context: &Context, sender: &ActorId) -> AxiomResult {
+    fn using_fork(&mut self, context: &Context, sender: &Aid) -> AxiomResult {
         match self.owned_by {
             Some(ref owner) => {
                 if *owner == *sender {
@@ -166,17 +166,17 @@ pub enum Command {
     /// be used to track whether this message is old or if it should be handled.
     BecomeHungry(u16),
     /// Instructs an actor to receive give up a fork with the given `aid`.
-    GiveUpFork(ActorId),
+    GiveUpFork(Aid),
     /// Instructs an actor to receive a fork.
-    ReceiveFork(ActorId),
+    ReceiveFork(Aid),
     /// Instructs a philosopher to send the given actor its metrics.
-    SendMetrics(ActorId),
+    SendMetrics(Aid),
 }
 
 // This struct is a message that carries metrics from a philosopher upon request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MetricsReply {
-    aid: ActorId,
+    aid: Aid,
     metrics: Metrics,
 }
 
@@ -201,14 +201,14 @@ struct Philosopher {
     time_slice: Duration,
     /// The current state that the philosopher is in.
     state: PhilosopherState,
-    /// The `ActorId` of the philosopher's left fork.
-    left_fork_aid: ActorId,
+    /// The `Aid` of the philosopher's left fork.
+    left_fork_aid: Aid,
     /// Whether the philosopher has the left fork.
     has_left_fork: bool,
     /// Whether or not the philosopher has requested the left fork.
     left_fork_requested: bool,
-    /// The `ActorId` of the philosopher's right fork.
-    right_fork_aid: ActorId,
+    /// The `Aid` of the philosopher's right fork.
+    right_fork_aid: Aid,
     /// Whether the philosopher has the right fork.
     has_right_fork: bool,
     /// Whether or not the philosopher has requested the right fork.
@@ -222,11 +222,7 @@ struct Philosopher {
 impl Philosopher {
     /// Creates a new dining philosopher that starts hungry by default. The passed fork aids
     /// are used to request forks for eating.
-    pub fn new(
-        time_slice: Duration,
-        left_fork_aid: ActorId,
-        right_fork_aid: ActorId,
-    ) -> Philosopher {
+    pub fn new(time_slice: Duration, left_fork_aid: Aid, right_fork_aid: Aid) -> Philosopher {
         Philosopher {
             time_slice,
             state: PhilosopherState::Thinking,
@@ -268,7 +264,7 @@ impl Philosopher {
 
     /// The philosopher received a fork. Once they have both forks they can start eating.
     /// Otherwise they have to wait for the other fork to begin eating.
-    fn fork_received(&mut self, context: &Context, fork_aid: &ActorId) -> AxiomResult {
+    fn fork_received(&mut self, context: &Context, fork_aid: &Aid) -> AxiomResult {
         if self.left_fork_aid == *fork_aid {
             self.has_left_fork = true;
             self.left_fork_requested = false;
@@ -361,7 +357,7 @@ impl Philosopher {
     /// unless he is asked to. A philosopher can be eating, stop eating and start thinking
     /// and then start eating again if no one asked for his forks. The fork actor is the only
     /// actor sending this message and it will only do so if the fork is dirty.
-    fn give_up_fork(&mut self, context: &Context, fork_aid: &ActorId) -> AxiomResult {
+    fn give_up_fork(&mut self, context: &Context, fork_aid: &Aid) -> AxiomResult {
         if self.left_fork_aid == *fork_aid {
             if self.has_left_fork {
                 self.has_left_fork = false;
@@ -393,7 +389,7 @@ impl Philosopher {
     }
 
     /// A function that handles sending metrics to an actor that requests the metrics.
-    fn send_metrics(&mut self, context: &Context, reply_to: &ActorId) -> AxiomResult {
+    fn send_metrics(&mut self, context: &Context, reply_to: &Aid) -> AxiomResult {
         // We copy the metrics becase we want to send immutable data. This call
         // cant move the metrics out of self so it must copy them.
         reply_to.send_new(MetricsReply {
@@ -457,8 +453,8 @@ pub fn main() {
     let count = 5 as usize;
     let time_slice = Duration::from_millis(10);
     let run_time = Duration::from_millis(500);
-    let mut forks: Vec<ActorId> = Vec::with_capacity(count);
-    let mut results: HashMap<ActorId, Option<Metrics>> = HashMap::with_capacity(count);
+    let mut forks: Vec<Aid> = Vec::with_capacity(count);
+    let mut results: HashMap<Aid, Option<Metrics>> = HashMap::with_capacity(count);
 
     // Initialize the actor system.
     let config = ActorSystemConfig::default();
@@ -505,7 +501,7 @@ pub fn main() {
         .name("Manager")
         .with(
             results,
-            move |state: &mut HashMap<ActorId, Option<Metrics>>,
+            move |state: &mut HashMap<Aid, Option<Metrics>>,
                   context: &Context,
                   message: &Message| {
                 if let Some(msg) = message.content_as::<MetricsReply>() {
