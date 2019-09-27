@@ -224,9 +224,9 @@
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
 pub mod actors;
+pub mod cluster;
 pub mod message;
 pub mod system;
-pub mod tcp_cluster;
 
 pub use crate::actors::Aid;
 pub use crate::actors::Context;
