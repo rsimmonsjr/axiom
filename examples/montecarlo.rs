@@ -146,10 +146,9 @@ fn main() {
     // Initialize the actor system
     // FIXME: We spawn an unreasonable number of worker threads here because that magically prevents
     // a deadlock from happening somehow. Fixing the source of the deadlock would be preferable.
-    let mut config = ActorSystemConfig::default();
-    config.work_channel_size = 110;
-    config.threads_size = 4;
-    config.message_channel_size = 210;
+    let config = ActorSystemConfig::default()
+        .work_channel_size(110)
+        .message_channel_size(210);
 
     let system = ActorSystem::create(config);
 
