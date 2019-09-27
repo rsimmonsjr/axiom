@@ -13,7 +13,7 @@ not a direct re-implementation of either of the two aforementioned actor models 
 rather a new implementation deriving inspiration from the good parts of those projects.
 
 ### What's New
-* 2019-??-??: 0.1.0
+* 2019-09-27 0.1.0
   * A lot of breaking changes have been introduced in an effort to keep them all in one release
   so that the API can stabilize. Please see examples and other sources for help in integrating
   all of the changes listed below.
