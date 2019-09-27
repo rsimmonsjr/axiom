@@ -103,7 +103,7 @@ pub struct ActorSystemConfig {
     /// The number of threads should be carefully considered to have sufficient concurrency but
     /// not over-schedule the CPU on the target hardware. The default value is 4 * the number of
     /// logical CPUs.
-    pub threads_size: u16,
+    pub thread_pool_size: u16,
     /// The threshold at which the dispatcher thread will warn the user that the message took too
     /// long to process. If this warning is being logged then the user probably should reconsider
     /// how their message processing works and refactor big tasks into a number of smaller tasks.
@@ -150,9 +150,9 @@ impl ActorSystemConfig {
         self
     }
 
-    /// Return a new config with the changed `threads_size`.
-    pub fn threads_size(mut self, value: u16) -> Self {
-        self.threads_size = value;
+    /// Return a new config with the changed `thread_pool_size`.
+    pub fn thread_pool_size(mut self, value: u16) -> Self {
+        self.thread_pool_size = value;
         self
     }
 
@@ -191,7 +191,7 @@ impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
-            threads_size: (num_cpus::get() * 4) as u16,
+            thread_pool_size: (num_cpus::get() * 4) as u16,
             warn_threshold: Duration::from_millis(1),
             time_slice: Duration::from_millis(1),
             work_channel_size: 100,
@@ -306,8 +306,8 @@ impl ActorSystem {
         let (sender, receiver) =
             secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
-        let threads = Mutex::new(Vec::with_capacity(config.threads_size as usize));
-        let running_thread_count = Arc::new((Mutex::new(config.threads_size), Condvar::new()));
+        let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
+        let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
@@ -335,7 +335,7 @@ impl ActorSystem {
             let mut guard = system.data.threads.lock().unwrap();
 
             // Start the dispatcher threads.
-            for number in 0..system.data.config.threads_size {
+            for number in 0..system.data.config.thread_pool_size {
                 let thread = system.start_dispatcher_thread(number);
                 guard.push(thread);
             }
@@ -686,7 +686,7 @@ impl ActorSystem {
     /// ```
     /// use axiom::*;
     ///
-    /// let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+    /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
     ///
     /// fn handler(count: &mut usize, _: &Context, _: &Message) -> AxiomResult {
     ///     *count += 1;
@@ -932,8 +932,8 @@ mod tests {
 
     // A helper to start two actor systems and connect them.
     fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {
-        let system1 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
-        let system2 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system1 = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let system2 = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         ActorSystem::connect_with_channels(&system1, &system2);
         (system1, system2)
     }
@@ -961,7 +961,7 @@ mod tests {
     fn test_shutdown_await_timeout() {
         use std::time::Duration;
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         system
             .spawn()
             .with((), |_state: &mut (), context: &Context, _: &Message| {
@@ -985,7 +985,7 @@ mod tests {
     fn test_find_by_uuid() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().with(0, simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
     fn test_find_by_name() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
@@ -1019,7 +1019,7 @@ mod tests {
     fn test_find_aid() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         let found = system.find_aid(&aid.system_uuid(), &aid.uuid()).unwrap();
@@ -1037,7 +1037,7 @@ mod tests {
     fn test_stop_actor() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
@@ -1064,7 +1064,7 @@ mod tests {
     fn test_send_after() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
 
@@ -1084,7 +1084,7 @@ mod tests {
     fn test_send_after_before_current() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         thread::sleep(Duration::from_millis(10));
 
         let aid1 = system.spawn().name("A").with(0, simple_handler).unwrap();
@@ -1124,7 +1124,7 @@ mod tests {
     fn test_actor_not_in_map() {
         init_test_log();
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().with(0, simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap(); // Now it is started for sure.
 
@@ -1143,8 +1143,8 @@ mod tests {
     /// Tests connection between two different actor systems using channels.
     #[test]
     fn test_connect_with_channels() {
-        let system1 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
-        let system2 = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system1 = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let system2 = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         ActorSystem::connect_with_channels(&system1, &system2);
         {
             system1
@@ -1183,7 +1183,7 @@ mod tests {
             }
         }
 
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let monitored = system.spawn().with(0 as usize, simple_handler).unwrap();
         let not_monitoring = system.spawn().with(0 as usize, simple_handler).unwrap();
         let monitoring1 = system
@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     fn test_named_actor_restrictions() {
         init_test_log();
-        let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let state = 0 as usize;
 
         let aid1 = system

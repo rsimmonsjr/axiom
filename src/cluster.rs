@@ -230,11 +230,11 @@ mod tests {
         init_test_log();
 
         let socket_addr1 = SocketAddr::from(([127, 0, 0, 1], 7717));
-        let system1 = ActorSystem::create(ActorSystemConfig::default());
+        let system1 = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let cluster_mgr1 = TcpClusterMgr::create(&system1, socket_addr1);
 
         let socket_addr2 = SocketAddr::from(([127, 0, 0, 1], 7727));
-        let system2 = ActorSystem::create(ActorSystemConfig::default());
+        let system2 = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let _cluster_mgr2 = TcpClusterMgr::create(&system2, socket_addr2);
 
         // thread::sleep(Duration::from_millis(5000));

@@ -91,7 +91,7 @@ use axiom::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
 let aid = system
     .spawn()
@@ -129,7 +129,7 @@ handles a couple of different message types:
 use axiom::*;
 use std::sync::Arc;
 
-let system = ActorSystem::create(ActorSystemConfig::default().threads_size(2));
+let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
 struct Data {
     value: i32,
