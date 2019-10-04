@@ -8,22 +8,25 @@
 //!
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
-use crate::actors::*;
-use crate::message::*;
-use crate::*;
+use std::collections::{BinaryHeap, HashSet};
+use std::fmt;
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
 use dashmap::DashMap;
 use log::{debug, error, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BinaryHeap, HashSet};
-use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+use crate::*;
+use crate::actors::*;
+use crate::executor::AxiomReactor;
+use crate::message::*;
 
 // Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
 // other types can obtain a clone if needed at any time. This will be automatically set for all
@@ -100,10 +103,14 @@ pub struct ActorSystemConfig {
     /// be refactored to process messages faster.  The default value is 1 millisecond.
     pub send_timeout: Duration,
     /// The size of the thread pool which governs how many worker threads there are in the system.
-    /// The number of threads should be carefully considered to have sufficient concurrency but
+    /// The number of threads should be carefully considered to have sufficient parallelism but
     /// not over-schedule the CPU on the target hardware. The default value is 4 * the number of
     /// logical CPUs.
     pub thread_pool_size: u16,
+    /// The number of actors that a single thread will run concurrently. These actors will be cached
+    /// as Tasks in the Reactor until they have emptied their message channel or have ran longer
+    /// than [`time_slice`].
+    pub concurrency_per_thread: usize,
     /// The threshold at which the dispatcher thread will warn the user that the message took too
     /// long to process. If this warning is being logged then the user probably should reconsider
     /// how their message processing works and refactor big tasks into a number of smaller tasks.
@@ -191,6 +198,7 @@ impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
+            concurrency_per_thread: 8,
             thread_pool_size: (num_cpus::get() * 4) as u16,
             warn_threshold: Duration::from_millis(1),
             time_slice: Duration::from_millis(1),
@@ -374,16 +382,35 @@ impl ActorSystem {
         let system = self.clone();
         let receiver = self.data.receiver.clone();
         let thread_timeout = self.data.config.thread_wait_time;
+        let concurrency_cap = self.data.config.concurrency_per_thread;
         let name = format!("DispatchThread{}", number);
 
         thread::Builder::new()
             .name(name)
             .spawn(move || {
                 system.init_current();
+
                 while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
-                    if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
-                        Actor::receive(actor);
+                    // Start a single iteration through the reactor's tasks
+                    AxiomReactor::single_iter();
+
+                    // If the reactor is still at capacity, then we want to run it again
+                    if AxiomReactor::len() >= concurrency_cap {
+                        continue
                     }
+
+                    // ... Else, we queue it till it's full again
+                    while AxiomReactor::len() < concurrency_cap {
+                        if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
+                            AxiomReactor::spawn(Actor::receive(actor));
+                        } else {
+                            break // ... Unless there's nothing to spawn
+                        }
+                    }
+                }
+
+                while AxiomReactor::len() > 0 {
+                    AxiomReactor::single_iter()
                 }
 
                 // FIXME Refactor this into a function so all threads can utilize it.
@@ -889,7 +916,7 @@ enum SystemActorMessage {
 
 /// A processor for the system actor.
 /// FIXME Issue #89: Refactor into a full struct based actor in another file.
-fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) -> AxiomResult {
+async fn system_actor_processor(_: &mut bool, context: Context, message: Message) -> AxiomResult {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
             // Someone requested that this system actor find an actor by name.
@@ -926,9 +953,11 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tests::*;
     use std::thread;
+
+    use crate::tests::*;
+
+    use super::*;
 
     // A helper to start two actor systems and connect them.
     fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {

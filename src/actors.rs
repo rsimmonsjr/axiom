@@ -6,20 +6,26 @@
 //! created by calling `system::spawn().with()` with any kind of fuction or closure that
 //! implements the `Processor` trait.
 
-use crate::message::*;
-use crate::system::*;
-use crate::*;
+use std::future::Future;
+use std::hash::{Hash, Hasher};
+use std::marker::{PhantomData, Send, Sync};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
+use std::time::{Duration, Instant};
+
+use futures::lock::Mutex;
 use log::{error, warn};
 use secc::*;
+use serde::{Deserialize, Serialize};
 use serde::de::Deserializer;
 use serde::ser::Serializer;
-use serde::{Deserialize, Serialize};
-use std::hash::{Hash, Hasher};
-use std::marker::{Send, Sync};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+use crate::*;
+use crate::message::*;
+use crate::system::*;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.
@@ -634,7 +640,7 @@ impl Hash for Aid {
 
 /// A context that is passed to the processor to give immutable access to elements of the
 /// actor system to the implementor of an actor's processor.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Context {
     pub aid: Aid,
     pub system: ActorSystem,
@@ -660,25 +666,70 @@ impl std::fmt::Display for Context {
 /// * `state`   - A mutable reference to the current state of the actor.
 /// * `aid`     - The reference to the [`Aid`] for this actor.
 /// * `message` - The reference to the current message to process.
-pub trait Processor<State: Send + Sync>:
-    (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync
+pub trait Processor<S: Send + Sync, R: Future<Output=AxiomResult> + 'static>:
+(FnMut(&mut S, Context, Message) -> R) + Send + Sync
 {
 }
 
 // Allows any static function or closure, to be used as a Processor.
-impl<F, State> Processor<State> for F
+impl<F, S, R> Processor<S, R> for F
 where
-    State: Send + Sync + 'static,
-    F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
+    S: Send + Sync,
+    R: Future<Output=AxiomResult> + 'static,
+    F: (FnMut(&mut S, Context, Message) -> R) + Send + Sync + 'static,
 {
 }
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
-trait Handler: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
+pub(crate) trait Handler: (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static {}
 
 // Allows any static function or closure, to be used as a Handler.
-impl<F> Handler for F where F: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
+impl<F> Handler for F where F: (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static {}
+
+pub struct ActorFuture {
+    processor: Pin<Box<dyn Future<Output=AxiomResult>>>,
+//    __phantom_data: PhantomData<&'a ()>,
+}
+
+impl Future for ActorFuture {
+    type Output = AxiomResult;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        self.processor.as_mut().poll(cx)
+    }
+}
+
+impl ActorFuture {
+    pub(crate) fn new<F>(processor: F) -> ActorFuture
+        where F: Future<Output=AxiomResult> + 'static,
+    {
+        Self {
+            processor: Box::pin(processor),
+//            __phantom_data: PhantomData,
+        }
+    }
+}
+
+struct HandlerWithState<S, R, P>(S, P) where
+    S: Send + Sync,
+    R: Future<Output=AxiomResult> + 'static,
+    P: Processor<S, R>;
+
+trait AsyncStatefulCall {
+    fn call(&mut self, context: Context, message: Message) -> ActorFuture;
+}
+
+impl<S, R, P> AsyncStatefulCall for HandlerWithState<S, R, P>
+    where
+        S: Send + Sync,
+        R: Future<Output=AxiomResult> + 'static,
+        P: Processor<S, R>
+{
+    fn call(&mut self, context: Context, message: Message) -> ActorFuture {
+        ActorFuture::new(self.1(&mut self.0, context, message))
+    }
+}
 
 /// A builder that can be used to create and spawn an actor. To get a builder, the user would ask
 /// the actor system to create one using `system.spawn()` and then to spawn the actor by means of
@@ -699,10 +750,11 @@ impl ActorBuilder {
     /// `ActorSystem::spawn` for more information and examples.
     ///
     /// FIXME Consider implementing `using` to spawn a stateless actor.
-    pub fn with<F, State>(self, state: State, processor: F) -> Result<Aid, AxiomError>
+    pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, AxiomError>
     where
-        State: Send + Sync + 'static,
-        F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
+        S: Send + Sync + 'static,
+        R: Future<Output=AxiomResult> + 'static,
+        F: (FnMut(&'static mut S, Context, Message) -> R) + Send + Sync + 'static,
     {
         let actor = Actor::new(self.system.clone(), &self, state, processor);
         let result = self.system.register_actor(actor)?;
@@ -732,26 +784,28 @@ pub(crate) struct Actor {
     pub context: Context,
     /// Receiver for the actor's message channel.
     receiver: SeccReceiver<Message>,
-    /// The function that processes messages that are sent to the actor wrapped in a closure to
-    /// erase the state type that the actor is managing. Note that this is in a mutex because the
-    /// handler itself is `FnMut` and we also don't want there to be any possibility of two
-    /// threads calling the handler concurrently as that would break the actor model rules.
-    handler: Mutex<Box<dyn Handler>>,
+    /// A function that generates the future processing a message sent to the actor,
+    /// wrapped in a closure to erase the state type that the actor is managing. Note that
+    /// this is in a mutex because the handler itself is `FnMut`, and we don't want there
+    /// to be any possibility of two threads calling the handler concurrently. That would
+    /// break the actor model rules.
+    future_factory: Mutex<Box<dyn AsyncStatefulCall>>,
 }
 
 impl Actor {
     /// Creates a new actor on the given actor system with the given processor function. The user
     /// will pass the initial state of the actor as well as the processor that will be used to
     /// process messages sent to the actor.
-    pub(crate) fn new<F, State>(
+    pub(crate) fn new<F, S, R>(
         system: ActorSystem,
         builder: &ActorBuilder,
-        mut state: State,
+        mut state: S,
         mut processor: F,
     ) -> Arc<Actor>
     where
-        State: Send + Sync + 'static,
-        F: Processor<State> + 'static,
+        S: Send + Sync + 'static,
+        R: Future<Output=AxiomResult> + 'static,
+        F: Processor<S, R> + 'static,
     {
         let (sender, receiver) = secc::create::<Message>(
             builder
@@ -776,8 +830,12 @@ impl Actor {
 
         // This handler will manage the state for the actor.
         let handler = Box::new({
-            move |context: &Context, message: &Message| processor(&mut state, context, message)
+            move |context: Context, message: Message| {
+                ActorFuture::new(processor(&mut state, context, message))
+            }
         });
+
+        let new_handler: Box<dyn AsyncStatefulCall> = Box::new(HandlerWithState(state, processor));
 
         // This is the receiving side of the actor which holds the processor wrapped in the
         // handler type.
@@ -786,7 +844,7 @@ impl Actor {
         let actor = Actor {
             context,
             receiver,
-            handler: Mutex::new(handler),
+            future_factory: Mutex::new(new_handler),
         };
 
         Arc::new(actor)
@@ -797,8 +855,8 @@ impl Actor {
     /// no more pending messages or the given time slice has expired. The time slice is
     /// configurable and should be tuned to allow the most possible messages to be processed
     /// without locking out other actors.
-    pub(crate) fn receive(actor: Arc<Actor>) {
-        let mut guard = actor.handler.lock().unwrap();
+    pub(crate) async fn receive(actor: Arc<Actor>) {
+        let mut guard = actor.future_factory.lock().unwrap();
         let system = actor.context.system.clone();
         let start = Instant::now();
         // FIXME The time sliced batching of messages needs testing.
@@ -808,7 +866,7 @@ impl Actor {
                 // In this case there is a message in the channel that we have to process. We
                 // will time the result and log a warning if it took too long.
                 let start_process = Instant::now();
-                let mut result = (&mut *guard)(&actor.context, &message);
+                let mut result = (&mut *guard)(actor.context.clone(), message.clone()).await;
                 let elapsed = Instant::elapsed(&start_process);
                 if elapsed > system.config().warn_threshold {
                     warn!(
@@ -868,9 +926,11 @@ impl Actor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tests::*;
     use std::thread;
+
+    use crate::tests::*;
+
+    use super::*;
 
     #[test]
     fn test_send_examples() {

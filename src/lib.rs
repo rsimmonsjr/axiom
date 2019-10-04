@@ -223,10 +223,7 @@
 //! architected code.  
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
-pub mod actors;
-pub mod cluster;
-pub mod message;
-pub mod system;
+use serde::{Deserialize, Serialize};
 
 pub use crate::actors::Aid;
 pub use crate::actors::Context;
@@ -237,7 +234,11 @@ pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
 pub use crate::system::WireMessage;
 
-use serde::{Deserialize, Serialize};
+pub mod actors;
+pub mod cluster;
+mod executor;
+pub mod message;
+pub mod system;
 
 /// Errors returned by various parts of Axiom.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,10 +298,12 @@ pub type AxiomResult = Result<Status, AxiomError>;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
     use log::LevelFilter;
     use serde::{Deserialize, Serialize};
-    use std::time::Duration;
+
+    use super::*;
 
     pub fn init_test_log() {
         let _ = env_logger::builder()
