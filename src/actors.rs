@@ -666,7 +666,7 @@ impl std::fmt::Display for Context {
 /// * `state`   - A mutable reference to the current state of the actor.
 /// * `aid`     - The reference to the [`Aid`] for this actor.
 /// * `message` - The reference to the current message to process.
-pub trait Processor<S: Send + Sync, R: Future<Output=AxiomResult> + 'static>:
+pub trait Processor<S: Send + Sync, R: Future<Output=AxiomResult> + Send + 'static>:
 (FnMut(&mut S, Context, Message) -> R) + Send + Sync
 {
 }
@@ -675,21 +675,14 @@ pub trait Processor<S: Send + Sync, R: Future<Output=AxiomResult> + 'static>:
 impl<F, S, R> Processor<S, R> for F
 where
     S: Send + Sync,
-    R: Future<Output=AxiomResult> + 'static,
+    R: Future<Output=AxiomResult> + Send + 'static,
     F: (FnMut(&mut S, Context, Message) -> R) + Send + Sync + 'static,
 {
 }
 
-/// This is the internal type for the handler that will manage the state for the actor using the
-/// user-provided message processor.
-pub(crate) trait Handler: (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static {}
-
-// Allows any static function or closure, to be used as a Handler.
-impl<F> Handler for F where F: (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static {}
-
-pub struct ActorFuture {
+/// Concrete Future type for type erasure
+pub(crate) struct ActorFuture {
     processor: Pin<Box<dyn Future<Output=AxiomResult>>>,
-//    __phantom_data: PhantomData<&'a ()>,
 }
 
 impl Future for ActorFuture {
@@ -702,7 +695,7 @@ impl Future for ActorFuture {
 
 impl ActorFuture {
     pub(crate) fn new<F>(processor: F) -> ActorFuture
-        where F: Future<Output=AxiomResult> + 'static,
+        where F: Future<Output=AxiomResult> + Send + 'static,
     {
         Self {
             processor: Box::pin(processor),
@@ -711,23 +704,28 @@ impl ActorFuture {
     }
 }
 
-struct HandlerWithState<S, R, P>(S, P) where
+struct HandlerWithState<S, R, P> where
     S: Send + Sync,
-    R: Future<Output=AxiomResult> + 'static,
-    P: Processor<S, R>;
+    R: Future<Output=AxiomResult> + Send + 'static,
+    P: Processor<S, R>
+{
+    state: S,
+    processor: P,
+    __phantom_data: PhantomData<R>,
+}
 
-trait AsyncStatefulCall {
+trait AsyncStatefulCall: Send {
     fn call(&mut self, context: Context, message: Message) -> ActorFuture;
 }
 
 impl<S, R, P> AsyncStatefulCall for HandlerWithState<S, R, P>
     where
         S: Send + Sync,
-        R: Future<Output=AxiomResult> + 'static,
-        P: Processor<S, R>
+        R: Future<Output=AxiomResult> + Send + 'static,
+        P: Processor<S, R>,
 {
     fn call(&mut self, context: Context, message: Message) -> ActorFuture {
-        ActorFuture::new(self.1(&mut self.0, context, message))
+        ActorFuture::new((self.processor)(&mut self.state, context, message))
     }
 }
 
@@ -753,8 +751,8 @@ impl ActorBuilder {
     pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, AxiomError>
     where
         S: Send + Sync + 'static,
-        R: Future<Output=AxiomResult> + 'static,
-        F: (FnMut(&'static mut S, Context, Message) -> R) + Send + Sync + 'static,
+        R: Future<Output=AxiomResult> + Send + 'static,
+        F: Processor<S, R> + 'static,
     {
         let actor = Actor::new(self.system.clone(), &self, state, processor);
         let result = self.system.register_actor(actor)?;
@@ -804,7 +802,7 @@ impl Actor {
     ) -> Arc<Actor>
     where
         S: Send + Sync + 'static,
-        R: Future<Output=AxiomResult> + 'static,
+        R: Future<Output=AxiomResult> + Send + 'static,
         F: Processor<S, R> + 'static,
     {
         let (sender, receiver) = secc::create::<Message>(
@@ -829,13 +827,11 @@ impl Actor {
         };
 
         // This handler will manage the state for the actor.
-        let handler = Box::new({
-            move |context: Context, message: Message| {
-                ActorFuture::new(processor(&mut state, context, message))
-            }
+        let handler: Box<dyn AsyncStatefulCall> = Box::new(HandlerWithState {
+            state,
+            processor,
+            __phantom_data: PhantomData,
         });
-
-        let new_handler: Box<dyn AsyncStatefulCall> = Box::new(HandlerWithState(state, processor));
 
         // This is the receiving side of the actor which holds the processor wrapped in the
         // handler type.
@@ -844,7 +840,7 @@ impl Actor {
         let actor = Actor {
             context,
             receiver,
-            future_factory: Mutex::new(new_handler),
+            future_factory: Mutex::new(handler),
         };
 
         Arc::new(actor)
@@ -856,7 +852,7 @@ impl Actor {
     /// configurable and should be tuned to allow the most possible messages to be processed
     /// without locking out other actors.
     pub(crate) async fn receive(actor: Arc<Actor>) {
-        let mut guard = actor.future_factory.lock().unwrap();
+        let mut guard = actor.future_factory.lock().await;
         let system = actor.context.system.clone();
         let start = Instant::now();
         // FIXME The time sliced batching of messages needs testing.
@@ -866,7 +862,7 @@ impl Actor {
                 // In this case there is a message in the channel that we have to process. We
                 // will time the result and log a warning if it took too long.
                 let start_process = Instant::now();
-                let mut result = (&mut *guard)(actor.context.clone(), message.clone()).await;
+                let mut result = (&mut *guard).call(actor.context.clone(), message.clone()).await;
                 let elapsed = Instant::elapsed(&start_process);
                 if elapsed > system.config().warn_threshold {
                     warn!(
