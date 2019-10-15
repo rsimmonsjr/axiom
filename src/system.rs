@@ -25,8 +25,9 @@ use uuid::Uuid;
 
 use crate::*;
 use crate::actors::*;
-use crate::executor::AxiomReactor;
 use crate::message::*;
+use crate::scheduling::{AxiomReactor, Scheduler};
+use crate::scheduling::executor::AxiomExecutor;
 
 // Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
 // other types can obtain a clone if needed at any time. This will be automatically set for all
@@ -87,7 +88,7 @@ pub enum WireMessage {
 /// Configuration structure for the Axiom actor system. Note that this configuration implements
 /// serde serialize and deserialize to allow users to read the config from any serde supported
 /// means.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActorSystemConfig {
     /// The default size for the channel that is created for each actor. This can be overridden on
     /// a per-actor basis during spawning as well. Making the default channel size bigger allows
@@ -107,10 +108,6 @@ pub struct ActorSystemConfig {
     /// not over-schedule the CPU on the target hardware. The default value is 4 * the number of
     /// logical CPUs.
     pub thread_pool_size: u16,
-    /// The number of actors that a single thread will run concurrently. These actors will be cached
-    /// as Tasks in the Reactor until they have emptied their message channel or have ran longer
-    /// than [`time_slice`].
-    pub concurrency_per_thread: usize,
     /// The threshold at which the dispatcher thread will warn the user that the message took too
     /// long to process. If this warning is being logged then the user probably should reconsider
     /// how their message processing works and refactor big tasks into a number of smaller tasks.
@@ -198,7 +195,6 @@ impl Default for ActorSystemConfig {
     /// Create the config with the default values.
     fn default() -> ActorSystemConfig {
         ActorSystemConfig {
-            concurrency_per_thread: 8,
             thread_pool_size: (num_cpus::get() * 4) as u16,
             warn_threshold: Duration::from_millis(1),
             time_slice: Duration::from_millis(1),
@@ -275,6 +271,8 @@ struct ActorSystemData {
     receiver: SeccReceiver<Arc<Actor>>,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// The Executor responsible for managing the runtime of the Actors
+    executor: AxiomExecutor,
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: AtomicBool,
     // Stores the number of running threads with a Condvar that will be used to notify anyone
@@ -310,21 +308,24 @@ impl ActorSystem {
     /// Creates an actor system with the given config. The user should benchmark how many slots
     /// are needed in the work channel, the number of threads they need in the system and and so
     /// on in order to satisfy the requirements of the software they are creating.
-    pub fn create(config: ActorSystemConfig) -> ActorSystem {
+    pub fn create<S: Scheduler>(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
             secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
 
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
 
+        let executor = AxiomExecutor::new::<S>(&config);
+
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
                 uuid: Uuid::new_v4(),
-                config: config,
+                config,
                 sender,
                 receiver,
                 threads,
+                executor,
                 shutdown_triggered: AtomicBool::new(false),
                 running_thread_count,
                 actors_by_aid: Arc::new(DashMap::default()),
@@ -342,11 +343,11 @@ impl ActorSystem {
         {
             let mut guard = system.data.threads.lock().unwrap();
 
-            // Start the dispatcher threads.
-            for number in 0..system.data.config.thread_pool_size {
-                let thread = system.start_dispatcher_thread(number);
-                guard.push(thread);
-            }
+//            // Start the dispatcher threads.
+//            for number in 0..system.data.config.thread_pool_size {
+//                let thread = system.start_dispatcher_thread(number);
+//                guard.push(thread);
+//            }
 
             // Start the thread that reads from the `delayed_messages` queue.
             // FIXME Put in ability to confirm how many of these to start.
@@ -376,54 +377,54 @@ impl ActorSystem {
     /// process the next message. This allows thousands of actors to run and not take up resources
     /// if they have no messages to process but also prevents one super busy actor from starving
     /// out other actors that get messages only occasionally.
-    fn start_dispatcher_thread(&self, number: u16) -> JoinHandle<()> {
-        // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
-        // long in the channel.
-        let system = self.clone();
-        let receiver = self.data.receiver.clone();
-        let thread_timeout = self.data.config.thread_wait_time;
-        let concurrency_cap = self.data.config.concurrency_per_thread;
-        let name = format!("DispatchThread{}", number);
-
-        thread::Builder::new()
-            .name(name)
-            .spawn(move || {
-                system.init_current();
-
-                while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
-                    // Start a single iteration through the reactor's tasks
-                    AxiomReactor::single_iter();
-
-                    // If the reactor is still at capacity, then we want to run it again
-                    if AxiomReactor::len() >= concurrency_cap {
-                        continue
-                    }
-
-                    // ... Else, we queue it till it's full again
-                    while AxiomReactor::len() < concurrency_cap {
-                        if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
-                            AxiomReactor::spawn(Actor::receive(actor));
-                        } else {
-                            break // ... Unless there's nothing to spawn
-                        }
-                    }
-                }
-
-                while AxiomReactor::len() > 0 {
-                    AxiomReactor::single_iter()
-                }
-
-                // FIXME Refactor this into a function so all threads can utilize it.
-                let (mutex, condvar) = &*system.data.running_thread_count;
-                let mut count = mutex.lock().unwrap();
-                *count = *count - 1;
-                // If this is the last thread exiting we will notify any waiters.
-                if *count == 0 {
-                    condvar.notify_all();
-                }
-            })
-            .unwrap()
-    }
+//    fn start_dispatcher_thread(&self, number: u16) -> JoinHandle<()> {
+//        // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
+//        // long in the channel.
+//        let system = self.clone();
+//        let receiver = self.data.receiver.clone();
+//        let thread_timeout = self.data.config.thread_wait_time;
+//        let concurrency_cap = self.data.config.concurrency_per_thread;
+//        let name = format!("DispatchThread{}", number);
+//
+//        thread::Builder::new()
+//            .name(name)
+//            .spawn(move || {
+//                system.init_current();
+//
+//                while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+//                    // Start a single iteration through the reactor's tasks
+//                    AxiomReactor::single_iter();
+//
+//                    // If the reactor is still at capacity, then we want to run it again
+//                    if AxiomReactor::len() >= concurrency_cap {
+//                        continue
+//                    }
+//
+//                    // ... Else, we queue it till it's full again
+//                    while AxiomReactor::len() < concurrency_cap {
+//                        if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
+//                            AxiomReactor::spawn(Actor::receive(actor));
+//                        } else {
+//                            break // ... Unless there's nothing to spawn
+//                        }
+//                    }
+//                }
+//
+//                while AxiomReactor::len() > 0 {
+//                    AxiomReactor::single_iter()
+//                }
+//
+//                // FIXME Refactor this into a function so all threads can utilize it.
+//                let (mutex, condvar) = &*system.data.running_thread_count;
+//                let mut count = mutex.lock().unwrap();
+//                *count = *count - 1;
+//                // If this is the last thread exiting we will notify any waiters.
+//                if *count == 0 {
+//                    condvar.notify_all();
+//                }
+//            })
+//            .unwrap()
+//    }
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
     /// delays have elapsed.
@@ -689,9 +690,9 @@ impl ActorSystem {
 
     // A internal helper to register an actor in the actor system.
     pub(crate) fn register_actor(&self, actor: Arc<Actor>) -> Result<Aid, AxiomError> {
+        let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
-        let aids_by_name = &self.data.aids_by_name;
         let aid = actor.context.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
@@ -700,8 +701,9 @@ impl ActorSystem {
                 aids_by_name.insert(name_string.clone(), aid.clone());
             }
         }
+        actors_by_aid.insert(aid.clone(), actor.clone());
         aids_by_uuid.insert(aid.uuid(), aid.clone());
-        actors_by_aid.insert(aid.clone(), actor);
+        self.data.executor.register_actor(actor);
         aid.send(Message::new(SystemMsg::Start))?;
         Ok(aid)
     }
@@ -736,12 +738,12 @@ impl ActorSystem {
 
     /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
     /// a time slice if the actor has more messages that are receivable.
-    pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
-        self.data
-            .sender
-            .send_await_timeout(actor, self.data.config.work_channel_timeout)
-            .expect("Unable to Schedule actor: ")
-    }
+//    pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
+//        self.data
+//            .sender
+//            .send_await_timeout(actor, self.data.config.work_channel_timeout)
+//            .expect("Unable to Schedule actor: ")
+//    }
 
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
     /// lookup table. This function gets called when an actor goes from 0 receivable messages to
@@ -755,9 +757,8 @@ impl ActorSystem {
         match actors_by_aid.get(&aid) {
             Some(actor) => self
                 .data
-                .sender
-                .send_await_timeout(actor.clone(), self.data.config.work_channel_timeout)
-                .expect("Unable to Schedule actor: "),
+                .executor
+                .wake(actor.context.aid.uuid()),
             None => {
                 // The actor was removed from the map so ignore the problem and just log
                 // a warning.
@@ -767,7 +768,6 @@ impl ActorSystem {
                     aid.clone(),
                     self.data.uuid.to_string(),
                 );
-                ()
             }
         }
     }

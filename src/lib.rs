@@ -236,7 +236,7 @@ pub use crate::system::WireMessage;
 
 pub mod actors;
 pub mod cluster;
-mod executor;
+mod scheduling;
 pub mod message;
 pub mod system;
 
