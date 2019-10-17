@@ -28,14 +28,14 @@ struct RawTrackingData {
 }
 
 impl Scheduler for LegacyScheduling {
-    fn new(config: ActorSystemConfig) -> Self {
+    fn new(config: &ActorSystemConfig) -> Self {
         let mut actors_per_reactor = DashMap::default();
         for i in 0..config.thread_pool_size {
             actors_per_reactor.insert(i, 0);
         }
 
         Self {
-            system_config: config,
+            system_config: config.clone(),
             actors_per_reactor,
             actor_trackers: Default::default(),
         }
@@ -49,7 +49,7 @@ impl Scheduler for LegacyScheduling {
 
     fn log_sleep(&self, id: Uuid) {
         let data = self.get_raw_data(&id);
-        self.actors_per_reactor.get(&data.reactor_id).unwrap() -= 1;
+        (*self.actors_per_reactor.get(&data.reactor_id).unwrap()) -= 1;
     }
 
     /// This is effectively a resume or start of time spent on an Actor,
@@ -91,8 +91,14 @@ impl Scheduler for LegacyScheduling {
         let data = self.get_raw_data(&id);
 
         if data.reactor_id == u16::max_value() {
-            data.reactor_id = self.actors_per_reactor.iter()
-                .fold((0, u32::max_value()), get_lowest_count);
+            let mut state = (0u16, u32::max_value());
+            for x in self.actors_per_reactor.iter() {
+                if x.value() > &state.1 {
+                    state = (*x.key(), *x.value());
+                }
+            }
+
+            data.reactor_id = state.0;
         }
 
         ScheduleData {
@@ -103,12 +109,6 @@ impl Scheduler for LegacyScheduling {
             timeslice: Some(self.system_config.time_slice),
         }
     }
-}
-
-fn get_lowest_count(state: (u16, u32), new: (u16, u32)) -> (u16, u32) {
-    if state.1 > new.1 {
-        new
-    } else { state }
 }
 
 impl LegacyScheduling {
@@ -124,15 +124,17 @@ fn log_end_stretch_segment(data: &mut RefMut<RawTrackingData>) {
         _ => return
     };
 
-    let time_to_add = (Instant::now() - end_time);
+    let time_to_add = Instant::now() - end_time;
 
-    data.total_run_time += time_to_end;
+    data.total_run_time += time_to_add;
     data.current_start_time = None;
 }
 
 impl Default for RawTrackingData {
     fn default() -> Self {
         Self {
+            stopping: false,
+            reassigning: false,
             reactor_id: u16::max_value(),
             current_start_time: None,
             total_run_time: Duration::new(0, 0),

@@ -1,21 +1,9 @@
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
-use std::ops::Add;
-use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::thread;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
-use futures::{Future, Stream};
-use futures::task::{ArcWake, Waker};
 use uuid::Uuid;
 
-use crate::{ActorSystemConfig, AxiomResult, Status};
-use crate::actors::Actor;
+use crate::ActorSystemConfig;
 
 pub mod executor;
 pub mod schedulers;
@@ -25,7 +13,7 @@ pub mod schedulers;
 /// to let it process, at a time. The actual enforcement is up to the produced
 /// Schedules.
 pub(crate) trait Scheduler {
-    fn new(config: &ActorSystemConfig) -> Self;
+    fn new(config: &ActorSystemConfig) -> Self where Self: Sized;
 
     fn log_start(&self, id: Uuid);
     fn log_stop(&self, id: Uuid);
@@ -50,7 +38,7 @@ pub(crate) struct ScheduleData {
 
 pub(crate) struct Schedule {
     id: Uuid,
-    scheduler: Arc<dyn Scheduler>,
+    scheduler: Arc<dyn Scheduler + Send + Sync>,
     schedule_data: ScheduleData,
 
     // This is data specific to the current stretch of the Actor
@@ -61,7 +49,7 @@ pub(crate) struct Schedule {
 }
 
 impl Schedule {
-    fn new(id: Uuid, scheduler: Arc<dyn Scheduler>) -> Self {
+    fn new(id: Uuid, scheduler: Arc<dyn Scheduler + Send + Sync>) -> Self {
         Self {
             id,
             scheduler,
@@ -97,10 +85,10 @@ impl Schedule {
 
         if let Some(msgs_left) = &mut self.messages_left {
             if *msgs_left < 0 {
-                msgs_left -= 1;
+                *msgs_left -= 1;
             }
 
-            if msgs_left == 0 {
+            if *msgs_left == 0 {
                 return ScheduleResult::Next
             }
         }

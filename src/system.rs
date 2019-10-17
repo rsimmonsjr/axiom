@@ -10,6 +10,7 @@
 
 use std::collections::{BinaryHeap, HashSet};
 use std::fmt;
+use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -26,8 +27,8 @@ use uuid::Uuid;
 use crate::*;
 use crate::actors::*;
 use crate::message::*;
-use crate::scheduling::{AxiomReactor, Scheduler};
 use crate::scheduling::executor::AxiomExecutor;
+use crate::scheduling::Scheduler;
 
 // Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
 // other types can obtain a clone if needed at any time. This will be automatically set for all
@@ -265,10 +266,10 @@ struct ActorSystemData {
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a time slice of messages if it has more
     /// messages to process.
-    sender: SeccSender<Arc<Actor>>,
+    sender: SeccSender<Arc<Pin<Box<Actor>>>>,
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
-    receiver: SeccReceiver<Arc<Actor>>,
+    receiver: SeccReceiver<Arc<Pin<Box<Actor>>>>,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
@@ -279,7 +280,7 @@ struct ActorSystemData {
     // waiting on the condvar that all threads have exited.
     running_thread_count: Arc<(Mutex<u16>, Condvar)>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
-    actors_by_aid: Arc<DashMap<Aid, Arc<Actor>>>,
+    actors_by_aid: Arc<DashMap<Aid, Arc<Pin<Box<Actor>>>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
     aids_by_uuid: Arc<DashMap<Uuid, Aid>>,
@@ -308,9 +309,9 @@ impl ActorSystem {
     /// Creates an actor system with the given config. The user should benchmark how many slots
     /// are needed in the work channel, the number of threads they need in the system and and so
     /// on in order to satisfy the requirements of the software they are creating.
-    pub fn create<S: Scheduler>(config: ActorSystemConfig) -> ActorSystem {
+    pub fn create<S: Scheduler + Send + Sync>(config: ActorSystemConfig) -> ActorSystem {
         let (sender, receiver) =
-            secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
+            secc::create::<Arc<Pin<Box<Actor>>>>(config.work_channel_size, config.thread_wait_time);
 
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
@@ -689,7 +690,7 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: Arc<Actor>) -> Result<Aid, AxiomError> {
+    pub(crate) fn register_actor(&self, actor: Arc<Pin<Box<Actor>>>) -> Result<Aid, AxiomError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;

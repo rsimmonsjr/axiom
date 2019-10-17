@@ -8,16 +8,16 @@
 
 use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::marker::{PhantomData, Send, Sync};
+use std::marker::{Send, Sync};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::lock::Mutex;
 use futures::Stream;
-use log::{error, warn};
+use log::error;
 use secc::*;
 use serde::{Deserialize, Serialize};
 use serde::de::Deserializer;
@@ -688,7 +688,7 @@ impl<F> Handler for F where F: (FnMut(Context, Message) -> ActorFuture) + Send +
 
 /// Concrete Future type for type erasure
 pub(crate) struct ActorFuture {
-    processor: Pin<Box<dyn Future<Output=AxiomResult>>>,
+    processor: Pin<Box<dyn Future<Output=AxiomResult> + Send>>,
 }
 
 impl Future for ActorFuture {
@@ -765,9 +765,9 @@ pub(crate) struct Actor {
     /// An async function processing a message sent to the actor, wrapped in a closure to
     /// erase the state type that the actor is managing. The inner state is Arc<Mutex>'d to
     /// ensure the Actor is synchronous in relation to itself.
-    handler: Box<dyn Handler>,
+    handler: Mutex<Box<dyn Handler>>,
     /// The pending result of the current handler invocation.
-    pending: Option<Pin<Box<ActorFuture>>>,
+    pending: Mutex<Option<Pin<Box<ActorFuture>>>>,
 }
 
 impl Actor {
@@ -779,11 +779,11 @@ impl Actor {
         builder: &ActorBuilder,
         mut state: S,
         mut processor: F,
-    ) -> Arc<Actor>
-    where
-        S: Send + Sync + 'static,
-        R: Future<Output=AxiomResult> + Send + 'static,
-        F: Processor<S, R> + 'static,
+    ) -> Arc<Pin<Box<Actor>>>
+        where
+            S: Send + Sync + 'static,
+            R: Future<Output=AxiomResult> + Send + 'static,
+            F: Processor<S, R> + 'static,
     {
         let (sender, receiver) = secc::create::<Message>(
             builder
@@ -809,10 +809,10 @@ impl Actor {
         let state = Arc::new(Mutex::new(state));
 
         let handler = Box::new(move |ctx: Context, msg: Message| {
-            async {
-                let state = state.lock().await;
-                ActorFuture::new((processor)(&mut state, ctx, msg))
-            }
+            ActorFuture::new(async {
+                let mut state = state.lock().await;
+                (processor)(&mut state, ctx, msg).await
+            })
         });
 
         // This is the receiving side of the actor which holds the processor wrapped in the
@@ -822,11 +822,11 @@ impl Actor {
         let actor = Actor {
             context,
             receiver,
-            handler,
-            pending: None,
+            handler: Mutex::new(handler),
+            pending: Mutex::new(None),
         };
 
-        Arc::new(actor)
+        Arc::new(Box::pin(actor))
     }
 
     /// Receive a message from the channel and process it with the actor. This function is the
@@ -930,19 +930,28 @@ impl Stream for Actor {
     type Item = AxiomResult;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(pending) = self.pending {
-            pending.poll(cx).map(|p| Some(p))
+        let mut pending = match self.pending.try_lock() {
+            Some(mut g) => g,
+            None => return Poll::Pending,
+        };
+
+        if let Some(pending) = *pending {
+            pending.as_mut().poll(cx).map(|p| Some(p))
         } else {
             match self.receiver.receive() {
                 Ok(msg) => {
-                    let mut future: Pin<Box<ActorFuture>> =
-                        Box::pin((*self.handler)(self.context.clone(), msg.clone()));
+                    let handler = match self.handler.try_lock() {
+                        Some(g) => g,
+                        None => return Poll::Pending,
+                    };
 
-                    if let Pending::Ready(mut result) = future.poll(cx) {
+                    let mut future = Box::pin((*handler)(self.context.clone(), msg.clone()));
+
+                    if let Poll::Ready(mut result) = future.as_mut().poll(cx) {
                         // If the message was a system stop message then we override the actor returned
                         // result with a 'Status::Stop'. The override means actors that don't do anything
                         // special can essentially ignore processing stop.
-                        if let Some(m) = message.content_as::<SystemMsg>() {
+                        if let Some(m) = msg.content_as::<SystemMsg>() {
                             if let SystemMsg::Stop = *m {
                                 result = Ok(Status::Stop)
                             }
@@ -950,7 +959,7 @@ impl Stream for Actor {
 
                         return Poll::Ready(Some(result))
                     } else {
-                        self.pending = Some(future);
+                        *pending = Some(future);
                         return Poll::Pending
                     }
                 }
