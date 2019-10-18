@@ -13,7 +13,9 @@ pub mod schedulers;
 /// to let it process, at a time. The actual enforcement is up to the produced
 /// Schedules.
 pub(crate) trait Scheduler {
-    fn new(config: &ActorSystemConfig) -> Self where Self: Sized;
+    fn new(config: &ActorSystemConfig) -> Self
+    where
+        Self: Sized;
 
     fn log_start(&self, id: Uuid);
     fn log_stop(&self, id: Uuid);
@@ -50,25 +52,42 @@ pub(crate) struct Schedule {
 
 impl Schedule {
     fn new(id: Uuid, scheduler: Arc<dyn Scheduler + Send + Sync>) -> Self {
+        let schedule_data = scheduler.get_schedule_data(id);
         Self {
             id,
             scheduler,
-            schedule_data: scheduler.get_schedule_data(id),
+            schedule_data,
             messages_left: None,
             yield_at: None,
             current_reactor: 0,
         }
     }
 
-    fn log_start(&self) { self.scheduler.log_start(self.id) }
-    fn log_stop(&self) { self.scheduler.log_stop(self.id) }
-    fn log_wake(&self) { self.scheduler.log_wake(self.id) }
-    fn log_sleep(&self) { self.scheduler.log_sleep(self.id) }
-    fn log_poll_actor(&self) { self.scheduler.log_poll(self.id) }
-    fn log_pending_message(&self) { self.scheduler.log_pending_message(self.id) }
-    fn log_stop_message(&self) { self.scheduler.log_stop_message(self.id) }
+    fn log_start(&self) {
+        self.scheduler.log_start(self.id)
+    }
+    fn log_stop(&self) {
+        self.scheduler.log_stop(self.id)
+    }
+    fn log_wake(&self) {
+        self.scheduler.log_wake(self.id)
+    }
+    fn log_sleep(&self) {
+        self.scheduler.log_sleep(self.id)
+    }
+    fn log_poll_actor(&self) {
+        self.scheduler.log_poll(self.id)
+    }
+    fn log_pending_message(&self) {
+        self.scheduler.log_pending_message(self.id)
+    }
+    fn log_stop_message(&self) {
+        self.scheduler.log_stop_message(self.id)
+    }
 
-    fn get_reactor(&self) -> u16 { self.current_reactor }
+    fn get_reactor(&self) -> u16 {
+        self.current_reactor
+    }
 
     /// This function needs to be ran every time the Actor returns Ready(Some)
     /// When ran, it decrements how many messages it has left to handle, then
@@ -80,7 +99,7 @@ impl Schedule {
         self.update();
 
         if self.schedule_data.stopped {
-            return ScheduleResult::Stopped
+            return ScheduleResult::Stopped;
         }
 
         if let Some(msgs_left) = &mut self.messages_left {
@@ -89,19 +108,21 @@ impl Schedule {
             }
 
             if *msgs_left == 0 {
-                return ScheduleResult::Next
+                return ScheduleResult::Next;
             }
         }
 
         if let Some(yield_at) = self.yield_at {
             if Instant::now() >= yield_at {
-                return ScheduleResult::Next
+                return ScheduleResult::Next;
             }
         }
 
         if self.current_reactor != self.schedule_data.reactor_id {
             ScheduleResult::Reassigned(self.schedule_data.reactor_id)
-        } else { ScheduleResult::Continue }
+        } else {
+            ScheduleResult::Continue
+        }
     }
 
     pub(crate) fn update(&mut self) {

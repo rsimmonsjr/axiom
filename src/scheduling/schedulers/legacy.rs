@@ -1,8 +1,6 @@
-use std::borrow::BorrowMut;
-use std::cell::{RefCell, RefMut};
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashMapRefMut};
 use uuid::Uuid;
 
 use crate::ActorSystemConfig;
@@ -15,9 +13,10 @@ use crate::scheduling::{ScheduleData, Scheduler};
 pub struct LegacyScheduling {
     system_config: ActorSystemConfig,
     actors_per_reactor: DashMap<u16, u32>,
-    actor_trackers: DashMap<Uuid, RefCell<RawTrackingData>>,
+    actor_trackers: DashMap<Uuid, RawTrackingData>,
 }
 
+#[derive(Clone)]
 struct RawTrackingData {
     stopping: bool,
     reassigning: bool,
@@ -29,7 +28,7 @@ struct RawTrackingData {
 
 impl Scheduler for LegacyScheduling {
     fn new(config: &ActorSystemConfig) -> Self {
-        let mut actors_per_reactor = DashMap::default();
+        let actors_per_reactor = DashMap::default();
         for i in 0..config.thread_pool_size {
             actors_per_reactor.insert(i, 0);
         }
@@ -41,15 +40,15 @@ impl Scheduler for LegacyScheduling {
         }
     }
 
-    fn log_start(&self, id: Uuid) {}
+    fn log_start(&self, _id: Uuid) {}
 
-    fn log_stop(&self, id: Uuid) {}
+    fn log_stop(&self, _id: Uuid) {}
 
-    fn log_wake(&self, id: Uuid) {}
+    fn log_wake(&self, _id: Uuid) {}
 
     fn log_sleep(&self, id: Uuid) {
         let data = self.get_raw_data(&id);
-        (*self.actors_per_reactor.get(&data.reactor_id).unwrap()) -= 1;
+        (*self.actors_per_reactor.get_mut(&data.reactor_id).unwrap()) -= 1;
     }
 
     /// This is effectively a resume or start of time spent on an Actor,
@@ -88,7 +87,7 @@ impl Scheduler for LegacyScheduling {
     }
 
     fn get_schedule_data(&self, id: Uuid) -> ScheduleData {
-        let data = self.get_raw_data(&id);
+        let mut data = self.get_raw_data(&id);
 
         if data.reactor_id == u16::max_value() {
             let mut state = (0u16, u32::max_value());
@@ -112,16 +111,22 @@ impl Scheduler for LegacyScheduling {
 }
 
 impl LegacyScheduling {
-    fn get_raw_data(&self, key: &Uuid) -> RefMut<RawTrackingData> {
-        (**self.actor_trackers.get_or_insert(key,
-                                             RefCell::new(RawTrackingData::default())).borrow_mut()).borrow_mut()
+    fn get_raw_data(&self, key: &Uuid) -> DashMapRefMut<Uuid, RawTrackingData> {
+        match self.actor_trackers.get_mut(&key) {
+            Some(t) => t,
+            None => {
+                let new = RawTrackingData::default();
+                self.actor_trackers.insert(*key, new);
+                self.actor_trackers.get_mut(&key).unwrap()
+            }
+        }
     }
 }
 
-fn log_end_stretch_segment(data: &mut RefMut<RawTrackingData>) {
+fn log_end_stretch_segment(data: &mut RawTrackingData) {
     let end_time = match data.current_start_time {
         Some(at) => at,
-        _ => return
+        _ => return,
     };
 
     let time_to_add = Instant::now() - end_time;

@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use futures::task::ArcWake;
 use uuid::Uuid;
 
-use crate::{ActorSystemConfig, AxiomResult, Status};
+use crate::{ActorSystemConfig, AxiomError, Status};
 use crate::actors::Actor;
 use crate::scheduling::{Schedule, Scheduler, ScheduleResult};
 use futures::Stream;
@@ -45,25 +45,34 @@ impl AxiomExecutor {
     /// This gives the Actor to the Executor to manage. This must be ran
     /// before any messages are sent to the Actor, else it will fail to be
     /// woken until after its registered.
-    pub(crate) fn register_actor(&self, actor: Arc<Pin<Box<Actor>>>) {
-        let id = actor.context.aid.uuid();
+    pub(crate) fn register_actor(&self, actor: Arc<RwLock<Pin<Box<Actor>>>>) {
+        let id = actor.read().expect("Poisoned Actor").context.aid.uuid();
         let mut schedule = Schedule::new(id, self.scheduler.clone());
         schedule.update();
         schedule.log_start();
-        self.sleeping.insert(id, Task { id, schedule, actor });
+        self.sleeping.insert(
+            id,
+            Task {
+                id,
+                schedule,
+                actor,
+            },
+        );
     }
 
     /// The Aid, through the ActorSystem, should call this on Message Send.
     pub(crate) fn wake(&self, id: Uuid) {
         let mut task = match self.sleeping.remove(&id) {
-            Some((_, mut task)) => task,
+            Some((_, task)) => task,
             None => return, // The Actor is already awake.
         };
 
         task.schedule.log_wake();
         task.schedule.update();
 
-        let reactor = self.reactors.get(&task.schedule.get_reactor())
+        let reactor = self
+            .reactors
+            .get(&task.schedule.get_reactor())
             .expect("Uninitialized Reactor");
 
         reactor.insert(task);
@@ -76,7 +85,10 @@ impl AxiomExecutor {
     fn return_task(&self, task: Task, new_reactor: Option<u16>) {
         match new_reactor {
             Some(id) => {
-                let r = self.reactors.get(&id).expect("Scheduler provided invalid Reactor ID");
+                let r = self
+                    .reactors
+                    .get(&id)
+                    .expect("Scheduler provided invalid Reactor ID");
                 r.insert(task);
             }
             None => {
@@ -106,25 +118,40 @@ pub(crate) struct AxiomReactor {
 
 impl AxiomReactor {
     /// This is how the Executor moves an Actor from itself into a Reactor
-    fn insert(&self, mut task: Task) {
-        let token = Token { id: task.id, reactor: self.clone() };
+    fn insert(&self, task: Task) {
+        let token = Token {
+            id: task.id,
+            reactor: self.clone(),
+        };
         let waker = futures::task::waker(Arc::new(token));
         let wakeup = Wakeup { id: task.id, waker };
 
-        self.wait_queue.write()
-            .expect("Poisoned wait_queue").insert(task.id, task);
-        self.run_queue.write()
-            .expect("Poisoned run_queue").push_back(wakeup);
+        self.wait_queue
+            .write()
+            .expect("Poisoned wait_queue")
+            .insert(task.id, task);
+        self.run_queue
+            .write()
+            .expect("Poisoned run_queue")
+            .push_back(wakeup);
         self.ensure_running();
     }
 
     // This is the logic for the core loop that drives the Reactor. It MUST be
     // invoked inside a dedicated thread, else it will block the executor.
     fn thread(&self) {
-        'wakeup: while let Some(w) = self.run_queue.write()
-            .expect("Poisoned run_queue").pop_front() {
-            if let Some(mut task) = self.wait_queue.write()
-                .expect("Poisoned wait_queue").remove(&w.id) {
+        'wakeup: while let Some(w) = self
+            .run_queue
+            .write()
+            .expect("Poisoned run_queue")
+            .pop_front()
+        {
+            if let Some(mut task) = self
+                .wait_queue
+                .write()
+                .expect("Poisoned wait_queue")
+                .remove(&w.id)
+            {
                 task.schedule.update();
                 task.schedule.reset_stretch_data();
                 'stretch: loop {
@@ -133,13 +160,16 @@ impl AxiomReactor {
                         Poll::Ready(result) => {
                             if let None = result {
                                 self.executor.return_task(task, None);
-                                continue 'wakeup
+                                continue 'wakeup;
                             }
 
                             task.schedule.log_stop_message();
 
                             let result = result.unwrap();
-                            task.actor.handle_result(&result);
+                            task.actor
+                                .read()
+                                .expect("Poisoned Actor")
+                                .handle_result(&result);
 
                             match result {
                                 // Intentional or error'd stop means drop. It's dead, Jim.
@@ -151,10 +181,14 @@ impl AxiomReactor {
                                     match task.schedule.check_schedule() {
                                         ScheduleResult::Continue => continue 'stretch,
                                         ScheduleResult::Next => {
-                                            self.wait_queue.write()
-                                                .expect("Poisoned wait_queue").insert(w.id, task);
-                                            self.run_queue.write()
-                                                .expect("Poisoned run_queue").push_back(w);
+                                            self.wait_queue
+                                                .write()
+                                                .expect("Poisoned wait_queue")
+                                                .insert(w.id, task);
+                                            self.run_queue
+                                                .write()
+                                                .expect("Poisoned run_queue")
+                                                .push_back(w);
                                         }
                                         ScheduleResult::Reassigned(new_reactor) => {
                                             self.executor.return_task(task, Some(new_reactor));
@@ -166,14 +200,16 @@ impl AxiomReactor {
                                 }
                             }
 
-                            continue 'wakeup
+                            continue 'wakeup;
                         }
                         Poll::Pending => {
                             task.schedule.log_pending_message();
-                            self.wait_queue.write()
-                                .expect("Poisoned wait_queue").insert(w.id, task);
-                            continue 'wakeup
-                        },
+                            self.wait_queue
+                                .write()
+                                .expect("Poisoned wait_queue")
+                                .insert(w.id, task);
+                            continue 'wakeup;
+                        }
                     }
                 }
             }
@@ -184,14 +220,12 @@ impl AxiomReactor {
     // By allowing it to conclude and simply restart as necessary, we avoid
     // CPU spin locking. We should call this function as much as we need.
     fn ensure_running(&self) {
-        let mut join = self.thread_join.write()
-            .expect("Poisoned thread_join");
+        let mut join = self.thread_join.write().expect("Poisoned thread_join");
 
         let r = self.clone();
         join.get_or_insert(thread::spawn(move || {
             r.thread();
-            r.thread_join.write()
-                .expect("Poisoned thread_join").take();
+            r.thread_join.write().expect("Poisoned thread_join").take();
         }));
     }
 
@@ -205,7 +239,10 @@ impl AxiomReactor {
     }
 
     fn wake(&self, wakeup: Wakeup) {
-        self.run_queue.write().expect("Poisoned run_queue").push_back(wakeup);
+        self.run_queue
+            .write()
+            .expect("Poisoned run_queue")
+            .push_back(wakeup);
     }
 
     fn len(&self) -> usize {
@@ -216,14 +253,18 @@ impl AxiomReactor {
 struct Task {
     id: Uuid,
     schedule: Schedule,
-    actor: Arc<Pin<Box<Actor>>>,
+    actor: Arc<RwLock<Pin<Box<Actor>>>>,
 }
 
 impl Task {
-    fn poll(&mut self, waker: &Waker) -> Poll<Option<AxiomResult>> {
+    fn poll(&mut self, waker: &Waker) -> Poll<Option<Result<Status, AxiomError>>> {
         let mut ctx = Context::from_waker(waker);
 
-        self.actor.as_mut().poll_next(&mut ctx)
+        self.actor
+            .write()
+            .expect("Poisoned Actor")
+            .as_mut()
+            .poll_next(&mut ctx)
     }
 }
 

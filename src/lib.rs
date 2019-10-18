@@ -136,28 +136,28 @@
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(&mut self, message: &bool) -> AxiomResult {
+//!     fn handle_bool(mut self, message: &bool) -> AxiomResult<Self> {
 //!         if *message {
 //!             self.value += 1;
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Ok(Status::Done)
+//!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle_i32(&mut self, message: &i32) -> AxiomResult {
+//!     fn handle_i32(mut self, message: &i32) -> AxiomResult<Self> {
 //!         self.value += *message;
-//!         Ok(Status::Done)
+//!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
+//!     fn handle(&mut self, _context: Context, message: Message) -> AxiomResult<Self> {
 //!         if let Some(msg) = message.content_as::<bool>() {
-//!             self.handle_bool(&*msg)
+//!             self.handle_bool(msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
-//!             self.handle_i32(&*msg)
+//!             self.handle_i32(msg)
 //!         } else {
 //!             panic!("Failed to dispatch properly");
-//!             Ok(Status::Stop)
+
 //!         }
 //!     }
 //! }
@@ -222,6 +222,8 @@
 //! be a dumping ground for copy-paste or throwaway code. The best tests will look like
 //! architected code.  
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
+
+use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -294,7 +296,8 @@ impl std::error::Error for AxiomError {
 }
 
 /// A type for a result from an actor's message processor.
-pub type AxiomResult = Result<Status, AxiomError>;
+/// A Result::Err is treated as a fatal error, and the Actor will be stopped.
+pub type AxiomResult<State> = Result<(State, Status), AxiomError>;
 
 #[cfg(test)]
 mod tests {

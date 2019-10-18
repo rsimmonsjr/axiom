@@ -266,10 +266,10 @@ struct ActorSystemData {
     /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
     /// resent to the channel by a thread after handling a time slice of messages if it has more
     /// messages to process.
-    sender: SeccSender<Arc<Pin<Box<Actor>>>>,
+    sender: SeccSender<Arc<RwLock<Pin<Box<Actor>>>>>,
     /// Receiver side of the work channel. All threads in the pool will be grabbing actors
     /// from this receiver to process messages.
-    receiver: SeccReceiver<Arc<Pin<Box<Actor>>>>,
+    receiver: SeccReceiver<Arc<RwLock<Pin<Box<Actor>>>>>,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
@@ -280,7 +280,7 @@ struct ActorSystemData {
     // waiting on the condvar that all threads have exited.
     running_thread_count: Arc<(Mutex<u16>, Condvar)>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
-    actors_by_aid: Arc<DashMap<Aid, Arc<Pin<Box<Actor>>>>>,
+    actors_by_aid: Arc<DashMap<Aid, Arc<RwLock<Pin<Box<Actor>>>>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
     aids_by_uuid: Arc<DashMap<Uuid, Aid>>,
@@ -309,9 +309,11 @@ impl ActorSystem {
     /// Creates an actor system with the given config. The user should benchmark how many slots
     /// are needed in the work channel, the number of threads they need in the system and and so
     /// on in order to satisfy the requirements of the software they are creating.
-    pub fn create<S: Scheduler + Send + Sync>(config: ActorSystemConfig) -> ActorSystem {
-        let (sender, receiver) =
-            secc::create::<Arc<Pin<Box<Actor>>>>(config.work_channel_size, config.thread_wait_time);
+    pub fn create<S: Scheduler + Send + Sync + 'static>(config: ActorSystemConfig) -> ActorSystem {
+        let (sender, receiver) = secc::create::<Arc<RwLock<Pin<Box<Actor>>>>>(
+            config.work_channel_size,
+            config.thread_wait_time,
+        );
 
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
@@ -344,11 +346,11 @@ impl ActorSystem {
         {
             let mut guard = system.data.threads.lock().unwrap();
 
-//            // Start the dispatcher threads.
-//            for number in 0..system.data.config.thread_pool_size {
-//                let thread = system.start_dispatcher_thread(number);
-//                guard.push(thread);
-//            }
+            //            // Start the dispatcher threads.
+            //            for number in 0..system.data.config.thread_pool_size {
+            //                let thread = system.start_dispatcher_thread(number);
+            //                guard.push(thread);
+            //            }
 
             // Start the thread that reads from the `delayed_messages` queue.
             // FIXME Put in ability to confirm how many of these to start.
@@ -363,69 +365,11 @@ impl ActorSystem {
         system
             .spawn()
             .name("System")
-            .with(false, system_actor_processor)
+            .with((), system_actor_processor)
             .unwrap();
 
         system
     }
-
-    /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
-    /// threads constantly grab at the work channel trying to get the next [`Aid`] off the
-    /// channel. When they get an [`Aid`] they will process messages using the processor
-    /// registered for that [`Aid`] for one time slice. After the time slice, the dispatcher
-    /// thread will then check to see if the actor has more receivable messages. If the actor has
-    /// more messages then the [`Aid`] for the actor will be re-sent to the work channel to
-    /// process the next message. This allows thousands of actors to run and not take up resources
-    /// if they have no messages to process but also prevents one super busy actor from starving
-    /// out other actors that get messages only occasionally.
-//    fn start_dispatcher_thread(&self, number: u16) -> JoinHandle<()> {
-//        // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
-//        // long in the channel.
-//        let system = self.clone();
-//        let receiver = self.data.receiver.clone();
-//        let thread_timeout = self.data.config.thread_wait_time;
-//        let concurrency_cap = self.data.config.concurrency_per_thread;
-//        let name = format!("DispatchThread{}", number);
-//
-//        thread::Builder::new()
-//            .name(name)
-//            .spawn(move || {
-//                system.init_current();
-//
-//                while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
-//                    // Start a single iteration through the reactor's tasks
-//                    AxiomReactor::single_iter();
-//
-//                    // If the reactor is still at capacity, then we want to run it again
-//                    if AxiomReactor::len() >= concurrency_cap {
-//                        continue
-//                    }
-//
-//                    // ... Else, we queue it till it's full again
-//                    while AxiomReactor::len() < concurrency_cap {
-//                        if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
-//                            AxiomReactor::spawn(Actor::receive(actor));
-//                        } else {
-//                            break // ... Unless there's nothing to spawn
-//                        }
-//                    }
-//                }
-//
-//                while AxiomReactor::len() > 0 {
-//                    AxiomReactor::single_iter()
-//                }
-//
-//                // FIXME Refactor this into a function so all threads can utilize it.
-//                let (mutex, condvar) = &*system.data.running_thread_count;
-//                let mut count = mutex.lock().unwrap();
-//                *count = *count - 1;
-//                // If this is the last thread exiting we will notify any waiters.
-//                if *count == 0 {
-//                    condvar.notify_all();
-//                }
-//            })
-//            .unwrap()
-//    }
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
     /// delays have elapsed.
@@ -690,11 +634,14 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: Arc<Pin<Box<Actor>>>) -> Result<Aid, AxiomError> {
+    pub(crate) fn register_actor(
+        &self,
+        actor: Arc<RwLock<Pin<Box<Actor>>>>,
+    ) -> Result<Aid, AxiomError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
-        let aid = actor.context.aid.clone();
+        let aid = actor.read().expect("Poisoned Actor").context.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
                 return Err(AxiomError::NameAlreadyUsed(name_string.clone()));
@@ -739,12 +686,6 @@ impl ActorSystem {
 
     /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
     /// a time slice if the actor has more messages that are receivable.
-//    pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
-//        self.data
-//            .sender
-//            .send_await_timeout(actor, self.data.config.work_channel_timeout)
-//            .expect("Unable to Schedule actor: ")
-//    }
 
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
     /// lookup table. This function gets called when an actor goes from 0 receivable messages to
@@ -759,7 +700,7 @@ impl ActorSystem {
             Some(actor) => self
                 .data
                 .executor
-                .wake(actor.context.aid.uuid()),
+                .wake(actor.read().expect("Poisoned Actor").context.aid.uuid()),
             None => {
                 // The actor was removed from the map so ignore the problem and just log
                 // a warning.
@@ -917,7 +858,7 @@ enum SystemActorMessage {
 
 /// A processor for the system actor.
 /// FIXME Issue #89: Refactor into a full struct based actor in another file.
-async fn system_actor_processor(_: &mut bool, context: Context, message: Message) -> AxiomResult {
+async fn system_actor_processor(_: (), context: Context, message: Message) -> AxiomResult<()> {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
             // Someone requested that this system actor find an actor by name.
@@ -937,18 +878,18 @@ async fn system_actor_processor(_: &mut bool, context: Context, message: Message
                         reply_to, error
                     )
                 });
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             }
-            _ => Ok(Status::Done),
+            _ => Ok(((), Status::Done)),
         }
     } else if let Some(msg) = message.content_as::<SystemMsg>() {
         match &*msg {
-            SystemMsg::Start => Ok(Status::Done),
-            _ => Ok(Status::Done),
+            SystemMsg::Start => Ok(((), Status::Done)),
+            _ => Ok(((), Status::Done)),
         }
     } else {
         error!("Unhandled message received.");
-        Ok(Status::Done)
+        Ok(((), Status::Done))
     }
 }
 
