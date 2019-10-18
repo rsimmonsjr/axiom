@@ -9,8 +9,9 @@
 //! * Triggering an actor system shutdown within the actor.
 //! * Awaiting the actor system to shut down.
 
-use axiom::*;
 use serde::{Deserialize, Serialize};
+
+use axiom::*;
 
 /// The messages we will be sending to our actor. All messages must be serializeable and
 /// deserializeable with serde.

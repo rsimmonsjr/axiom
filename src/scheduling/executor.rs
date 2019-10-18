@@ -6,13 +6,13 @@ use std::thread;
 use std::thread::JoinHandle;
 
 use dashmap::DashMap;
-use futures::Stream;
 use futures::task::ArcWake;
 use uuid::Uuid;
 
 use crate::{ActorSystemConfig, AxiomResult, Status};
 use crate::actors::Actor;
 use crate::scheduling::{Schedule, Scheduler, ScheduleResult};
+use futures::Stream;
 
 /// The Executor is responsible for the starting and high-level scheduling of
 /// Actors. When an Actor is registered, it is wrapped in a Task and added to

@@ -8,20 +8,22 @@
 //! for a reference. It is designed to be the default way Axiom is clustered and thus it will be
 //! robust and well tested like the rest of Axiom.
 
-use crate::*;
-use log::{error, info};
-use secc::*;
 use std::collections::HashMap;
-use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
+use std::io::prelude::*;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+use log::{error, info};
+use secc::*;
 use uuid::Uuid;
+
+use crate::*;
 
 /// Encapsulates information on a connection to another actor system.
 struct ConnectionData {
@@ -222,8 +224,9 @@ impl TcpClusterMgr {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::tests::*;
+
+    use super::*;
 
     #[test]
     fn test_tcp_remote_connect() {
