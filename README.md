@@ -6,7 +6,6 @@ Implementation of a highly-scalable and ergonomic actor model for Rust
 [![License](https://img.shields.io/crates/l/axiom.svg)](https://github.com/rsimmonsjr/axiom#license)
 [![Discord](https://img.shields.io/discord/632273530020429855?color=7289DA&label=Discord&logo=Discord)](https://discord.gg/8MHVCzr)
 
-
 # Axiom
 
 Axiom brings a highly-scalable actor model to the Rust language based on the many lessons
