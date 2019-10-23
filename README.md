@@ -21,6 +21,20 @@ rather a new implementation deriving inspiration from the good parts of those pr
   * PORTING: The signature for Processors has changed from references for `Context` and `Message` to
   values. For closures-as-actors, wrap the body in an `async` block. `move |...| {...}` becomes
   `move |...| async { ... }`. For regular function syntax, simply add `async` in front of `fn`.
+  * BREAKING CHANGE: Due to the nature of futures, the actor's processor cannot be given a mutable 
+  reference to the state of the actor. The state needs to live at least as long as the future and 
+  our research could find no way to do this easily. So now when the actor returns a status it will 
+  return the new state as well. See the examples for more info. The signature for the processor 
+  is now: 
+  ```rust
+      impl<F, S, R> Processor<S, R> for F where
+          S: Send + Sync,
+          R: Future<Output = AxiomResult<S>> + Send + 'static,
+          F: (FnMut(S, Context, Message) -> R) + Send + Sync + 'static  {} 
+  ```
+  * The user should take note that their actor will run now when it is POLLED and not immediately 
+  as this may have some effect on the actor. Although depending on timing in actor systems is 
+  chancy at best, please be aware of this. 
 
 [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 

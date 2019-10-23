@@ -9,15 +9,15 @@ use dashmap::DashMap;
 use futures::task::ArcWake;
 use uuid::Uuid;
 
-use crate::{ActorSystemConfig, AxiomError, Status};
 use crate::actors::Actor;
-use crate::scheduling::{Schedule, Scheduler, ScheduleResult};
+use crate::scheduling::{Schedule, ScheduleResult, Scheduler};
+use crate::{ActorSystemConfig, AxiomError, Status};
 use futures::Stream;
 
-/// The Executor is responsible for the starting and high-level scheduling of
-/// Actors. When an Actor is registered, it is wrapped in a Task and added to
-/// the sleep queue. When the Actor is woken by a sent message, the Executor
-/// will check its scheduling data and queue it in the appropriate Reactor.
+/// The Executor is responsible for the starting and high-level scheduling of Actors. When an
+/// Actor is registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
+/// woken by a sent message, the Executor will check its scheduling data and queue it in the
+/// appropriate Reactor.
 #[derive(Clone)]
 pub(crate) struct AxiomExecutor {
     config: ActorSystemConfig,
@@ -27,6 +27,8 @@ pub(crate) struct AxiomExecutor {
 }
 
 impl AxiomExecutor {
+    /// Creates a new Executor with the given actor system configuration. This will govern the
+    /// configuration of the executor.
     pub(crate) fn new<S: Scheduler + Send + Sync + 'static>(config: &ActorSystemConfig) -> Self {
         Self {
             config: config.clone(),
@@ -36,15 +38,17 @@ impl AxiomExecutor {
         }
     }
 
+    /// Initializes the executor and starts the AxiomReactor dinstances based on the count of the
+    /// number of threads configured in the actor system. This must be called before any work can
+    /// be performed with the actor system.
     pub(crate) fn init(&self) {
         for i in 0..self.config.thread_pool_size {
             self.reactors.insert(i, AxiomReactor::new(self.clone()));
         }
     }
 
-    /// This gives the Actor to the Executor to manage. This must be ran
-    /// before any messages are sent to the Actor, else it will fail to be
-    /// woken until after its registered.
+    /// This gives the Actor to the Executor to manage. This must be ran before any messages are
+    /// sent to the Actor, else it will fail to be woken until after its registered.
     pub(crate) fn register_actor(&self, actor: Arc<RwLock<Pin<Box<Actor>>>>) {
         let id = actor.read().expect("Poisoned Actor").context.aid.uuid();
         let mut schedule = Schedule::new(id, self.scheduler.clone());
@@ -60,7 +64,8 @@ impl AxiomExecutor {
         );
     }
 
-    /// The Aid, through the ActorSystem, should call this on Message Send.
+    /// This wakes an actor in the executor which will cause its future to be polled. The Aid,
+    /// through the ActorSystem, will call this on Message Send.
     pub(crate) fn wake(&self, id: Uuid) {
         let mut task = match self.sleeping.remove(&id) {
             Some((_, task)) => task,
@@ -78,10 +83,10 @@ impl AxiomExecutor {
         reactor.insert(task);
     }
 
-    /// When a Reactor is done with an Actor, it should be sent here.
-    /// If it is sent with new_reactor: Some, it's been reassigned to
-    /// a different Reactor and should be sent there immediately.
-    /// Otherwise, it's been depleted and should be stored as Sleeping.
+    /// When a Reactor is done with an Actor, it will be sent here.  If it is sent with a `Some`
+    /// `new_reactor`, it's been reassigned to a different reactor and will be sent to that
+    /// reactor immediately.  Otherwise, it's been depleted of messages to process and should be
+    /// stored as sleeping.
     fn return_task(&self, task: Task, new_reactor: Option<u16>) {
         match new_reactor {
             Some(id) => {
@@ -99,11 +104,10 @@ impl AxiomExecutor {
     }
 }
 
-/// The Reactor is a single-threaded loop that will poll the woken Actors. It
-/// will run scheduling checks for `Ready(Some)`, either re-running or returning
-/// to the Executor for schedule adjustments. It will return the Task to the
-/// Executor on `Ready(None)`, until the Actor wakes again. It will return the
-/// Task to the wait_queue on `Pending`.
+/// The Reactor is a single-threaded loop that will poll the woken Actors. It will run scheduling
+/// checks for `Ready(Some)`, either re-running or returning to the Executor for schedule
+/// adjustments. It will return the Task to the Executor on `Ready(None)`, until the Actor wakes
+/// again. It will return the Task to the wait_queue on `Pending`.
 #[derive(Clone)]
 pub(crate) struct AxiomReactor {
     executor: AxiomExecutor,
@@ -111,13 +115,12 @@ pub(crate) struct AxiomReactor {
     run_queue: Arc<RwLock<VecDeque<Wakeup>>>,
     /// The queue of Actors this Reactor is responsible for
     wait_queue: Arc<RwLock<BTreeMap<Uuid, Task>>>,
-    /// This is used as a semaphore to ensure the reactor has
-    /// only a single active thread at a time.
+    /// This is used as a semaphore to ensure the reactor has only a single active thread.
     thread_join: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl AxiomReactor {
-    /// This is how the Executor moves an Actor from itself into a Reactor
+    /// Moves an Actor from the executor into a reactor.
     fn insert(&self, task: Task) {
         let token = Token {
             id: task.id,
@@ -137,8 +140,8 @@ impl AxiomReactor {
         self.ensure_running();
     }
 
-    // This is the logic for the core loop that drives the Reactor. It MUST be
-    // invoked inside a dedicated thread, else it will block the executor.
+    // This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
+    // dedicated thread, else it will block the executor.
     fn thread(&self) {
         'wakeup: while let Some(w) = self
             .run_queue
