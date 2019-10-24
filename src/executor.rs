@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 use crate::actors::Actor;
 use crate::{ActorSystemConfig, AxiomError, Status};
-use futures::Stream;
 
 /// The Executor is responsible for the starting and high-level scheduling of Actors. When an
 /// Actor is registered, it is wrapped in a Task and added to the sleep queue. When the Actor is

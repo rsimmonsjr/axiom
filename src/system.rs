@@ -261,7 +261,6 @@ struct ActorSystemData {
     uuid: Uuid,
     /// The config for the actor system which was passed to it when created.
     config: ActorSystemConfig,
-    // receiver: SeccReceiver<Arc<RwLock<Pin<Box<Actor>>>>>,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
@@ -313,7 +312,6 @@ impl ActorSystem {
             data: Arc::new(ActorSystemData {
                 uuid: Uuid::new_v4(),
                 config,
-                // receiver,
                 threads,
                 executor,
                 shutdown_triggered: AtomicBool::new(false),
@@ -594,24 +592,6 @@ impl ActorSystem {
     pub fn trigger_and_await_shutdown(&self) {
         self.trigger_shutdown();
         self.await_shutdown();
-    }
-
-    /// Returns the total number of times actors have been sent to the work channel.
-    #[inline]
-    pub fn sent(&self) -> usize {
-        self.data.receiver.sent()
-    }
-
-    /// Returns the total number of times actors have been processed from the work channel.
-    #[inline]
-    pub fn received(&self) -> usize {
-        self.data.receiver.received()
-    }
-
-    /// Returns the total number of actors that are currently pending in the work channel.
-    #[inline]
-    pub fn pending(&self) -> usize {
-        self.data.receiver.pending()
     }
 
     // A internal helper to register an actor in the actor system.
