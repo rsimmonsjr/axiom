@@ -9,12 +9,12 @@
 //! robust and well tested like the rest of Axiom.
 
 use std::collections::HashMap;
-use std::io::{BufReader, BufWriter};
 use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::sync::{Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;

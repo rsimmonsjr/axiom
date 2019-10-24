@@ -238,8 +238,8 @@ pub use crate::system::WireMessage;
 
 pub mod actors;
 pub mod cluster;
+mod executor;
 pub mod message;
-mod scheduling;
 pub mod system;
 
 /// Errors returned by various parts of Axiom.

@@ -11,8 +11,8 @@
 use std::collections::{BinaryHeap, HashSet};
 use std::fmt;
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -24,11 +24,10 @@ use secc::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::*;
 use crate::actors::*;
+use crate::executor::AxiomExecutor;
 use crate::message::*;
-use crate::scheduling::executor::AxiomExecutor;
-use crate::scheduling::Scheduler;
+use crate::*;
 
 // Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
 // other types can obtain a clone if needed at any time. This will be automatically set for all
@@ -262,14 +261,7 @@ struct ActorSystemData {
     uuid: Uuid,
     /// The config for the actor system which was passed to it when created.
     config: ActorSystemConfig,
-    /// Sender side of the work channel. When an actor gets a message and its pending count
-    /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
-    /// resent to the channel by a thread after handling a time slice of messages if it has more
-    /// messages to process.
-    sender: SeccSender<Arc<RwLock<Pin<Box<Actor>>>>>,
-    /// Receiver side of the work channel. All threads in the pool will be grabbing actors
-    /// from this receiver to process messages.
-    receiver: SeccReceiver<Arc<RwLock<Pin<Box<Actor>>>>>,
+    // receiver: SeccReceiver<Arc<RwLock<Pin<Box<Actor>>>>>,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
@@ -309,24 +301,19 @@ impl ActorSystem {
     /// Creates an actor system with the given config. The user should benchmark how many slots
     /// are needed in the work channel, the number of threads they need in the system and and so
     /// on in order to satisfy the requirements of the software they are creating.
-    pub fn create<S: Scheduler + Send + Sync + 'static>(config: ActorSystemConfig) -> ActorSystem {
-        let (sender, receiver) = secc::create::<Arc<RwLock<Pin<Box<Actor>>>>>(
-            config.work_channel_size,
-            config.thread_wait_time,
-        );
-
+    pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
 
-        let executor = AxiomExecutor::new::<S>(&config);
+        let executor = AxiomExecutor::new(&config);
+        executor.init();
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
                 uuid: Uuid::new_v4(),
                 config,
-                sender,
-                receiver,
+                // receiver,
                 threads,
                 executor,
                 shutdown_triggered: AtomicBool::new(false),
@@ -345,12 +332,6 @@ impl ActorSystem {
         // get around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.data.threads.lock().unwrap();
-
-            //            // Start the dispatcher threads.
-            //            for number in 0..system.data.config.thread_pool_size {
-            //                let thread = system.start_dispatcher_thread(number);
-            //                guard.push(thread);
-            //            }
 
             // Start the thread that reads from the `delayed_messages` queue.
             // FIXME Put in ability to confirm how many of these to start.
@@ -665,9 +646,9 @@ impl ActorSystem {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
     ///
-    /// fn handler(count: &mut usize, _: &Context, _: &Message) -> AxiomResult {
-    ///     *count += 1;
-    ///     Ok(Status::Done)    
+    /// fn handler(mut count: usize, _: Context, _: Message) -> AxiomResult<usize> {
+    ///     count += 1;
+    ///     Ok((count, Status::Done))
     /// }
     ///
     /// let state = 0 as usize;
@@ -1139,12 +1120,12 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        fn monitor_handler(state: &mut Aid, _: &Context, message: &Message) -> AxiomResult {
+        fn monitor_handler(state: Aid, _: &Context, message: &Message) -> AxiomResult<Aid> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
                         assert!(Aid::ptr_eq(state, aid));
-                        Ok(Status::Done)
+                        Ok((Aid, Status::Done))
                     }
                     SystemMsg::Start => Ok(Status::Done),
                     _ => panic!("Received some other message!"),
@@ -1255,13 +1236,13 @@ mod tests {
         system1.init_current();
         let aid = system1
             .spawn()
-            .with((), |_: &mut (), context: &Context, message: &Message| {
+            .with((), |_: (), context: &Context, message: &Message| {
                 if let Some(msg) = message.content_as::<Request>() {
                     msg.reply_to.send_new(Reply {}).unwrap();
                     context.system.trigger_shutdown();
-                    Ok(Status::Stop)
+                    Ok(((), Status::Stop))
                 } else if let Some(_) = message.content_as::<SystemMsg>() {
-                    Ok(Status::Done)
+                    Ok(((), Status::Done))
                 } else {
                     panic!("Unexpected message received!");
                 }
@@ -1312,49 +1293,46 @@ mod tests {
         let aid1 = system1
             .spawn()
             .name("A")
-            .with((), |_: &mut (), context: &Context, _: &Message| {
+            .with((), |_: (), context: Context, _: Message| {
                 context.system.trigger_shutdown();
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             })
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
         system2
             .spawn()
-            .with(
-                (),
-                move |_: &mut (), context: &Context, message: &Message| {
-                    if let Some(msg) = message.content_as::<SystemActorMessage>() {
-                        match &*msg {
-                            SystemActorMessage::FindByNameResult { aid: found, .. } => {
-                                if let Some(target) = found {
-                                    assert_eq!(target.uuid(), aid1.uuid());
-                                    target.send_new(true).unwrap();
-                                    context.system.trigger_shutdown();
-                                    Ok(Status::Done)
-                                } else {
-                                    panic!("Didn't find AID.");
-                                }
+            .with((), move |_: (), context: Context, message: Message| {
+                if let Some(msg) = message.content_as::<SystemActorMessage>() {
+                    match &*msg {
+                        SystemActorMessage::FindByNameResult { aid: found, .. } => {
+                            if let Some(target) = found {
+                                assert_eq!(target.uuid(), aid1.uuid());
+                                target.send_new(true).unwrap();
+                                context.system.trigger_shutdown();
+                                Ok(((), Status::Done))
+                            } else {
+                                panic!("Didn't find AID.");
                             }
-                            _ => panic!("Unexpected message received!"),
                         }
-                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                        if let SystemMsg::Start = &*msg {
-                            context.system.send_to_system_actors(Message::new(
-                                SystemActorMessage::FindByName {
-                                    reply_to: context.aid.clone(),
-                                    name: "A".to_string(),
-                                },
-                            ));
-                            Ok(Status::Done)
-                        } else {
-                            panic!("Unexpected message received!");
-                        }
+                        _ => panic!("Unexpected message received!"),
+                    }
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    if let SystemMsg::Start = &*msg {
+                        context.system.send_to_system_actors(Message::new(
+                            SystemActorMessage::FindByName {
+                                reply_to: context.aid.clone(),
+                                name: "A".to_string(),
+                            },
+                        ));
+                        Ok(((), Status::Done))
                     } else {
                         panic!("Unexpected message received!");
                     }
-                },
-            )
+                } else {
+                    panic!("Unexpected message received!");
+                }
+            })
             .unwrap();
 
         await_two_system_shutdown(system1, system2);

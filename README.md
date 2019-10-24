@@ -18,7 +18,7 @@ rather a new implementation deriving inspiration from the good parts of those pr
   * Massive internal refactor in order to support async Actors. There are very few breaking changes,
   so porting to this version will be relatively simple.
   * NOTE: Until Rust 1.39.0 hits Stable (November 7th), Axiom will require Beta Rust to compile.
-  * PORTING: The signature for Processors has changed from references for `Context` and `Message` to
+  * BREAKING CHANGE: The signature for Processors has changed from references for `Context` and `Message` to
   values. For closures-as-actors, wrap the body in an `async` block. `move |...| {...}` becomes
   `move |...| async { ... }`. For regular function syntax, simply add `async` in front of `fn`.
   * BREAKING CHANGE: Due to the nature of futures, the actor's processor cannot be given a mutable 

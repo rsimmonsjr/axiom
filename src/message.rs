@@ -6,8 +6,8 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::{Arc, RwLock};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub trait ActorMessage: Send + Sync + Any {
     /// Gets a bincode serialized version of the message.

@@ -4,13 +4,14 @@ use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use dashmap::DashMap;
 use futures::task::ArcWake;
+use futures::Stream;
 use uuid::Uuid;
 
 use crate::actors::Actor;
-use crate::scheduling::{Schedule, ScheduleResult, Scheduler};
 use crate::{ActorSystemConfig, AxiomError, Status};
 use futures::Stream;
 
@@ -20,30 +21,35 @@ use futures::Stream;
 /// appropriate Reactor.
 #[derive(Clone)]
 pub(crate) struct AxiomExecutor {
+    /// The Config of the owning ActorSystem.
     config: ActorSystemConfig,
+    /// Actors that have no messages available.
     sleeping: Arc<DashMap<Uuid, Task>>,
-    scheduler: Arc<dyn Scheduler + Send + Sync>,
+    /// All Reactors owned by this Executor.
     reactors: Arc<DashMap<u16, AxiomReactor>>,
+    /// Counting actors per reactor for even distribution of Actors.
+    actors_per_reactor: Arc<DashMap<u16, u32>>,
 }
 
 impl AxiomExecutor {
     /// Creates a new Executor with the given actor system configuration. This will govern the
     /// configuration of the executor.
-    pub(crate) fn new<S: Scheduler + Send + Sync + 'static>(config: &ActorSystemConfig) -> Self {
+    pub(crate) fn new(config: &ActorSystemConfig) -> Self {
         Self {
             config: config.clone(),
             sleeping: Arc::new(Default::default()),
-            scheduler: Arc::new(S::new(config)),
             reactors: Arc::new(Default::default()),
+            actors_per_reactor: Default::default(),
         }
     }
 
-    /// Initializes the executor and starts the AxiomReactor dinstances based on the count of the
+    /// Initializes the executor and starts the AxiomReactor instances based on the count of the
     /// number of threads configured in the actor system. This must be called before any work can
     /// be performed with the actor system.
     pub(crate) fn init(&self) {
         for i in 0..self.config.thread_pool_size {
-            self.reactors.insert(i, AxiomReactor::new(self.clone()));
+            self.reactors.insert(i, AxiomReactor::new(self.clone(), i));
+            self.actors_per_reactor.insert(i, 0);
         }
     }
 
@@ -51,56 +57,46 @@ impl AxiomExecutor {
     /// sent to the Actor, else it will fail to be woken until after its registered.
     pub(crate) fn register_actor(&self, actor: Arc<RwLock<Pin<Box<Actor>>>>) {
         let id = actor.read().expect("Poisoned Actor").context.aid.uuid();
-        let mut schedule = Schedule::new(id, self.scheduler.clone());
-        schedule.update();
-        schedule.log_start();
-        self.sleeping.insert(
-            id,
-            Task {
-                id,
-                schedule,
-                actor,
-            },
-        );
+        self.sleeping.insert(id, Task { id, actor });
     }
 
-    /// This wakes an actor in the executor which will cause its future to be polled. The Aid,
+    /// This wakes an Actor in the Executor which will cause its future to be polled. The Aid,
     /// through the ActorSystem, will call this on Message Send.
     pub(crate) fn wake(&self, id: Uuid) {
-        let mut task = match self.sleeping.remove(&id) {
+        // Pull the Task
+        let task = match self.sleeping.remove(&id) {
             Some((_, task)) => task,
             None => return, // The Actor is already awake.
         };
+        // Get the optimal Reactor
+        let destination = self.get_reactor_with_least_actors();
+        // Increment the Reactor's Actor count
+        *self.actors_per_reactor.get_mut(&destination).unwrap() += 1;
+        // Insert in the Reactor
+        self.reactors.get(&destination).unwrap().insert(task);
+    }
 
-        task.schedule.log_wake();
-        task.schedule.update();
-
-        let reactor = self
-            .reactors
-            .get(&task.schedule.get_reactor())
-            .expect("Uninitialized Reactor");
-
-        reactor.insert(task);
+    /// Iterates over the actors-per-reactor collection, and finds the Reactor with the least number
+    /// of Actors.
+    fn get_reactor_with_least_actors(&self) -> u16 {
+        let mut iter_state = (0u16, u32::max_value());
+        for i in self.actors_per_reactor.iter() {
+            if i.value() < &iter_state.1 {
+                iter_state = (*i.key(), *i.value());
+            }
+        }
+        iter_state.0
     }
 
     /// When a Reactor is done with an Actor, it will be sent here.  If it is sent with a `Some`
     /// `new_reactor`, it's been reassigned to a different reactor and will be sent to that
     /// reactor immediately.  Otherwise, it's been depleted of messages to process and should be
     /// stored as sleeping.
-    fn return_task(&self, task: Task, new_reactor: Option<u16>) {
-        match new_reactor {
-            Some(id) => {
-                let r = self
-                    .reactors
-                    .get(&id)
-                    .expect("Scheduler provided invalid Reactor ID");
-                r.insert(task);
-            }
-            None => {
-                task.schedule.log_sleep();
-                self.sleeping.insert(task.id, task);
-            }
-        }
+    fn return_task(&self, task: Task, reactor: u16) {
+        // Put the Task back.
+        self.sleeping.insert(task.id, task);
+        // Decrement the Reactor's Actor count.
+        *self.actors_per_reactor.get_mut(&reactor).unwrap() -= 1;
     }
 }
 
@@ -110,6 +106,9 @@ impl AxiomExecutor {
 /// again. It will return the Task to the wait_queue on `Pending`.
 #[derive(Clone)]
 pub(crate) struct AxiomReactor {
+    /// The ID of the Reactor
+    id: u16,
+    /// The Executor that owns this Reactor
     executor: AxiomExecutor,
     /// The queue of Actors that are ready to be polled
     run_queue: Arc<RwLock<VecDeque<Wakeup>>>,
@@ -120,6 +119,17 @@ pub(crate) struct AxiomReactor {
 }
 
 impl AxiomReactor {
+    /// Creates a new Reactor
+    fn new(executor: AxiomExecutor, id: u16) -> AxiomReactor {
+        AxiomReactor {
+            id,
+            executor,
+            run_queue: Arc::new(RwLock::new(Default::default())),
+            wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
+            thread_join: Arc::new(RwLock::new(None)),
+        }
+    }
+
     /// Moves an Actor from the executor into a reactor.
     fn insert(&self, task: Task) {
         let token = Token {
@@ -128,90 +138,55 @@ impl AxiomReactor {
         };
         let waker = futures::task::waker(Arc::new(token));
         let wakeup = Wakeup { id: task.id, waker };
-
-        self.wait_queue
-            .write()
-            .expect("Poisoned wait_queue")
-            .insert(task.id, task);
-        self.run_queue
-            .write()
-            .expect("Poisoned run_queue")
-            .push_back(wakeup);
+        self.wait(task);
+        self.wake(wakeup);
         self.ensure_running();
     }
 
-    // This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
-    // dedicated thread, else it will block the executor.
+    /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
+    /// dedicated thread, else it will block the executor.
     fn thread(&self) {
-        'wakeup: while let Some(w) = self
-            .run_queue
-            .write()
-            .expect("Poisoned run_queue")
-            .pop_front()
-        {
-            if let Some(mut task) = self
-                .wait_queue
-                .write()
-                .expect("Poisoned wait_queue")
-                .remove(&w.id)
-            {
-                task.schedule.update();
-                task.schedule.reset_stretch_data();
-                'stretch: loop {
-                    task.schedule.log_poll_actor();
+        while let Some(w) = self.get_woken() {
+            if let Some(mut task) = self.remove_waiting(&w.id) {
+                // When this timeslice is over.
+                let end = Instant::now() + self.executor.config.time_slice;
+                loop {
+                    // This polls the Actor as a Stream.
                     match task.poll(&w.waker) {
                         Poll::Ready(result) => {
+                            // Ready(None) indicates an empty message queue. Time to sleep.
                             if let None = result {
-                                self.executor.return_task(task, None);
-                                continue 'wakeup;
+                                self.executor.return_task(task, self.id);
+                                break;
                             }
-
-                            task.schedule.log_stop_message();
-
                             let result = result.unwrap();
+                            // The Actor should handle its own internal modifications in response to
+                            // the result.
                             task.actor
                                 .read()
                                 .expect("Poisoned Actor")
                                 .handle_result(&result);
-
                             match result {
                                 // Intentional or error'd stop means drop. It's dead, Jim.
-                                Ok(Status::Stop) | Err(_) => task.schedule.log_stop(),
+                                Ok(Status::Stop) | Err(_) => break,
                                 _ => {
-                                    // Ready(Some) where the Actor is still alive
-                                    // Need to make sure this execution stretch is
-                                    // still scheduled.
-                                    match task.schedule.check_schedule() {
-                                        ScheduleResult::Continue => continue 'stretch,
-                                        ScheduleResult::Next => {
-                                            self.wait_queue
-                                                .write()
-                                                .expect("Poisoned wait_queue")
-                                                .insert(w.id, task);
-                                            self.run_queue
-                                                .write()
-                                                .expect("Poisoned run_queue")
-                                                .push_back(w);
-                                        }
-                                        ScheduleResult::Reassigned(new_reactor) => {
-                                            self.executor.return_task(task, Some(new_reactor));
-                                        }
-                                        ScheduleResult::Stopped => {
-                                            task.schedule.log_stop();
-                                        }
+                                    // If we're past this timeslice, add back into the queues and
+                                    // move to the next woken Actor. Else, keep going.
+                                    if Instant::now() >= end {
+                                        self.wait(task);
+                                        self.wake(w);
+                                        break;
+                                    } else {
+                                        continue;
                                     }
                                 }
                             }
-
-                            continue 'wakeup;
                         }
+                        // Still pending, return to wait_queue. Drop the wakeup, because the futures
+                        // will re-add it later through their wakers.
                         Poll::Pending => {
-                            task.schedule.log_pending_message();
-                            self.wait_queue
-                                .write()
-                                .expect("Poisoned wait_queue")
-                                .insert(w.id, task);
-                            continue 'wakeup;
+                            self.wait(task);
+                            break;
                         }
                     }
                 }
@@ -219,9 +194,10 @@ impl AxiomReactor {
         }
     }
 
-    // This function ensures the Reactor is running when it is needed to be.
-    // By allowing it to conclude and simply restart as necessary, we avoid
-    // CPU spin locking. We should call this function as much as we need.
+    /// This function ensures the Reactor is running when it is needed to be.
+    /// By allowing it to conclude and simply restart as necessary, we avoid
+    /// CPU spin locking. We should call this function as much as we need.
+    // TODO: Check if the thread has panicked.
     fn ensure_running(&self) {
         let mut join = self.thread_join.write().expect("Poisoned thread_join");
 
@@ -232,15 +208,7 @@ impl AxiomReactor {
         }));
     }
 
-    fn new(executor: AxiomExecutor) -> AxiomReactor {
-        AxiomReactor {
-            executor,
-            run_queue: Arc::new(RwLock::new(Default::default())),
-            wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
-            thread_join: Arc::new(RwLock::new(None)),
-        }
-    }
-
+    /// Add an Actor's Wakeup to the run_queue.
     fn wake(&self, wakeup: Wakeup) {
         self.run_queue
             .write()
@@ -248,14 +216,34 @@ impl AxiomReactor {
             .push_back(wakeup);
     }
 
-    fn len(&self) -> usize {
-        self.wait_queue.read().expect("Poisoned wait_queue").len()
+    /// Pop the next Wakeup.
+    fn get_woken(&self) -> Option<Wakeup> {
+        self.run_queue
+            .write()
+            .expect("Poisoned run_queue")
+            .pop_front()
+    }
+
+    /// Add a Task to the Reactor's wait_queue.
+    fn wait(&self, task: Task) {
+        self.wait_queue
+            .write()
+            .expect("Poisoned wait_queue")
+            .insert(task.id, task);
+    }
+
+    /// Remove a Task from the Reactor's wait_queue.
+    fn remove_waiting(&self, id: &Uuid) -> Option<Task> {
+        self.wait_queue
+            .write()
+            .expect("Poisoned wait_queue")
+            .remove(id)
     }
 }
 
+/// Tasks represent the unit of work that an Executor-Reactor system is responsible for.
 struct Task {
     id: Uuid,
-    schedule: Schedule,
     actor: Arc<RwLock<Pin<Box<Actor>>>>,
 }
 
@@ -271,6 +259,7 @@ impl Task {
     }
 }
 
+/// Object used for generating our wakers.
 struct Token {
     id: Uuid,
     reactor: AxiomReactor,
@@ -289,6 +278,7 @@ impl ArcWake for Token {
     }
 }
 
+/// Object representing the need to wake an Actor, to be enqueued for waking.
 struct Wakeup {
     id: Uuid,
     waker: Waker,

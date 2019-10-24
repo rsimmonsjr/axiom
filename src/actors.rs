@@ -12,23 +12,22 @@ use std::marker::{Send, Sync};
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
 use futures::{FutureExt, Stream};
-use futures::lock::Mutex;
 use log::error;
 use secc::*;
-use serde::{Deserialize, Serialize};
 use serde::de::Deserializer;
 use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::*;
 use crate::message::*;
 use crate::system::*;
+use crate::*;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.
@@ -862,22 +861,25 @@ impl Stream for Actor {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let mut pending = match self.pending.try_lock() {
-            Some(g) => g,
-            None => return Poll::Pending,
-        };
+        let mut pending = self
+            .pending
+            .try_lock()
+            .expect("Contention on Pending Mutex");
 
-        if let Some(mut pending) = *pending {
-            pending.as_mut().poll(cx).map(|p| Some(p))
+        if let Some(pending) = &mut *pending {
+            match pending.as_mut().poll(cx) {
+                Poll::Ready(r) => Poll::Ready(Some(r)),
+                Poll::Pending => Poll::Pending,
+            }
         } else {
             match self.receiver.receive() {
                 Ok(msg) => {
-                    let handler = match self.handler.try_lock() {
-                        Some(g) => g,
-                        None => return Poll::Pending,
-                    };
+                    let mut handler = self
+                        .handler
+                        .try_lock()
+                        .expect("Contention on Handler Mutex");
 
-                    let mut future = Box::pin((handler)(self.context.clone(), msg.clone()));
+                    let mut future = Box::pin((&mut **handler)(self.context.clone(), msg.clone()));
 
                     if let Poll::Ready(mut result) = future.as_mut().poll(cx) {
                         // If the message was a system stop message then we override the actor returned
@@ -892,6 +894,7 @@ impl Stream for Actor {
                         return Poll::Ready(Some(result));
                     } else {
                         *pending = Some(future);
+
                         return Poll::Pending;
                     }
                 }
