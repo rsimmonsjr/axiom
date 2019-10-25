@@ -461,7 +461,7 @@ mod tests {
         }
 
         impl Data {
-            fn handle_bool(mut self, message: bool) -> AxiomResult<self> {
+            fn handle_bool(mut self, message: bool) -> AxiomResult<Self> {
                 if message {
                     self.value += 1;
                 } else {
@@ -471,11 +471,11 @@ mod tests {
             }
 
             fn handle_i32(mut self, message: i32) -> AxiomResult<Self> {
-                self.value += *message;
+                self.value += message;
                 Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            async fn handle(mut self, _context: &Context, message: &Message) -> AxiomResult<Self> {
+            async fn handle(mut self, _context: Context, message: Message) -> AxiomResult<Self> {
                 if let Some(msg) = message.content_as::<bool>() {
                     self.handle_bool(*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {

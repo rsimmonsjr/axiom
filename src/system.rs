@@ -844,14 +844,12 @@ mod tests {
     /// Helper to wait for 2 actor systems to shutdown or panic if they don't do so within
     /// 2000 milliseconds.
     fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
-        let timeout = Duration::from_millis(1000);
-
         let h1 = thread::spawn(move || {
-            assert!(system1.await_shutdown_with_timeout(timeout).is_ok(),);
+            system1.await_shutdown();
         });
 
         let h2 = thread::spawn(move || {
-            assert!(system2.await_shutdown_with_timeout(timeout).is_ok(),);
+            system2.await_shutdown();
         });
 
         h1.join().unwrap();
@@ -867,20 +865,17 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         system
             .spawn()
-            .with((), |_state: &mut (), context: &Context, _: &Message| {
+            .with((), |_state: (), context: Context, _: Message| async move {
                 thread::sleep(Duration::from_millis(5));
                 context.system.trigger_shutdown();
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             })
             .unwrap();
-        assert!(system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .is_ok(),);
+        system.await_shutdown();
 
         // Validate that if the system is already shutdown the method doesn't hang.
-        assert!(system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .is_ok(),);
+        // FIXME Design a means that this cannot ever hang the test. 
+        system.await_shutdown();
     }
 
     /// This test verifies that an actor can be found by its uuid.
@@ -889,7 +884,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_uuid(&aid.uuid()).unwrap();
@@ -906,7 +901,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_name(&aid.name().unwrap()).unwrap();
@@ -923,7 +918,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         let found = system.find_aid(&aid.system_uuid(), &aid.uuid()).unwrap();
         assert!(Aid::ptr_eq(&aid, &found));
@@ -941,7 +936,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
@@ -968,7 +963,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
 
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
@@ -990,9 +985,9 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         thread::sleep(Duration::from_millis(10));
 
-        let aid1 = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid1 = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid1, 1, 1000).unwrap();
-        let aid2 = system.spawn().name("B").with(0, simple_handler).unwrap();
+        let aid2 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
         aid1.send_after(Message::new(11), Duration::from_millis(200))
@@ -1028,7 +1023,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap(); // Now it is started for sure.
 
         // We force remove the actor from the system without calling stop so now it cannot
@@ -1071,14 +1066,14 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        fn monitor_handler(mut state: Aid, _: &Context, message: &Message) -> AxiomResult<Aid> {
+        async fn monitor_handler(mut state: Aid, _: Context, message: Message) -> AxiomResult<Aid> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
-                        assert!(Aid::ptr_eq(state, aid));
+                        assert!(Aid::ptr_eq(&state, aid));
                         Ok((state, Status::Done))
                     }
-                    SystemMsg::Start => Ok(Status::Done),
+                    SystemMsg::Start => Ok((state, Status::Done)),
                     _ => panic!("Received some other message!"),
                 }
             } else {
@@ -1087,8 +1082,8 @@ mod tests {
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let monitored = system.spawn().with(0 as usize, simple_handler).unwrap();
-        let not_monitoring = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let monitored = system.spawn().with((), simple_handler).unwrap();
+        let not_monitoring = system.spawn().with((), simple_handler).unwrap();
         let monitoring1 = system
             .spawn()
             .with(monitored.clone(), monitor_handler)
@@ -1125,25 +1120,24 @@ mod tests {
     fn test_named_actor_restrictions() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let state = 0 as usize;
 
         let aid1 = system
             .spawn()
             .name("A")
-            .with(state, simple_handler)
+            .with((), simple_handler)
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
         let aid2 = system
             .spawn()
             .name("B")
-            .with(state, simple_handler)
+            .with((), simple_handler)
             .unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
         // attempt returns an error to be handled.
-        let result = system.spawn().name("A").with(state, simple_handler);
+        let result = system.spawn().name("A").with((), simple_handler);
         assert_eq!(Err(AxiomError::NameAlreadyUsed("A".to_string())), result);
 
         // Verify that the same actor has "A" name and is still up.
@@ -1160,7 +1154,7 @@ mod tests {
         let aid3 = system
             .spawn()
             .name("B")
-            .with(state, simple_handler)
+            .with((), simple_handler)
             .unwrap();
         await_received(&aid3, 1, 1000).unwrap();
         let found2 = system.find_aid_by_name("B").unwrap();
@@ -1187,7 +1181,7 @@ mod tests {
         system1.init_current();
         let aid = system1
             .spawn()
-            .with((), |_: (), context: &Context, message: &Message| {
+            .with((), |_: (), context: Context, message: Message| async move {
                 if let Some(msg) = message.content_as::<Request>() {
                     msg.reply_to.send_new(Reply {}).unwrap();
                     context.system.trigger_shutdown();
@@ -1206,10 +1200,10 @@ mod tests {
             .spawn()
             .with(
                 (),
-                move |_: &mut (), context: &Context, message: &Message| {
+                |_: (), context: Context, message: Message| async move {
                     if let Some(_) = message.content_as::<Reply>() {
                         context.system.trigger_shutdown();
-                        Ok(Status::Stop)
+                        Ok(((), Status::Stop))
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
                             SystemMsg::Start => {
@@ -1219,9 +1213,9 @@ mod tests {
                                         reply_to: context.aid.clone(),
                                     })
                                     .unwrap();
-                                Ok(Status::Done)
+                                Ok(((), Status::Done))
                             }
-                            _ => Ok(Status::Done),
+                            _ => Ok(((), Status::Done)),
                         }
                     } else {
                         panic!("Unexpected message received!");

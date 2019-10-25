@@ -930,21 +930,21 @@ mod tests {
 
     use super::*;
 
+    /// This is identical to the documentation but here so that its formatted by rust and we can 
+    /// copy paste this into the docs. It's also easier to debug here. 
     #[test]
     fn test_send_examples() {
-        use std::time::Duration;
-
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let aid = system
             .spawn()
             .with(
-                0 as usize,
-                move |state: usize, context: Context, message: Message| {
+                (),
+                |_: (), context: Context, message: Message| async move {
                     if let Some(_) = message.content_as::<i32>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok((state, Status::Done))
+                    Ok(((), Status::Done))
                 },
             )
             .unwrap();
@@ -954,9 +954,7 @@ mod tests {
             Err(e) => println!("Ooops {:?}", e),
         }
 
-        system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .unwrap();
+        system.await_shutdown();
     }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
@@ -966,7 +964,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -984,7 +982,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -1004,7 +1002,7 @@ mod tests {
     #[test]
     fn test_aid_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid1 = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid1 = system.spawn().with((), simple_handler).unwrap();
         system.init_current(); // Required by Aid serialization.
 
         // This check forces the test to break here if someone changes the default.
@@ -1022,7 +1020,7 @@ mod tests {
 
         // Spawn an actor and serialize the value but then stop the actor and try and deserialize
         // and we should get an error.
-        let aid2 = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid2 = system.spawn().with((), simple_handler).unwrap();
         let aid2_serialized = bincode::serialize(&aid2).unwrap();
         system.stop_actor(&aid2);
         let aid2_deserialized = bincode::deserialize::<Aid>(&aid2_serialized);
@@ -1072,8 +1070,8 @@ mod tests {
         let aid = system
             .spawn()
             .with(
-                0,
-                |_state: &mut i32, context: &Context, message: &Message| {
+                (),
+                |_: (), context: Context, message: Message| async move {
                     if let Some(msg) = message.content_as::<Aid>() {
                         assert!(Aid::ptr_eq(&context.aid, &msg));
                     } else if let Some(msg) = message.content_as::<Op>() {
@@ -1081,7 +1079,7 @@ mod tests {
                             Op::Aid(a) => assert!(Aid::ptr_eq(&context.aid, &a)),
                         }
                     }
-                    Ok(Status::Done)
+                    Ok(((), Status::Done))
                 },
             )
             .unwrap();
@@ -1099,7 +1097,7 @@ mod tests {
     #[test]
     fn test_cant_send_to_stopped() {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         system.stop_actor(&aid);
         assert_eq!(false, system.is_actor_alive(&aid));
 
@@ -1119,12 +1117,12 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with((), |_: &mut (), _: &Context, message: &Message| {
+            .with((), |_: (), _: Context, message: Message| async move {
                 if let Some(_msg) = message.content_as::<i32>() {
-                    Ok(Status::Stop)
+                    Ok(((), Status::Stop))
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
-                        SystemMsg::Start => Ok(Status::Done),
+                        SystemMsg::Start => Ok(((), Status::Done)),
                         m => panic!("unexpected message: {:?}", m),
                     }
                 } else {
@@ -1162,11 +1160,11 @@ mod tests {
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
             .spawn()
-            .with((), |_: &mut (), _: &Context, message: &Message| {
+            .with((), |_: (), _: Context, message: Message| async move {
                 if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
-                        SystemMsg::Start => Ok(Status::Done),
-                        SystemMsg::Stop => Ok(Status::Done),
+                        SystemMsg::Start => Ok(((), Status::Done)),
+                        SystemMsg::Stop => Ok(((), Status::Done)),
                         m => panic!("unexpected message: {:?}", m),
                     }
                 } else {
