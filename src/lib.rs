@@ -317,8 +317,8 @@ mod tests {
 
     /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
-    pub fn simple_handler(state: usize, _: Context, _: Message) -> AxiomResult<usize> {
-        Ok((state, Status::Done))
+    pub async fn simple_handler(_: (), _: Context, _: Message) -> AxiomResult<()> {
+        Ok(((), Status::Done))
     }
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and
@@ -352,8 +352,8 @@ mod tests {
         let aid = system
             .spawn()
             .with(
-                0 as usize,
-                |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
+                (),
+                |_: (), _: Context, _: Message| async { Ok(((), Status::Done)) },
             )
             .unwrap();
 
@@ -379,8 +379,8 @@ mod tests {
         struct Data {}
 
         impl Data {
-            fn handle(&mut self, _context: &Context, _message: &Message) -> AxiomResult {
-                Ok(Status::Done)
+            async fn handle(mut self, _: Context, _: Message) -> AxiomResult<Self> {
+                Ok((self, Status::Done))
             }
         }
 
@@ -404,22 +404,22 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let starting_state: usize = 0 as usize;
-        let closure = |state: &mut usize, context: &Context, message: &Message| {
+        let closure = |mut state: usize, context: Context, message: Message| async move {
             // Expected messages in the expected order.
             let expected: Vec<i32> = vec![11, 13, 17];
             // Attempt to downcast to expected message.
             if let Some(_msg) = message.content_as::<SystemMsg>() {
-                *state += 1;
-                Ok(Status::Done)
+                state += 1;
+                Ok((state, Status::Done))
             } else if let Some(msg) = message.content_as::<i32>() {
-                assert_eq!(expected[*state - 1], *msg);
-                assert_eq!(*state, context.aid.received().unwrap());
-                *state += 1;
-                Ok(Status::Done)
+                assert_eq!(expected[state - 1], *msg);
+                assert_eq!(state, context.aid.received().unwrap());
+                state += 1;
+                Ok((state, Status::Done))
             } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                 // Note that we put this last because it only is ever received once, we
                 // want the most frequently received messages first.
-                Ok(Status::Done)
+                Ok((state, Status::Done))
             } else {
                 panic!("Failed to dispatch properly");
             }
@@ -462,29 +462,29 @@ mod tests {
         }
 
         impl Data {
-            fn handle_bool(&mut self, message: &bool) -> AxiomResult {
-                if *message {
+            fn handle_bool(mut self, message: bool) -> AxiomResult<self> {
+                if message {
                     self.value += 1;
                 } else {
                     self.value -= 1;
                 }
-                Ok(Status::Done) // This assertion will fail but we still have to return.
+                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle_i32(&mut self, message: &i32) -> AxiomResult {
+            fn handle_i32(mut self, message: i32) -> AxiomResult<Self> {
                 self.value += *message;
-                Ok(Status::Done) // This assertion will fail but we still have to return.
+                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
+            async fn handle(mut self, _context: &Context, message: &Message) -> AxiomResult<Self> {
                 if let Some(msg) = message.content_as::<bool>() {
-                    self.handle_bool(&*msg)
+                    self.handle_bool(*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
-                    self.handle_i32(&*msg)
+                    self.handle_i32(*msg)
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Ok(Status::Done)
+                    Ok((self, Status::Done))
                 } else {
                     panic!("Failed to dispatch properly");
                 }
@@ -520,12 +520,12 @@ mod tests {
             Pong,
         }
 
-        fn ping(_state: &mut usize, context: &Context, message: &Message) -> AxiomResult {
+        async fn ping(_: (), context: Context, message: Message) -> AxiomResult<()> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
-                        Ok(Status::Done)
+                        Ok(((), Status::Done))
                     }
                     _ => Err(AxiomError::ActorError(Some(
                         "Unexpected message".to_string(),
@@ -536,35 +536,35 @@ mod tests {
                 match &*msg {
                     SystemMsg::Start => {
                         // Now we will spawn a new actor to handle our pong and send to it.
-                        let pong_aid = context.system.spawn().with(0, pong)?;
+                        let pong_aid = context.system.spawn().with((), pong)?;
                         pong_aid.send_new(PingPong::Ping(context.aid.clone()))?;
-                        Ok(Status::Done)
+                        Ok(((), Status::Done))
                     }
-                    _ => Ok(Status::Done),
+                    _ => Ok(((), Status::Done))
                 }
             } else {
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             }
         }
 
-        fn pong(_state: &mut usize, _context: &Context, message: &Message) -> AxiomResult {
+        async fn pong(_: (), _: Context, message: Message) -> AxiomResult<()> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
                         from.send_new(PingPong::Pong)?;
-                        Ok(Status::Done)
+                        Ok(((), Status::Done))
                     }
                     _ => Err(AxiomError::ActorError(Some(
                         "Unexpected message".to_string(),
                     ))),
                 }
             } else {
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             }
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        system.spawn().with(0, ping).unwrap();
+        system.spawn().with((), ping).unwrap();
         system.await_shutdown();
 
         assert_eq!(2 + 2, 4);
