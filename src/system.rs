@@ -827,10 +827,9 @@ async fn system_actor_processor(_: (), context: Context, message: Message) -> Ax
 #[cfg(test)]
 mod tests {
     use std::thread;
-
     use crate::tests::*;
-
     use super::*;
+    use futures::future;
 
     // A helper to start two actor systems and connect them.
     fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {
@@ -1199,10 +1198,10 @@ mod tests {
             .spawn()
             .with(
                 (),
-                move |_: (), context: Context, message: Message| async {
+                move |_: (), context: Context, message: Message| {
                     if let Some(_) = message.content_as::<Reply>() {
                         context.system.trigger_shutdown();
-                        Ok(((), Status::Stop))
+                        future::ok(((), Status::Stop)) 
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
                             SystemMsg::Start => {
@@ -1212,9 +1211,9 @@ mod tests {
                                         reply_to: context.aid.clone(),
                                     })
                                     .unwrap();
-                                Ok(((), Status::Done))
+                                future::ok(((), Status::Done))
                             }
-                            _ => Ok(((), Status::Done)),
+                            _ => future::ok(((), Status::Done)),
                         }
                     } else {
                         panic!("Unexpected message received!");
