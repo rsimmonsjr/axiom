@@ -378,7 +378,7 @@ mod tests {
         struct Data {}
 
         impl Data {
-            async fn handle(mut self, _: Context, _: Message) -> AxiomResult<Self> {
+            async fn handle(self, _: Context, _: Message) -> AxiomResult<Self> {
                 Ok((self, Status::Done))
             }
         }
@@ -475,7 +475,7 @@ mod tests {
                 Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            async fn handle(mut self, _context: Context, message: Message) -> AxiomResult<Self> {
+            async fn handle(self, _context: Context, message: Message) -> AxiomResult<Self> {
                 if let Some(msg) = message.content_as::<bool>() {
                     self.handle_bool(*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {

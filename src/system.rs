@@ -1066,7 +1066,7 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        async fn monitor_handler(mut state: Aid, _: Context, message: Message) -> AxiomResult<Aid> {
+        async fn monitor_handler(state: Aid, _: Context, message: Message) -> AxiomResult<Aid> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
@@ -1200,7 +1200,7 @@ mod tests {
             .spawn()
             .with(
                 (),
-                |_: (), context: Context, message: Message| async move {
+                move |_: (), context: Context, message: Message| async {
                     if let Some(_) = message.content_as::<Reply>() {
                         context.system.trigger_shutdown();
                         Ok(((), Status::Stop))
@@ -1238,7 +1238,7 @@ mod tests {
         let aid1 = system1
             .spawn()
             .name("A")
-            .with((), |_: (), context: Context, _: Message| {
+            .with((), move |_: (), context: Context, _: Message| async {
                 context.system.trigger_shutdown();
                 Ok(((), Status::Done))
             })
@@ -1247,7 +1247,7 @@ mod tests {
 
         system2
             .spawn()
-            .with((), move |_: (), context: Context, message: Message| {
+            .with((), move |_: (), context: Context, message: Message| async {
                 if let Some(msg) = message.content_as::<SystemActorMessage>() {
                     match &*msg {
                         SystemActorMessage::FindByNameResult { aid: found, .. } => {
