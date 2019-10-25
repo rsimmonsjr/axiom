@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
@@ -9,6 +10,7 @@ use std::time::Instant;
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
+use log::error;
 use uuid::Uuid;
 
 use crate::actors::Actor;
@@ -22,6 +24,8 @@ use crate::{ActorSystemConfig, AxiomError, Status};
 pub(crate) struct AxiomExecutor {
     /// The Config of the owning ActorSystem.
     config: ActorSystemConfig,
+    /// The system's "is shutting down" flag.
+    shutdown_triggered: Arc<AtomicBool>,
     /// Actors that have no messages available.
     sleeping: Arc<DashMap<Uuid, Task>>,
     /// All Reactors owned by this Executor.
@@ -33,9 +37,10 @@ pub(crate) struct AxiomExecutor {
 impl AxiomExecutor {
     /// Creates a new Executor with the given actor system configuration. This will govern the
     /// configuration of the executor.
-    pub(crate) fn new(config: &ActorSystemConfig) -> Self {
+    pub(crate) fn new(config: ActorSystemConfig, shutdown_triggered: Arc<AtomicBool>) -> Self {
         Self {
-            config: config.clone(),
+            config,
+            shutdown_triggered,
             sleeping: Arc::new(Default::default()),
             reactors: Arc::new(Default::default()),
             actors_per_reactor: Default::default(),
@@ -97,6 +102,16 @@ impl AxiomExecutor {
         // Decrement the Reactor's Actor count.
         *self.actors_per_reactor.get_mut(&reactor).unwrap() -= 1;
     }
+
+    pub(crate) fn shutdown(&self) {
+        self.reactors
+            .iter()
+            .filter_map(|reactor| reactor.join())
+            .for_each(|j| match j.join() {
+                Err(_) => error!("Panic in Reactor thread"),
+                _ => {}
+            });
+    }
 }
 
 /// The Reactor is a single-threaded loop that will poll the woken Actors. It will run scheduling
@@ -145,48 +160,67 @@ impl AxiomReactor {
     /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
     /// dedicated thread, else it will block the executor.
     fn thread(&self) {
-        while let Some(w) = self.get_woken() {
-            if let Some(mut task) = self.remove_waiting(&w.id) {
-                // When this timeslice is over.
-                let end = Instant::now() + self.executor.config.time_slice;
-                loop {
-                    // This polls the Actor as a Stream.
-                    match task.poll(&w.waker) {
-                        Poll::Ready(result) => {
-                            // Ready(None) indicates an empty message queue. Time to sleep.
-                            if let None = result {
-                                self.executor.return_task(task, self.id);
-                                break;
-                            }
-                            let result = result.unwrap();
-                            // The Actor should handle its own internal modifications in response to
-                            // the result.
-                            task.actor
-                                .read()
-                                .expect("Poisoned Actor")
-                                .handle_result(&result);
-                            match result {
-                                // Intentional or error'd stop means drop. It's dead, Jim.
-                                Ok(Status::Stop) | Err(_) => break,
-                                _ => {
-                                    // If we're past this timeslice, add back into the queues and
-                                    // move to the next woken Actor. Else, keep going.
-                                    if Instant::now() >= end {
-                                        self.wait(task);
-                                        self.wake(w);
-                                        break;
-                                    } else {
-                                        continue;
-                                    }
+        loop {
+            // If we're shutting down, quit.
+            if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // If there's no Actors woken, the Reactor thread can end until it's needed again.
+            // If there's an Wakeup without an Actor (which might happen due to an acceptable race
+            // condition), we can continue to the next woken Actor, and drop this Wakeup. Otherwise,
+            // we have the Wakeup and Task we need, and can continue.
+            //
+            // While this arrangement is a little dense, it saves a level of indentation, and early
+            // returns are easier to read.
+            let (w, mut task) = if let Some(w) = self.get_woken() {
+                if let Some(task) = self.remove_waiting(&w.id) {
+                    (w, task)
+                } else {
+                    continue;
+                }
+            } else {
+                break;
+            };
+
+            let end = Instant::now() + self.executor.config.time_slice;
+            loop {
+                // This polls the Actor as a Stream.
+                match task.poll(&w.waker) {
+                    Poll::Ready(result) => {
+                        // Ready(None) indicates an empty message queue. Time to sleep.
+                        if let None = result {
+                            self.executor.return_task(task, self.id);
+                            break;
+                        }
+                        let result = result.unwrap();
+                        // The Actor should handle its own internal modifications in response to the
+                        // result.
+                        task.actor
+                            .read()
+                            .expect("Poisoned Actor")
+                            .handle_result(&result);
+                        match result {
+                            // Intentional or error'd stop means drop. It's dead, Jim.
+                            Ok(Status::Stop) | Err(_) => break,
+                            _ => {
+                                // If we're past this timeslice, add back into the queues and move
+                                // to the next woken Actor. Else, keep going.
+                                if Instant::now() >= end {
+                                    self.wait(task);
+                                    self.wake(w);
+                                    break;
+                                } else {
+                                    continue;
                                 }
                             }
                         }
-                        // Still pending, return to wait_queue. Drop the wakeup, because the futures
-                        // will re-add it later through their wakers.
-                        Poll::Pending => {
-                            self.wait(task);
-                            break;
-                        }
+                    }
+                    // Still pending, return to wait_queue. Drop the wakeup, because the futures
+                    // will re-add it later through their wakers.
+                    Poll::Pending => {
+                        self.wait(task);
+                        break;
                     }
                 }
             }
@@ -198,13 +232,34 @@ impl AxiomReactor {
     /// CPU spin locking. We should call this function as much as we need.
     // TODO: Check if the thread has panicked.
     fn ensure_running(&self) {
+        // Ensure running? Nah, we're shutting down.
+        if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
+            return;
+        }
         let mut join = self.thread_join.write().expect("Poisoned thread_join");
-
         let r = self.clone();
-        join.get_or_insert(thread::spawn(move || {
-            r.thread();
-            r.thread_join.write().expect("Poisoned thread_join").take();
-        }));
+        join.get_or_insert(
+            self.thread_builder()
+                .spawn(move || {
+                    r.thread();
+                    r.thread_join.write().expect("Poisoned thread_join").take();
+                })
+                .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e)),
+        );
+    }
+
+    #[inline]
+    fn thread_builder(&self) -> thread::Builder {
+        thread::Builder::new().name(format!("Reactor-{}", self.id))
+    }
+
+    /// Takes the JoinHandle from the Reactor. If called before shutting down, the Reactor may start
+    /// back up if ensure_running is called before the ActorSystem is shutdown.
+    fn join(&self) -> Option<JoinHandle<()>> {
+        self.thread_join
+            .write()
+            .expect("Poisoned thread_join")
+            .take()
     }
 
     /// Add an Actor's Wakeup to the run_queue.

@@ -266,10 +266,7 @@ struct ActorSystemData {
     /// The Executor responsible for managing the runtime of the Actors
     executor: AxiomExecutor,
     /// A flag holding whether or not the system is currently shutting down.
-    shutdown_triggered: AtomicBool,
-    // Stores the number of running threads with a Condvar that will be used to notify anyone
-    // waiting on the condvar that all threads have exited.
-    running_thread_count: Arc<(Mutex<u16>, Condvar)>,
+    shutdown_triggered: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
     actors_by_aid: Arc<DashMap<Aid, Arc<RwLock<Pin<Box<Actor>>>>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
@@ -302,9 +299,9 @@ impl ActorSystem {
     /// on in order to satisfy the requirements of the software they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
-        let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
+        let shutdown_triggered = Arc::new(AtomicBool::new(false));
 
-        let executor = AxiomExecutor::new(&config);
+        let executor = AxiomExecutor::new(config.clone(), shutdown_triggered.clone());
         executor.init();
 
         // Creates the actor system with the thread pools and actor map initialized.
@@ -314,8 +311,7 @@ impl ActorSystem {
                 config,
                 threads,
                 executor,
-                shutdown_triggered: AtomicBool::new(false),
-                running_thread_count,
+                shutdown_triggered,
                 actors_by_aid: Arc::new(DashMap::default()),
                 aids_by_uuid: Arc::new(DashMap::default()),
                 aids_by_name: Arc::new(DashMap::default()),
@@ -551,9 +547,7 @@ impl ActorSystem {
     /// a signaling mechanism. This function will block until all actor system threads have
     /// stopped.
     pub fn await_shutdown(&self) {
-        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
-        let guard = mutex.lock().unwrap();
-        let _condvar_guard = condvar.wait(guard).unwrap();
+        self.data.executor.shutdown();
     }
 
     /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
@@ -561,32 +555,9 @@ impl ActorSystem {
     /// stopped or the timeout has expired. The function returns an `Ok` with the Duration
     /// that it waited or an `Err` if the system didn't shut down in time or something else went
     /// wrong.
-    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> Result<Duration, AxiomError> {
-        let start = Instant::now();
-        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
-        let guard = mutex.lock().unwrap();
-        // Since it's possible the system is already shutdown, we check first.
-        if *guard == 0 {
-            Ok(Instant::elapsed(&start))
-        } else {
-            match condvar.wait_timeout(guard, timeout) {
-                Ok((_, result)) => {
-                    if result.timed_out() {
-                        Err(AxiomError::ShutdownError(format!(
-                            "Timed Out after: {:?}",
-                            timeout
-                        )))
-                    } else {
-                        Ok(Instant::elapsed(&start))
-                    }
-                }
-                Err(e) => Err(AxiomError::ShutdownError(format!(
-                    "Error occurred: {:?}",
-                    e
-                ))),
-            }
-        }
-    }
+    //    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> Result<Duration, AxiomError> {
+    //
+    //    }
 
     /// Triggers a shutdown of the system and returns only when all threads have joined.
     pub fn trigger_and_await_shutdown(&self) {

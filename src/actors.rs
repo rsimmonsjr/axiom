@@ -3,13 +3,12 @@
 //! These are the core components that make up the features of Axiom. The actor model is designed
 //! to allow the user maximum flexibility. The actors can skip messages if they choose, enabling
 //! them to work as a *finite state machine* without having to move messages around. Actors are
-//! created by calling `system::spawn().with()` with any kind of fuction or closure that
+//! created by calling `system::spawn().with()` with any kind of function or closure that
 //! implements the `Processor` trait.
 
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
-use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +27,7 @@ use uuid::Uuid;
 use crate::message::*;
 use crate::system::*;
 use crate::*;
+use std::cell::UnsafeCell;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.
@@ -98,7 +98,7 @@ impl std::fmt::Debug for ActorSender {
 ///
 /// This is kept separate to make serialization possible without duplicating all of the data
 /// associated with the [`Aid`]. It also makes it easier when cloning and referring to an
-/// `aid` as the user doesnt have to put `Arc<Aid>` all over thier code.
+/// `aid` as the user doesnt have to put `Arc<Aid>` all over their code.
 struct AidData {
     /// See [`Aid::uuid()`]
     uuid: Uuid,
@@ -244,11 +244,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         move |state: usize, context: Context, message: Message| {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -302,6 +302,7 @@ impl Aid {
     /// more efficient than `send_new` if you want to send an `Arc` that you already have.
     /// The `Arc` sent will be transferred to the ownership of the `Aid`.
     ///
+    /// ```
     /// use axiom::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
@@ -312,11 +313,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         move |state: usize, context: Context, message: Message| {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -344,6 +345,7 @@ impl Aid {
     /// same result as if the the code called `aid.send(Message::new(Message::new(value)))`.
     /// If the code wishes to resend a message it should just call just call `send(msg)`.
     ///
+    /// ```
     /// use axiom::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
@@ -354,11 +356,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         move |state: usize, context: Context, message: Message| {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -399,11 +401,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         move |state: usize, context: Context, message: Message| {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -460,11 +462,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         move |state: usize, context: Context, message: Message| {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -504,11 +506,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         move |state: &usize, context: Context, message: Message| {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -665,9 +667,10 @@ impl std::fmt::Display for Context {
 /// the actor based on the messages passed to the actor. The result of a processor is used to
 /// determine the status of an actor. If the actor returns an `AxiomError` then it will be stopped
 /// as if the actor had returned `Stop`. The processor takes three arguments:
-/// * `state`   - A mutable reference to the current state of the actor.
-/// * `aid`     - The reference to the [`Aid`] for this actor.
-/// * `message` - The reference to the current message to process.
+/// * `state`   - The current state of the actor.
+/// * `context` - The immutable context for this actor and its system.
+/// * `message` - The current message to process.
+/// The actor must return the state on success as a `(State, Status)` tuple.
 pub trait Processor<S: Send + Sync, R: Future<Output = AxiomResult<S>> + Send + 'static>:
     (FnMut(S, Context, Message) -> R) + Send + Sync
 {
@@ -758,11 +761,18 @@ pub(crate) struct Actor {
 
 /// This is exclusively used in contexts we can be more than confident are safe.
 /// This is required for holding onto the Actor State.
-#[derive(Copy, Clone)]
 #[repr(transparent)]
 struct SendSyncPointer<T>(*mut T);
 
+/// This is exclusively used in contexts we can be more than confident are safe.
+/// This is required for holding onto the Actor State.
+#[repr(transparent)]
+struct SendSyncUnsafeCell<T>(UnsafeCell<T>);
+
 unsafe impl<T> Send for SendSyncPointer<T> {}
+unsafe impl<T> Sync for SendSyncPointer<T> {}
+unsafe impl<T> Send for SendSyncUnsafeCell<T> {}
+unsafe impl<T> Sync for SendSyncUnsafeCell<T> {}
 
 impl Actor {
     /// Creates a new actor on the given actor system with the given processor function. The user
@@ -800,16 +810,16 @@ impl Actor {
             }),
         };
 
-        let mut state_box = MaybeUninit::new(state);
+        let state_box = SendSyncUnsafeCell(UnsafeCell::new(Some(state)));
 
         let handler = Box::new(move |ctx: Context, msg: Message| {
-            let state = SendSyncPointer(state_box.as_mut_ptr());
-            let s = unsafe { ptr::read(state.0) };
+            let state = SendSyncPointer(state_box.0.get());
+            let s = unsafe { (*state.0).take() }.expect("State cell was empty");
             let future = (processor)(s, ctx, msg);
             async move {
                 let result = future.await;
                 result.map(|(s, status)| {
-                    unsafe { ptr::write(state.0, s) };
+                    unsafe { ptr::write(state.0, Some(s)) };
                     status
                 })
             }
@@ -861,30 +871,37 @@ impl Stream for Actor {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // Usage of `self.pending` should be synchronous and only here.
         let mut pending = self
             .pending
             .try_lock()
             .expect("Contention on Pending Mutex");
 
+        // If we have a pending future, that's what we poll.
         if let Some(pending) = &mut *pending {
             match pending.as_mut().poll(cx) {
                 Poll::Ready(r) => Poll::Ready(Some(r)),
                 Poll::Pending => Poll::Pending,
             }
         } else {
-            match self.receiver.receive() {
+            // Else, we go for another.
+            match self.receiver.peek() {
                 Ok(msg) => {
+                    // As with the pending future, the handler should be synchronously used, and
+                    // only used here.
                     let mut handler = self
                         .handler
                         .try_lock()
                         .expect("Contention on Handler Mutex");
 
+                    // Get the next future
                     let mut future = Box::pin((&mut **handler)(self.context.clone(), msg.clone()));
 
+                    // Just give it a ~~wave~~ poll.
                     if let Poll::Ready(mut result) = future.as_mut().poll(cx) {
-                        // If the message was a system stop message then we override the actor returned
-                        // result with a 'Status::Stop'. The override means actors that don't do anything
-                        // special can essentially ignore processing stop.
+                        // If the message was a system stop message then we override the actor
+                        // returned result with a 'Status::Stop'. Actors should be preparing for
+                        // drop.
                         if let Some(m) = msg.content_as::<SystemMsg>() {
                             if let SystemMsg::Stop = *m {
                                 result = Ok(Status::Stop)
@@ -898,7 +915,7 @@ impl Stream for Actor {
                         return Poll::Pending;
                     }
                 }
-                Err(_) => return Poll::Ready(None),
+                Err(_) => return Poll::Ready(None), // Ready(None) is standard for "Stream is done"
             }
         }
     }
@@ -923,11 +940,11 @@ mod tests {
             .spawn()
             .with(
                 0 as usize,
-                move |_state: &mut usize, context: &Context, message: &Message| {
+                move |state: usize, context: Context, message: Message| {
                     if let Some(_) = message.content_as::<i32>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok(Status::Done)
+                    Ok((state, Status::Done))
                 },
             )
             .unwrap();

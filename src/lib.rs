@@ -317,8 +317,8 @@ mod tests {
 
     /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
-    pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> AxiomResult {
-        Ok(Status::Done)
+    pub fn simple_handler(state: usize, _: Context, _: Message) -> AxiomResult<usize> {
+        Ok((state, Status::Done))
     }
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and

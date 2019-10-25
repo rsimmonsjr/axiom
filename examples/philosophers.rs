@@ -21,7 +21,7 @@
 //! badly timeds messages. This is largely up to the user.
 
 use std::collections::HashMap;
-use std::env;
+use std::{env, thread};
 use std::time::{Duration, Instant};
 
 use log::error;
@@ -63,40 +63,40 @@ impl Fork {
     }
 
     /// Request that a fork be sent to a philosopher.
-    fn fork_requested(&mut self, context: &Context, requester: &Aid) -> AxiomResult {
+    fn fork_requested(mut self, context: Context, requester: Aid) -> AxiomResult<Self> {
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
-                    Ok(Status::Skip)
+                    Ok((self, Status::Skip))
                 } else {
                     owner.send_new(Command::GiveUpFork(context.aid.clone()))?;
-                    Ok(Status::Skip)
+                    Ok((self, Status::Skip))
                 }
             }
             None => {
                 self.owned_by = Some(requester.clone());
                 requester.send_new(Command::ReceiveFork(context.aid.clone()))?;
-                Ok(Status::Done)
+                Ok((self, Status::Done))
             }
         }
     }
 
     /// The philosopher that is the current owner of the fork has put it down, making it available
     /// for other philosophers to pick up.
-    fn fork_put_down(&mut self, context: &Context, sender: &Aid) -> AxiomResult {
+    fn fork_put_down(mut self, context: Context, sender: Aid) -> AxiomResult<Self> {
         match &self.owned_by {
             Some(owner) => {
-                if owner == sender {
+                if owner == &sender {
                     self.owned_by = None;
                     self.clean = true;
                     // Resetting the skip allows fork requests to be processed.
-                    Ok(Status::Reset)
+                    Ok((self, Status::Reset))
                 } else {
                     error!(
                         "[{}] fork_put_down() from non-owner: {} real owner is: {}",
                         context.aid, sender, owner
                     );
-                    Ok(Status::Done)
+                    Ok((self, Status::Done))
                 }
             }
             None => {
@@ -104,7 +104,7 @@ impl Fork {
                     "[{}] fork_put_down() from non-owner: {} real owner is: None:",
                     context.aid, sender
                 );
-                Ok(Status::Done)
+                Ok((self, Status::Done))
             }
         }
     }
@@ -112,37 +112,39 @@ impl Fork {
     /// The owner of the fork is notifying the fork that they are going to use the fork. This
     /// will mark the fork as dirty and make it available to be sent to another philosopher if
     /// they request the fork.
-    fn using_fork(&mut self, context: &Context, sender: &Aid) -> AxiomResult {
-        match self.owned_by {
-            Some(ref owner) => {
-                if *owner == *sender {
+    fn using_fork(mut self, context: Context, sender: Aid) -> AxiomResult<Self> {
+        match &self.owned_by {
+            Some(owner) => {
+                if owner == &sender {
                     self.clean = false;
                     // Resetting the skip allows fork requests to be processed now that the fork
                     // has been marked as being dirty.
-                    Ok(Status::Reset)
+                    Ok((self, Status::Reset))
                 } else {
                     error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
-                    Ok(Status::Done)
+                    Ok((self, Status::Done))
                 }
             }
             _ => {
                 error!("[{}] Got UsingFork from non-owner: {}", context.aid, sender);
-                Ok(Status::Done)
+                Ok((self, Status::Done))
             }
         }
     }
 
     /// Handles actor messages, downcasting them to the proper types and then sends the messages
     /// to the other functions to handle the details.
-    pub fn handle(&mut self, context: &Context, message: &Message) -> AxiomResult {
+    pub async fn handle(self, context: Context, message: Message) -> AxiomResult<Self> {
         if let Some(msg) = message.content_as::<ForkCommand>() {
             match &*msg {
-                ForkCommand::RequestFork(requester) => self.fork_requested(context, &requester),
-                ForkCommand::UsingFork(owner) => self.using_fork(context, &owner),
-                ForkCommand::ForkPutDown(owner) => self.fork_put_down(context, &owner),
+                ForkCommand::RequestFork(requester) => {
+                    self.fork_requested(context, requester.clone())
+                }
+                ForkCommand::UsingFork(owner) => self.using_fork(context, owner.clone()),
+                ForkCommand::ForkPutDown(owner) => self.fork_put_down(context, owner.clone()),
             }
         } else {
-            Ok(Status::Done)
+            Ok((self, Status::Done))
         }
     }
 }
@@ -246,7 +248,7 @@ impl Philosopher {
     }
 
     /// Changes the philosopher to a state of eating.
-    fn begin_eating(&mut self, context: &Context) -> Result<(), AxiomError> {
+    fn begin_eating(&mut self, context: Context) -> Result<(), AxiomError> {
         self.metrics.time_hungry += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
         self.state = PhilosopherState::Eating;
@@ -266,26 +268,26 @@ impl Philosopher {
 
     /// The philosopher received a fork. Once they have both forks they can start eating.
     /// Otherwise they have to wait for the other fork to begin eating.
-    fn fork_received(&mut self, context: &Context, fork_aid: &Aid) -> AxiomResult {
-        if self.left_fork_aid == *fork_aid {
+    fn fork_received(mut self, context: Context, fork_aid: Aid) -> AxiomResult<Self> {
+        if self.left_fork_aid == fork_aid {
             self.has_left_fork = true;
             self.left_fork_requested = false;
-        } else if self.right_fork_aid == *fork_aid {
+        } else if self.right_fork_aid == fork_aid {
             self.has_right_fork = true;
             self.right_fork_requested = false;
         } else {
-            panic!("[{}] Unknown Fork Received: {}", context.aid, *fork_aid);
+            panic!("[{}] Unknown Fork Received: {}", context.aid, fork_aid);
         }
 
         // If we have both forks then we can start eating.
         if self.has_left_fork && self.has_right_fork {
             self.begin_eating(context)?;
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 
     /// Helper to request forks that the philosopher doesnt have.
-    fn request_missing_forks(&mut self, context: &Context) -> Result<(), AxiomError> {
+    fn request_missing_forks(&mut self, context: Context) -> Result<(), AxiomError> {
         if !self.has_left_fork && !self.left_fork_requested {
             self.left_fork_requested = true;
             self.left_fork_aid
@@ -303,7 +305,7 @@ impl Philosopher {
     /// forks to eat. Note that since the `BecomeHungry` message is sent as a scheduled message
     /// it may arrive after the philosopher has already changed state. For this reason we track
     /// the state change count and compare it with the number in the message.
-    fn become_hungry(&mut self, context: &Context, state_num: u16) -> AxiomResult {
+    fn become_hungry(mut self, context: Context, state_num: u16) -> AxiomResult<Self> {
         if self.metrics.state_change_count == state_num {
             if self.has_left_fork && self.has_right_fork {
                 self.begin_eating(context)?;
@@ -325,12 +327,12 @@ impl Philosopher {
                 };
             }
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
     /// philosopher will put down his forks. He will only do that if requested to.
-    fn begin_thinking(&mut self, context: &Context) -> Result<(), AxiomError> {
+    fn begin_thinking(&mut self, context: Context) -> Result<(), AxiomError> {
         self.state = PhilosopherState::Thinking;
         self.metrics.state_change_count += 1;
         self.metrics.time_eating += Instant::elapsed(&self.last_state_change);
@@ -345,13 +347,13 @@ impl Philosopher {
     /// it is a delayed message send and thus it was enqueued when the philosopher was in the
     /// eating state but the philosopher might be in another state when received. That is why
     /// we track the state change count and compare it with the number in the message.
-    fn stop_eating(&mut self, context: &Context, state_num: u16) -> AxiomResult {
+    fn stop_eating(mut self, context: Context, state_num: u16) -> AxiomResult<Self> {
         if self.metrics.state_change_count == state_num {
             if let PhilosopherState::Eating = &self.state {
                 self.begin_thinking(context)?;
             }
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 
     /// Processes a command to a philosopher to give up a fork. Note that this can be received
@@ -359,13 +361,13 @@ impl Philosopher {
     /// unless he is asked to. A philosopher can be eating, stop eating and start thinking
     /// and then start eating again if no one asked for his forks. The fork actor is the only
     /// actor sending this message and it will only do so if the fork is dirty.
-    fn give_up_fork(&mut self, context: &Context, fork_aid: &Aid) -> AxiomResult {
-        if self.left_fork_aid == *fork_aid {
+    fn give_up_fork(mut self, context: Context, fork_aid: Aid) -> AxiomResult<Self> {
+        if self.left_fork_aid == fork_aid {
             if self.has_left_fork {
                 self.has_left_fork = false;
                 fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
             }
-        } else if self.right_fork_aid == *fork_aid {
+        } else if self.right_fork_aid == fork_aid {
             if self.has_right_fork {
                 self.has_right_fork = false;
                 fork_aid.send_new(ForkCommand::ForkPutDown(context.aid.clone()))?;
@@ -373,7 +375,7 @@ impl Philosopher {
         } else {
             error!(
                 "[{}] Unknown fork asked for: {}:\n left ==>  {}\n right ==> {}",
-                context.aid, *fork_aid, self.left_fork_aid, self.right_fork_aid
+                context.aid, fork_aid, self.left_fork_aid, self.right_fork_aid
             );
         }
 
@@ -387,45 +389,45 @@ impl Philosopher {
             }
             _ => (),
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 
     /// A function that handles sending metrics to an actor that requests the metrics.
-    fn send_metrics(&mut self, context: &Context, reply_to: &Aid) -> AxiomResult {
+    fn send_metrics(self, context: Context, reply_to: Aid) -> AxiomResult<Self> {
         // We copy the metrics becase we want to send immutable data. This call
         // cant move the metrics out of self so it must copy them.
         reply_to.send_new(MetricsReply {
             aid: context.aid.clone(),
             metrics: self.metrics,
         })?;
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 
     /// Handle a message for a dining philosopher, mostly dispatching to another method to
     /// manage the details of handling the message. The only exception being the `Start`
     /// system message which is handled inline.
-    pub fn handle(&mut self, context: &Context, message: &Message) -> AxiomResult {
+    pub async fn handle(self, context: Context, message: Message) -> AxiomResult<Self> {
         if let Some(msg) = message.content_as::<Command>() {
             match &*msg {
                 Command::StopEating(state_num) => self.stop_eating(context, *state_num),
                 Command::BecomeHungry(state_num) => self.become_hungry(context, *state_num),
-                Command::ReceiveFork(fork_aid) => self.fork_received(context, fork_aid),
-                Command::GiveUpFork(fork_aid) => self.give_up_fork(context, fork_aid),
-                Command::SendMetrics(reply_to) => self.send_metrics(context, reply_to),
+                Command::ReceiveFork(fork_aid) => self.fork_received(context, fork_aid.clone()),
+                Command::GiveUpFork(fork_aid) => self.give_up_fork(context, fork_aid.clone()),
+                Command::SendMetrics(reply_to) => self.send_metrics(context, reply_to.clone()),
             }
         } else if let Some(msg) = message.content_as::<SystemMsg>() {
             match &*msg {
                 // Note that we generally want to make handling this message last as we know that
-                // this message will be recieved only once so we want to put the most used
+                // this message will be received only once so we want to put the most used
                 // message types first.
                 SystemMsg::Start => {
                     context.aid.send_new(Command::BecomeHungry(0))?;
-                    Ok(Status::Done)
+                    Ok((self, Status::Done))
                 }
-                _ => Ok(Status::Done),
+                _ => Ok((self, Status::Done)),
             }
         } else {
-            Ok(Status::Done)
+            Ok((self, Status::Done))
         }
     }
 }
@@ -464,7 +466,8 @@ pub fn main() {
 
     // Spawn the fork actors clockwise from top of table.
     for i in 0..count {
-        let name = format!("Fork{}", i);
+        let name = format!("Fork-{}", i);
+
         let fork = system
             .spawn()
             .name(&name)
@@ -503,41 +506,42 @@ pub fn main() {
         .name("Manager")
         .with(
             results,
-            move |state: &mut HashMap<Aid, Option<Metrics>>,
-                  context: &Context,
-                  message: &Message| {
-                if let Some(msg) = message.content_as::<MetricsReply>() {
-                    state.insert(msg.aid.clone(), Some(msg.metrics));
+            move |mut state: HashMap<Aid, Option<Metrics>>, context: Context, message: Message| {
+                async move {
+                    if let Some(msg) = message.content_as::<MetricsReply>() {
+                        state.insert(msg.aid.clone(), Some(msg.metrics));
 
-                    // Check to see if we have all of the metrics collected and if so then
-                    // output the results of the simulation and end the program by shutting
-                    // down the actor system.
-                    if !state.iter().any(|(_, metrics)| metrics.is_none()) {
-                        println!("Final Metrics:");
-                        for (aid, metrics) in state.iter() {
-                            println!("{}: {:?}", aid, metrics);
+                        // Check to see if we have all of the metrics collected and if so then
+                        // output the results of the simulation and end the program by shutting
+                        // down the actor system.
+                        if !state.iter().any(|(_, metrics)| metrics.is_none()) {
+                            println!("Final Metrics:");
+                            for (aid, metrics) in state.iter() {
+                                println!("{}: {:?}", aid, metrics);
+                            }
+                            context.system.trigger_shutdown();
                         }
-                        context.system.trigger_shutdown();
+                    } else if let Some(_) = message.content_as::<EndSimulation>() {
+                        // We create a message that will be sent to all actors in our list. Note that
+                        // we can send the message with an extremely lightweight clone.
+                        let request = Message::new(Command::SendMetrics(context.aid.clone()));
+                        for (aid, _) in state.iter() {
+                            aid.send(request.clone())?;
+                        }
+                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        // FIXME SERIOUSLY consider making SystemMsg variants into structs to simplify
+                        // code.
+                        if let SystemMsg::Start = &*msg {
+                            let msg = Message::new(EndSimulation {});
+                            context.aid.send_after(msg, run_time)?;
+                        }
                     }
-                } else if let Some(_) = message.content_as::<EndSimulation>() {
-                    // We create a message that will be sent to all actors in our list. Note that
-                    // we can send the message with an extremely lightweight clone.
-                    let request = Message::new(Command::SendMetrics(context.aid.clone()));
-                    for (aid, _) in state.iter() {
-                        aid.send(request.clone())?;
-                    }
-                } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    // FIXME SERIOUSLY consider making SystemMsg variants into structs to simplify
-                    // code.
-                    if let SystemMsg::Start = &*msg {
-                        let msg = Message::new(EndSimulation {});
-                        context.aid.send_after(msg, run_time)?;
-                    }
+                    Ok((state, Status::Done))
                 }
-                Ok(Status::Done)
             },
         )
-        .unwrap();
+        .expect("failed to create shutdown actor");
 
+    thread::sleep(Duration::from_secs(1));
     system.await_shutdown();
 }

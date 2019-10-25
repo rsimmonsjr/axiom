@@ -40,7 +40,7 @@ impl Game {
     }
 
     /// This is the Processor function for the game actors.
-    fn play(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
+    async fn play(mut self, ctx: Context, msg: Message) -> AxiomResult<Self> {
         // A game instance starts when the `GameManager` actor sends a message containing its `Aid`.
         // This allows this actor to send its results back to the manager once the game is complete.
         if let Some(results_aid) = msg.content_as::<Aid>() {
@@ -66,9 +66,9 @@ impl Game {
                 .unwrap();
             // Because the `GameManager` is monitoring this actor, sending the `Stop` status
             // will inform the manager that this game is now completed.
-            return Ok(Status::Stop);
+            return Ok((self, Status::Stop));
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 }
 
@@ -97,7 +97,7 @@ struct GameMsg {
 impl GameMsg {
     fn new(aid: Aid, vec: Vec<i64>) -> Self {
         Self {
-            aid: aid,
+            aid,
             results_vec: vec,
         }
     }
@@ -119,7 +119,7 @@ impl GameManager {
     fn new(total_games: u32) -> Self {
         Self {
             games_finished: 0,
-            total_games: total_games,
+            total_games,
             results: HashMap::new(),
         }
     }
@@ -127,7 +127,7 @@ impl GameManager {
 
 impl GameManager {
     // This is the Processor function for the manager actor.
-    fn gather_results(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
+    async fn gather_results(mut self, ctx: Context, msg: Message) -> AxiomResult<Self> {
         // Receive messages from the Game actors and aggregate their results in a `HashMap`.
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
             self.results
@@ -185,7 +185,7 @@ impl GameManager {
                 _ => {}
             }
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 }
 

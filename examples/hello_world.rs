@@ -21,12 +21,12 @@ enum HelloMessages {
 }
 
 /// This is the handler that will be used by the actor.
-fn hello(_state: &mut bool, context: &Context, message: &Message) -> AxiomResult {
+async fn hello(_: (), context: Context, message: Message) -> AxiomResult<()> {
     if let Some(_msg) = message.content_as::<HelloMessages>() {
         println!("Hello World from Actor: {:?}", context.aid);
-        ActorSystem::current().trigger_shutdown();
+        context.system.trigger_shutdown();
     }
-    Ok(Status::Done)
+    Ok(((), Status::Done))
 }
 
 pub fn main() {
@@ -35,7 +35,7 @@ pub fn main() {
     let system = ActorSystem::create(config);
 
     // Spawn the actor and send the message.
-    let aid = system.spawn().with(true, hello).unwrap();
+    let aid = system.spawn().with((), hello).unwrap();
     aid.send(Message::new(HelloMessages::Greet)).unwrap();
 
     // The actor will trigger shutdown, we just wait for it.
