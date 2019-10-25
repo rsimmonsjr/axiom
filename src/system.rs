@@ -10,7 +10,6 @@
 
 use std::collections::{BinaryHeap, HashSet};
 use std::fmt;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -268,7 +267,7 @@ struct ActorSystemData {
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
-    actors_by_aid: Arc<DashMap<Aid, Arc<RwLock<Pin<Box<Actor>>>>>>,
+    actors_by_aid: Arc<DashMap<Aid, PinnedActorRef>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
     aids_by_uuid: Arc<DashMap<Uuid, Aid>>,
@@ -568,7 +567,7 @@ impl ActorSystem {
     // A internal helper to register an actor in the actor system.
     pub(crate) fn register_actor(
         &self,
-        actor: Arc<RwLock<Pin<Box<Actor>>>>,
+        actor: PinnedActorRef,
     ) -> Result<Aid, AxiomError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;

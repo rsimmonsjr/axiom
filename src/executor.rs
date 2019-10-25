@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll, Waker};
@@ -13,7 +12,7 @@ use futures::Stream;
 use log::error;
 use uuid::Uuid;
 
-use crate::actors::Actor;
+use crate::actors::PinnedActorRef;
 use crate::{ActorSystemConfig, AxiomError, Status};
 
 /// The Executor is responsible for the starting and high-level scheduling of Actors. When an
@@ -59,7 +58,7 @@ impl AxiomExecutor {
 
     /// This gives the Actor to the Executor to manage. This must be ran before any messages are
     /// sent to the Actor, else it will fail to be woken until after its registered.
-    pub(crate) fn register_actor(&self, actor: Arc<RwLock<Pin<Box<Actor>>>>) {
+    pub(crate) fn register_actor(&self, actor: PinnedActorRef) {
         let id = actor.read().expect("Poisoned Actor").context.aid.uuid();
         self.sleeping.insert(id, Task { id, actor });
     }
@@ -298,7 +297,7 @@ impl AxiomReactor {
 /// Tasks represent the unit of work that an Executor-Reactor system is responsible for.
 struct Task {
     id: Uuid,
-    actor: Arc<RwLock<Pin<Box<Actor>>>>,
+    actor: PinnedActorRef,
 }
 
 impl Task {
