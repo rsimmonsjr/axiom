@@ -729,8 +729,8 @@ impl ActorBuilder {
     }
 
     /// Set the name of the actor to the given string.
-    pub fn name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_string());
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
