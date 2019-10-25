@@ -353,7 +353,7 @@ mod tests {
             .spawn()
             .with(
                 0 as usize,
-                |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
+                async move |mut state: usize, _context: Context, _message: Message| Ok(Status::Done),
             )
             .unwrap();
 
@@ -379,8 +379,8 @@ mod tests {
         struct Data {}
 
         impl Data {
-            fn handle(&mut self, _context: &Context, _message: &Message) -> AxiomResult {
-                Ok(Status::Done)
+            async fn handle(mut self, _context: Context, _message: Message) -> AxiomResult<Self> {
+                Ok((self, Status::Done))
             }
         }
 
@@ -462,21 +462,21 @@ mod tests {
         }
 
         impl Data {
-            fn handle_bool(&mut self, message: &bool) -> AxiomResult {
+            fn handle_bool(mut self, message: &bool) -> AxiomResult<Self> {
                 if *message {
                     self.value += 1;
                 } else {
                     self.value -= 1;
                 }
-                Ok(Status::Done) // This assertion will fail but we still have to return.
+                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle_i32(&mut self, message: &i32) -> AxiomResult {
+            fn handle_i32(mut self, message: &i32) -> AxiomResult<Self> {
                 self.value += *message;
-                Ok(Status::Done) // This assertion will fail but we still have to return.
+                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
+            fn handle(mut self, _context: &Context, message: &Message) -> AxiomResult<Self> {
                 if let Some(msg) = message.content_as::<bool>() {
                     self.handle_bool(&*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
@@ -484,7 +484,7 @@ mod tests {
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Ok(Status::Done)
+                    Ok((self, Status::Done))
                 } else {
                     panic!("Failed to dispatch properly");
                 }
@@ -520,12 +520,12 @@ mod tests {
             Pong,
         }
 
-        fn ping(_state: &mut usize, context: &Context, message: &Message) -> AxiomResult {
+        fn ping(mut state: usize, context: &Context, message: &Message) -> AxiomResult<usize> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
-                        Ok(Status::Done)
+                        Ok((state, Status::Done))
                     }
                     _ => Err(AxiomError::ActorError(Some(
                         "Unexpected message".to_string(),
@@ -538,28 +538,28 @@ mod tests {
                         // Now we will spawn a new actor to handle our pong and send to it.
                         let pong_aid = context.system.spawn().with(0, pong)?;
                         pong_aid.send_new(PingPong::Ping(context.aid.clone()))?;
-                        Ok(Status::Done)
+                        Ok((state, Status::Done))
                     }
-                    _ => Ok(Status::Done),
+                    _ => Ok((state, Status::Done)),
                 }
             } else {
-                Ok(Status::Done)
+                Ok((state, Status::Done))
             }
         }
 
-        fn pong(_state: &mut usize, _context: &Context, message: &Message) -> AxiomResult {
+        fn pong(mut state: usize, _context: &Context, message: &Message) -> AxiomResult<usize> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
                         from.send_new(PingPong::Pong)?;
-                        Ok(Status::Done)
+                        Ok((state, Status::Done))
                     }
                     _ => Err(AxiomError::ActorError(Some(
                         "Unexpected message".to_string(),
                     ))),
                 }
             } else {
-                Ok(Status::Done)
+                Ok((state, Status::Done))
             }
         }
 

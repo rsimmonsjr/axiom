@@ -1071,12 +1071,12 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        fn monitor_handler(state: Aid, _: &Context, message: &Message) -> AxiomResult<Aid> {
+        fn monitor_handler(mut state: Aid, _: &Context, message: &Message) -> AxiomResult<Aid> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped(aid) => {
                         assert!(Aid::ptr_eq(state, aid));
-                        Ok((Aid, Status::Done))
+                        Ok((state, Status::Done))
                     }
                     SystemMsg::Start => Ok(Status::Done),
                     _ => panic!("Received some other message!"),
