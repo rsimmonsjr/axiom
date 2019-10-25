@@ -744,6 +744,8 @@ impl ActorBuilder {
     }
 }
 
+pub(crate) type PinnedActorRef = Arc<RwLock<Pin<Box<Actor>>>>;
+
 /// The implementation of the actor in the system. Please see overview and library documentation
 /// for more detail.
 pub(crate) struct Actor {
@@ -783,7 +785,7 @@ impl Actor {
         builder: &ActorBuilder,
         state: S,
         mut processor: F,
-    ) -> Arc<RwLock<Pin<Box<Actor>>>>
+    ) -> PinnedActorRef
     where
         S: Send + Sync + 'static,
         R: Future<Output = AxiomResult<S>> + Send + 'static,
