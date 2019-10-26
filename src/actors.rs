@@ -932,23 +932,22 @@ mod tests {
 
     use super::*;
 
-    /// This is identical to the documentation but here so that its formatted by rust and we can 
-    /// copy paste this into the docs. It's also easier to debug here. 
+    /// This is identical to the documentation but here so that its formatted by rust and we can
+    /// copy paste this into the docs. It's also easier to debug here.
     #[test]
     fn test_send_examples() {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let aid = system
             .spawn()
-            .with(
-                (),
-                |_: (), context: Context, message: Message| async move {
+            .with((), |_: (), context: Context, message: Message| {
+                async move {
                     if let Some(_) = message.content_as::<i32>() {
                         context.system.trigger_shutdown();
                     }
                     Ok(((), Status::Done))
-                },
-            )
+                }
+            })
             .unwrap();
 
         match aid.send(Message::new(11)) {
@@ -1071,9 +1070,8 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with(
-                (),
-                |_: (), context: Context, message: Message| async move {
+            .with((), |_: (), context: Context, message: Message| {
+                async move {
                     if let Some(msg) = message.content_as::<Aid>() {
                         assert!(Aid::ptr_eq(&context.aid, &msg));
                     } else if let Some(msg) = message.content_as::<Op>() {
@@ -1082,8 +1080,8 @@ mod tests {
                         }
                     }
                     Ok(((), Status::Done))
-                },
-            )
+                }
+            })
             .unwrap();
 
         // Send a message to the actor.
@@ -1119,16 +1117,18 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, message: Message| async move {
-                if let Some(_msg) = message.content_as::<i32>() {
-                    Ok(((), Status::Stop))
-                } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    match &*msg {
-                        SystemMsg::Start => Ok(((), Status::Done)),
-                        m => panic!("unexpected message: {:?}", m),
+            .with((), |_: (), _: Context, message: Message| {
+                async move {
+                    if let Some(_msg) = message.content_as::<i32>() {
+                        Ok(((), Status::Stop))
+                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        match &*msg {
+                            SystemMsg::Start => Ok(((), Status::Done)),
+                            m => panic!("unexpected message: {:?}", m),
+                        }
+                    } else {
+                        panic!("Unknown Message received");
                     }
-                } else {
-                    panic!("Unknown Message received");
                 }
             })
             .unwrap();
@@ -1162,15 +1162,17 @@ mod tests {
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, message: Message| async move {
-                if let Some(msg) = message.content_as::<SystemMsg>() {
-                    match &*msg {
-                        SystemMsg::Start => Ok(((), Status::Done)),
-                        SystemMsg::Stop => Ok(((), Status::Done)),
-                        m => panic!("unexpected message: {:?}", m),
+            .with((), |_: (), _: Context, message: Message| {
+                async move {
+                    if let Some(msg) = message.content_as::<SystemMsg>() {
+                        match &*msg {
+                            SystemMsg::Start => Ok(((), Status::Done)),
+                            SystemMsg::Stop => Ok(((), Status::Done)),
+                            m => panic!("unexpected message: {:?}", m),
+                        }
+                    } else {
+                        panic!("Unknown Message received");
                     }
-                } else {
-                    panic!("Unknown Message received");
                 }
             })
             .unwrap();

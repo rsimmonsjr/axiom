@@ -565,10 +565,7 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(
-        &self,
-        actor: PinnedActorRef,
-    ) -> Result<Aid, AxiomError> {
+    pub(crate) fn register_actor(&self, actor: PinnedActorRef) -> Result<Aid, AxiomError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
@@ -826,10 +823,10 @@ async fn system_actor_processor(_: (), context: Context, message: Message) -> Ax
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
-    use crate::tests::*;
     use super::*;
+    use crate::tests::*;
     use futures::future;
+    use std::thread;
 
     // A helper to start two actor systems and connect them.
     fn start_and_connect_two_systems() -> (ActorSystem, ActorSystem) {
@@ -863,16 +860,18 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         system
             .spawn()
-            .with((), |_state: (), context: Context, _: Message| async move {
-                thread::sleep(Duration::from_millis(5));
-                context.system.trigger_shutdown();
-                Ok(((), Status::Done))
+            .with((), |_state: (), context: Context, _: Message| {
+                async move {
+                    thread::sleep(Duration::from_millis(5));
+                    context.system.trigger_shutdown();
+                    Ok(((), Status::Done))
+                }
             })
             .unwrap();
         system.await_shutdown();
 
         // Validate that if the system is already shutdown the method doesn't hang.
-        // FIXME Design a means that this cannot ever hang the test. 
+        // FIXME Design a means that this cannot ever hang the test.
         system.await_shutdown();
     }
 
@@ -1119,18 +1118,10 @@ mod tests {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
-        let aid1 = system
-            .spawn()
-            .name("A")
-            .with((), simple_handler)
-            .unwrap();
+        let aid1 = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
-        let aid2 = system
-            .spawn()
-            .name("B")
-            .with((), simple_handler)
-            .unwrap();
+        let aid2 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
@@ -1149,11 +1140,7 @@ mod tests {
         assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid()));
 
         // Now we should be able to crate a new actor with the name "B".
-        let aid3 = system
-            .spawn()
-            .name("B")
-            .with((), simple_handler)
-            .unwrap();
+        let aid3 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid3, 1, 1000).unwrap();
         let found2 = system.find_aid_by_name("B").unwrap();
         assert!(Aid::ptr_eq(&aid3, &found2));
@@ -1179,15 +1166,17 @@ mod tests {
         system1.init_current();
         let aid = system1
             .spawn()
-            .with((), |_: (), context: Context, message: Message| async move {
-                if let Some(msg) = message.content_as::<Request>() {
-                    msg.reply_to.send_new(Reply {}).unwrap();
-                    context.system.trigger_shutdown();
-                    Ok(((), Status::Stop))
-                } else if let Some(_) = message.content_as::<SystemMsg>() {
-                    Ok(((), Status::Done))
-                } else {
-                    panic!("Unexpected message received!");
+            .with((), |_: (), context: Context, message: Message| {
+                async move {
+                    if let Some(msg) = message.content_as::<Request>() {
+                        msg.reply_to.send_new(Reply {}).unwrap();
+                        context.system.trigger_shutdown();
+                        Ok(((), Status::Stop))
+                    } else if let Some(_) = message.content_as::<SystemMsg>() {
+                        Ok(((), Status::Done))
+                    } else {
+                        panic!("Unexpected message received!");
+                    }
                 }
             })
             .unwrap();
@@ -1196,30 +1185,27 @@ mod tests {
         let serialized = bincode::serialize(&aid).unwrap();
         system2
             .spawn()
-            .with(
-                (),
-                move |_: (), context: Context, message: Message| {
-                    if let Some(_) = message.content_as::<Reply>() {
-                        context.system.trigger_shutdown();
-                        future::ok(((), Status::Stop)) 
-                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                        match &*msg {
-                            SystemMsg::Start => {
-                                let target_aid: Aid = bincode::deserialize(&serialized).unwrap();
-                                target_aid
-                                    .send_new(Request {
-                                        reply_to: context.aid.clone(),
-                                    })
-                                    .unwrap();
-                                future::ok(((), Status::Done))
-                            }
-                            _ => future::ok(((), Status::Done)),
+            .with((), move |_: (), context: Context, message: Message| {
+                if let Some(_) = message.content_as::<Reply>() {
+                    context.system.trigger_shutdown();
+                    future::ok(((), Status::Stop))
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Start => {
+                            let target_aid: Aid = bincode::deserialize(&serialized).unwrap();
+                            target_aid
+                                .send_new(Request {
+                                    reply_to: context.aid.clone(),
+                                })
+                                .unwrap();
+                            future::ok(((), Status::Done))
                         }
-                    } else {
-                        panic!("Unexpected message received!");
+                        _ => future::ok(((), Status::Done)),
                     }
-                },
-            )
+                } else {
+                    panic!("Unexpected message received!");
+                }
+            })
             .unwrap();
 
         await_two_system_shutdown(system1, system2);
@@ -1236,44 +1222,50 @@ mod tests {
         let aid1 = system1
             .spawn()
             .name("A")
-            .with((), move |_: (), context: Context, _: Message| async {
-                context.system.trigger_shutdown();
-                Ok(((), Status::Done))
+            .with((), |_: (), context: Context, _: Message| {
+                async move {
+                    context.system.trigger_shutdown();
+                    Ok(((), Status::Done))
+                }
             })
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
         system2
             .spawn()
-            .with((), move |_: (), context: Context, message: Message| async {
-                if let Some(msg) = message.content_as::<SystemActorMessage>() {
-                    match &*msg {
-                        SystemActorMessage::FindByNameResult { aid: found, .. } => {
-                            if let Some(target) = found {
-                                assert_eq!(target.uuid(), aid1.uuid());
-                                target.send_new(true).unwrap();
-                                context.system.trigger_shutdown();
-                                Ok(((), Status::Done))
-                            } else {
-                                panic!("Didn't find AID.");
+            .with((), move |_: (), context: Context, message: Message| {
+                // We have to do this so each async block future gets its own copy.
+                let aid1 = aid1.clone();
+                async move {
+                    if let Some(msg) = message.content_as::<SystemActorMessage>() {
+                        match &*msg {
+                            SystemActorMessage::FindByNameResult { aid: found, .. } => {
+                                if let Some(target) = found {
+                                    assert_eq!(target.uuid(), aid1.uuid());
+                                    target.send_new(true).unwrap();
+                                    context.system.trigger_shutdown();
+                                    Ok(((), Status::Done))
+                                } else {
+                                    panic!("Didn't find AID.");
+                                }
                             }
+                            _ => panic!("Unexpected message received!"),
                         }
-                        _ => panic!("Unexpected message received!"),
-                    }
-                } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    if let SystemMsg::Start = &*msg {
-                        context.system.send_to_system_actors(Message::new(
-                            SystemActorMessage::FindByName {
-                                reply_to: context.aid.clone(),
-                                name: "A".to_string(),
-                            },
-                        ));
-                        Ok(((), Status::Done))
+                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        if let SystemMsg::Start = &*msg {
+                            context.system.send_to_system_actors(Message::new(
+                                SystemActorMessage::FindByName {
+                                    reply_to: context.aid.clone(),
+                                    name: "A".to_string(),
+                                },
+                            ));
+                            Ok(((), Status::Done))
+                        } else {
+                            panic!("Unexpected message received!");
+                        }
                     } else {
                         panic!("Unexpected message received!");
                     }
-                } else {
-                    panic!("Unexpected message received!");
                 }
             })
             .unwrap();

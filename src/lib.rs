@@ -350,10 +350,9 @@ mod tests {
         // but when that bug goes away this will be even simpler.
         let aid = system
             .spawn()
-            .with(
-                (),
-                |_: (), _: Context, _: Message| async { Ok(((), Status::Done)) },
-            )
+            .with((), |_: (), _: Context, _: Message| {
+                async { Ok(((), Status::Done)) }
+            })
             .unwrap();
 
         // Send a message to the actor.
@@ -403,24 +402,26 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let starting_state: usize = 0 as usize;
-        let closure = |mut state: usize, context: Context, message: Message| async move {
-            // Expected messages in the expected order.
-            let expected: Vec<i32> = vec![11, 13, 17];
-            // Attempt to downcast to expected message.
-            if let Some(_msg) = message.content_as::<SystemMsg>() {
-                state += 1;
-                Ok((state, Status::Done))
-            } else if let Some(msg) = message.content_as::<i32>() {
-                assert_eq!(expected[state - 1], *msg);
-                assert_eq!(state, context.aid.received().unwrap());
-                state += 1;
-                Ok((state, Status::Done))
-            } else if let Some(_msg) = message.content_as::<SystemMsg>() {
-                // Note that we put this last because it only is ever received once, we
-                // want the most frequently received messages first.
-                Ok((state, Status::Done))
-            } else {
-                panic!("Failed to dispatch properly");
+        let closure = |mut state: usize, context: Context, message: Message| {
+            async move {
+                // Expected messages in the expected order.
+                let expected: Vec<i32> = vec![11, 13, 17];
+                // Attempt to downcast to expected message.
+                if let Some(_msg) = message.content_as::<SystemMsg>() {
+                    state += 1;
+                    Ok((state, Status::Done))
+                } else if let Some(msg) = message.content_as::<i32>() {
+                    assert_eq!(expected[state - 1], *msg);
+                    assert_eq!(state, context.aid.received().unwrap());
+                    state += 1;
+                    Ok((state, Status::Done))
+                } else if let Some(_msg) = message.content_as::<SystemMsg>() {
+                    // Note that we put this last because it only is ever received once, we
+                    // want the most frequently received messages first.
+                    Ok((state, Status::Done))
+                } else {
+                    panic!("Failed to dispatch properly");
+                }
             }
         };
 
@@ -539,7 +540,7 @@ mod tests {
                         pong_aid.send_new(PingPong::Ping(context.aid.clone()))?;
                         Ok(((), Status::Done))
                     }
-                    _ => Ok(((), Status::Done))
+                    _ => Ok(((), Status::Done)),
                 }
             } else {
                 Ok(((), Status::Done))

@@ -21,8 +21,8 @@
 //! badly timeds messages. This is largely up to the user.
 
 use std::collections::HashMap;
-use std::{env, thread};
 use std::time::{Duration, Instant};
+use std::{env, thread};
 
 use log::error;
 use log::LevelFilter;
