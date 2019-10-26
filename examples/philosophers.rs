@@ -456,7 +456,7 @@ pub fn main() {
     // and runtime as command line parameters.
     let count = 5 as usize;
     let time_slice = Duration::from_millis(10);
-    let run_time = Duration::from_millis(500);
+    let run_time = Duration::from_millis(5000);
     let mut forks: Vec<Aid> = Vec::with_capacity(count);
     let mut results: HashMap<Aid, Option<Metrics>> = HashMap::with_capacity(count);
 
