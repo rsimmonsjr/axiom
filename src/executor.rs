@@ -237,14 +237,14 @@ impl AxiomReactor {
         }
         let mut join = self.thread_join.write().expect("Poisoned thread_join");
         let r = self.clone();
-        join.get_or_insert(
+        join.get_or_insert_with(|| {
             self.thread_builder()
                 .spawn(move || {
                     r.thread();
                     r.thread_join.write().expect("Poisoned thread_join").take();
                 })
-                .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e)),
-        );
+                .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e))
+        });
     }
 
     #[inline]
