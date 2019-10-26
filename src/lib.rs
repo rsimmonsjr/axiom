@@ -358,8 +358,8 @@ mod tests {
         // Send a message to the actor.
         aid.send_new(11).unwrap();
 
-        // Wait for the message to get there because test is asynchronous.
-        await_received(&aid, 1, 1000).unwrap();
+        // The actor will get two messages including the Start message.
+        await_received(&aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
@@ -387,8 +387,7 @@ mod tests {
         // Send a message to the actor.
         aid.send_new(11).unwrap();
 
-        // Wait for the message to get there because test is asynchronous.
-        await_received(&aid, 1, 1000).unwrap();
+        await_received(&aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
@@ -440,7 +439,6 @@ mod tests {
         aid.send_new(17 as i32).unwrap();
         assert_eq!(4, aid.sent().unwrap());
 
-        // Wait for all of the messages to get there because test is asynchronous.
         await_received(&aid, 4, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
@@ -501,8 +499,34 @@ mod tests {
         aid.send_new(true).unwrap();
         aid.send_new(false).unwrap();
 
-        // Wait for all of the messages to get there because this test is asynchronous.
         await_received(&aid, 4, 1000).unwrap();
+        system.trigger_and_await_shutdown();
+    }
+
+    /// Tests and demonstrates the process to create a closure that captures the environment 
+    /// outside the closure in a manner sufficient to be used in a future. 
+    #[test]
+    fn test_closure_with_move() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let target_aid = system.spawn().with((), simple_handler).unwrap();
+
+        let aid_moved = target_aid.clone(); // clone for the closure
+        let aid = system
+            .spawn()
+            .with((), move |_: (), _: Context, _: Message| {
+                // Each future needs its own copy of the target aid.
+                let tgt = aid_moved.clone();
+                async move { 
+                    tgt.send_new(11)?;
+                    Ok(((), Status::Done)) 
+                }
+            })
+            .unwrap();
+
+        aid.send_new(11).unwrap();
+        await_received(&target_aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown();
     }
 
