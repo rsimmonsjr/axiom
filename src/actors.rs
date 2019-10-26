@@ -244,7 +244,7 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |state: usize, context: Context, message: Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
@@ -258,9 +258,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown();
     /// ```
     pub fn send(&self, message: Message) -> Result<(), AxiomError> {
         match &self.data.sender {
@@ -313,7 +311,7 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |state: usize, context: Context, message: Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
@@ -328,9 +326,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown();
     /// ```
     pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AxiomError>
     where
@@ -356,7 +352,7 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |state: usize, context: Context, message: Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
@@ -370,9 +366,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown();
     /// ```
     pub fn send_new<T>(&self, value: T) -> Result<(), AxiomError>
     where
@@ -401,7 +395,7 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |state: usize, context: Context, message: Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
@@ -415,9 +409,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown();
     /// ```
     pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
         match &self.data.sender {
@@ -462,7 +454,7 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |state: usize, context: Context, message: Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
@@ -477,9 +469,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown();
     /// ```
     pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AxiomError>
     where
@@ -506,7 +496,7 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |state: &usize, context: Context, message: Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
@@ -520,9 +510,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown();
     /// ```
     pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AxiomError>
     where

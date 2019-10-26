@@ -97,7 +97,9 @@
 //!     .spawn()
 //!     .with(
 //!         0 as usize,
-//!         |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
+//!         |state: usize, _context: Context, _message: Message| async move {
+//!             Ok((state, Status::Done))
+//!         }
 //!     )
 //!     .unwrap();
 //!
@@ -119,7 +121,9 @@
 //! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //! This code creates an actor system, fetches a builder for an actor via the `spawn()` method,
-//! spawns an actor and finally sends the actor a message. Creating an Axiom actor is literally
+//! spawns an actor and finally sends the actor a message. Once the actor is done processing a 
+//! message it returns the new state of the actor and the status after handling this message. In
+//! this case we didnt change the state so we just return it. Creating an Axiom actor is literally
 //! that easy but there is a lot more functionality available as well.
 //!
 //! If you want to create an actor with a struct that is simple as well. Let's create one that
@@ -136,8 +140,8 @@
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(mut self, message: &bool) -> AxiomResult<Self> {
-//!         if *message {
+//!     fn handle_bool(mut self, message: bool) -> AxiomResult<Self> {
+//!         if message {
 //!             self.value += 1;
 //!         } else {
 //!             self.value -= 1;
@@ -145,16 +149,16 @@
 //!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle_i32(mut self, message: &i32) -> AxiomResult<Self> {
-//!         self.value += *message;
+//!     fn handle_i32(mut self, message: i32) -> AxiomResult<Self> {
+//!         self.value += message;
 //!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle(&mut self, _context: Context, message: Message) -> AxiomResult<Self> {
+//!     async fn handle(mut self, _context: Context, message: Message) -> AxiomResult<Self> {
 //!         if let Some(msg) = message.content_as::<bool>() {
-//!             self.handle_bool(msg)
+//!             self.handle_bool(*msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
-//!             self.handle_i32(msg)
+//!             self.handle_i32(*msg)
 //!         } else {
 //!             panic!("Failed to dispatch properly");
 //!         }
@@ -350,8 +354,8 @@ mod tests {
         // but when that bug goes away this will be even simpler.
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, _: Message| {
-                async { Ok(((), Status::Done)) }
+            .with((), |_: (), _: Context, _: Message| async {
+                Ok(((), Status::Done)) 
             })
             .unwrap();
 

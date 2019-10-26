@@ -593,7 +593,7 @@ impl ActorSystem {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
     ///
-    /// fn handler(mut count: usize, _: Context, _: Message) -> AxiomResult<usize> {
+    /// async fn handler(mut count: usize, _: Context, _: Message) -> AxiomResult<usize> {
     ///     count += 1;
     ///     Ok((count, Status::Done))
     /// }
@@ -966,7 +966,7 @@ mod tests {
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
         thread::sleep(Duration::from_millis(5));
         assert_eq!(1, aid.received().unwrap());
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(20));
         assert_eq!(2, aid.received().unwrap());
 
         system.trigger_and_await_shutdown();
