@@ -121,7 +121,7 @@
 //! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //! This code creates an actor system, fetches a builder for an actor via the `spawn()` method,
-//! spawns an actor and finally sends the actor a message. Once the actor is done processing a 
+//! spawns an actor and finally sends the actor a message. Once the actor is done processing a
 //! message it returns the new state of the actor and the status after handling this message. In
 //! this case we didnt change the state so we just return it. Creating an Axiom actor is literally
 //! that easy but there is a lot more functionality available as well.
@@ -354,8 +354,8 @@ mod tests {
         // but when that bug goes away this will be even simpler.
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, _: Message| async {
-                Ok(((), Status::Done)) 
+            .with((), |_: (), _: Context, _: Message| {
+                async { Ok(((), Status::Done)) }
             })
             .unwrap();
 
@@ -507,8 +507,8 @@ mod tests {
         system.trigger_and_await_shutdown();
     }
 
-    /// Tests and demonstrates the process to create a closure that captures the environment 
-    /// outside the closure in a manner sufficient to be used in a future. 
+    /// Tests and demonstrates the process to create a closure that captures the environment
+    /// outside the closure in a manner sufficient to be used in a future.
     #[test]
     fn test_closure_with_move() {
         init_test_log();
@@ -522,9 +522,9 @@ mod tests {
             .with((), move |_: (), _: Context, _: Message| {
                 // Each future needs its own copy of the target aid.
                 let tgt = aid_moved.clone();
-                async move { 
+                async move {
                     tgt.send_new(11)?;
-                    Ok(((), Status::Done)) 
+                    Ok(((), Status::Done))
                 }
             })
             .unwrap();
