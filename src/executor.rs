@@ -121,13 +121,13 @@ impl AxiomExecutor {
 pub(crate) struct AxiomReactor {
     /// The ID of the Reactor
     id: u16,
-    /// The Executor that owns this Reactor
+    /// The Executor that owns this Reactor.
     executor: AxiomExecutor,
-    /// The queue of Actors that are ready to be polled
+    /// The queue of Actors that are ready to be polled.
     run_queue: Arc<RwLock<VecDeque<Wakeup>>>,
-    /// The queue of Actors this Reactor is responsible for
+    /// The queue of Actors this Reactor is responsible for.
     wait_queue: Arc<RwLock<BTreeMap<Uuid, Task>>>,
-    /// This is used as a semaphore to ensure the reactor has only a single active thread.
+    /// This is used as a semaphore to ensure the Reactor has only a single active thread.
     thread_join: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
@@ -249,7 +249,7 @@ impl AxiomReactor {
 
     #[inline]
     fn thread_builder(&self) -> thread::Builder {
-        thread::Builder::new().name(format!("Reactor-{}", self.id))
+        thread::Builder::new().name(format!("ActorReactor-{}", self.id))
     }
 
     /// Takes the JoinHandle from the Reactor. If called before shutting down, the Reactor may start
