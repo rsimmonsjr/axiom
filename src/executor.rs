@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
-use log::error;
+use log::debug;
 use uuid::Uuid;
 
 use crate::actors::PinnedActorRef;
@@ -25,6 +25,8 @@ pub(crate) struct AxiomExecutor {
     config: ActorSystemConfig,
     /// The system's "is shutting down" flag.
     shutdown_triggered: Arc<AtomicBool>,
+    /// Barrier to await shutdown on.
+    shutdown_semaphore: Arc<DrainAwait>,
     /// Actors that have no messages available.
     sleeping: Arc<DashMap<Uuid, Task>>,
     /// All Reactors owned by this Executor.
@@ -37,9 +39,11 @@ impl AxiomExecutor {
     /// Creates a new Executor with the given actor system configuration. This will govern the
     /// configuration of the executor.
     pub(crate) fn new(config: ActorSystemConfig, shutdown_triggered: Arc<AtomicBool>) -> Self {
+        let reactor_count = config.thread_pool_size.clone();
         Self {
             config,
             shutdown_triggered,
+            shutdown_semaphore: Arc::new(DrainAwait::new(reactor_count)),
             sleeping: Arc::new(Default::default()),
             reactors: Arc::new(Default::default()),
             actors_per_reactor: Default::default(),
@@ -102,15 +106,77 @@ impl AxiomExecutor {
         *self.actors_per_reactor.get_mut(&reactor).unwrap() -= 1;
     }
 
-    pub(crate) fn shutdown(&self) {
-        self.reactors
-            .iter()
-            .filter_map(|reactor| reactor.join())
-            .for_each(|j| match j.join() {
-                Err(_) => error!("Panic in Reactor thread"),
-                _ => {}
-            });
+    pub(crate) fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
+        match timeout.into() {
+            Some(timeout) => self.shutdown_semaphore.wait_timeout(timeout),
+            None => self.shutdown_semaphore.wait(),
+        }
     }
+}
+
+struct DrainAwait {
+    pool: AtomicU16,
+    mutex: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl DrainAwait {
+    pub fn new(initial_capacity: u16) -> Self {
+        assert_ne!(
+            initial_capacity, 0,
+            "Initial capacity must be greater than 0, else it will not function correctly."
+        );
+        Self {
+            pool: AtomicU16::new(initial_capacity),
+            mutex: Mutex::new(()),
+            condvar: Condvar::new(),
+        }
+    }
+
+    pub fn decrement(&self) {
+        let val = self.pool.fetch_sub(1, Ordering::Relaxed) - 1;
+        debug!("Decrement to {}", val);
+        if val == 0 {
+            debug!("Notifying all");
+            self.condvar.notify_all();
+        }
+    }
+
+    pub fn wait(&self) -> ShutdownResult {
+        let guard = match self.mutex.lock() {
+            Ok(g) => g,
+            Err(_) => return ShutdownResult::Panicked,
+        };
+
+        match self.condvar.wait(guard) {
+            Ok(_) => ShutdownResult::Ok,
+            Err(_) => ShutdownResult::Panicked,
+        }
+    }
+
+    pub fn wait_timeout(&self, timeout: Duration) -> ShutdownResult {
+        let guard = match self.mutex.lock() {
+            Ok(g) => g,
+            Err(_) => return ShutdownResult::Panicked,
+        };
+
+        match self.condvar.wait_timeout(guard, timeout) {
+            Ok((_, timeout)) => {
+                if timeout.timed_out() {
+                    ShutdownResult::TimedOut
+                } else {
+                    ShutdownResult::Ok
+                }
+            }
+            Err(_) => ShutdownResult::Panicked,
+        }
+    }
+}
+
+pub enum ShutdownResult {
+    Ok,
+    TimedOut,
+    Panicked,
 }
 
 /// The Reactor is a single-threaded loop that will poll the woken Actors. It will run scheduling
@@ -129,6 +195,12 @@ pub(crate) struct AxiomReactor {
     wait_queue: Arc<RwLock<BTreeMap<Uuid, Task>>>,
     /// This is used as a semaphore to ensure the Reactor has only a single active thread.
     thread_join: Arc<RwLock<Option<JoinHandle<()>>>>,
+}
+
+enum LoopResult<T> {
+    Ok(T),
+    Continue,
+    Break,
 }
 
 impl AxiomReactor {
@@ -158,27 +230,19 @@ impl AxiomReactor {
     /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
     /// dedicated thread, else it will block the executor.
     fn thread(&self) {
+        debug!("Actor-Reactor-{} thread started", self.id);
         loop {
             // If we're shutting down, quit.
             if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
+                debug!("Actor-Reactor-{} acknowledging shutdown", self.id);
+                self.executor.shutdown_semaphore.decrement();
                 break;
             }
 
-            // If there's no Actors woken, the Reactor thread can end until it's needed again.
-            // If there's an Wakeup without an Actor (which might happen due to an acceptable race
-            // condition), we can continue to the next woken Actor, and drop this Wakeup. Otherwise,
-            // we have the Wakeup and Task we need, and can continue.
-            //
-            // While this arrangement is a little dense, it saves a level of indentation, and early
-            // returns are easier to read.
-            let (w, mut task) = if let Some(w) = self.get_woken() {
-                if let Some(task) = self.remove_waiting(&w.id) {
-                    (w, task)
-                } else {
-                    continue;
-                }
-            } else {
-                break;
+            let (w, mut task) = match self.get_work() {
+                LoopResult::Ok(v) => v,
+                LoopResult::Continue => continue,
+                LoopResult::Break => break,
             };
 
             let end = Instant::now() + self.executor.config.time_slice;
@@ -223,6 +287,37 @@ impl AxiomReactor {
                 }
             }
         }
+        debug!("Actor-Reactor-{} thread ended", self.id);
+    }
+
+    // If there's no Actors woken, the Reactor thread can end until it's needed again.
+    // If there's an Wakeup without an Actor (which might happen due to an acceptable race
+    // condition), we can continue to the next woken Actor, and drop this Wakeup. Otherwise,
+    // we have the Wakeup and Task we need, and can continue.
+    //
+    // While this arrangement is a little dense, it saves a level of indentation, and early
+    // returns are easier to read.
+    fn get_work(&self) -> LoopResult<(Wakeup, Task)> {
+        if let Some(w) = self.get_woken() {
+            if let Some(task) = self.remove_waiting(&w.id) {
+                LoopResult::Ok((w, task))
+            } else {
+                LoopResult::Continue
+            }
+        } else {
+            // We almost certainly should have work, so let's double check, in case of lock
+            // contention.
+            thread::sleep(self.executor.config.thread_wait_time);
+            if let Some(w) = self.get_woken() {
+                if let Some(task) = self.remove_waiting(&w.id) {
+                    LoopResult::Ok((w, task))
+                } else {
+                    LoopResult::Continue
+                }
+            } else {
+                LoopResult::Break
+            }
+        }
     }
 
     /// This function ensures the Reactor is running when it is needed to be.
@@ -249,15 +344,6 @@ impl AxiomReactor {
     #[inline]
     fn thread_builder(&self) -> thread::Builder {
         thread::Builder::new().name(format!("ActorReactor-{}", self.id))
-    }
-
-    /// Takes the JoinHandle from the Reactor. If called before shutting down, the Reactor may start
-    /// back up if ensure_running is called before the ActorSystem is shutdown.
-    fn join(&self) -> Option<JoinHandle<()>> {
-        self.thread_join
-            .write()
-            .expect("Poisoned thread_join")
-            .take()
     }
 
     /// Add an Actor's Wakeup to the run_queue.

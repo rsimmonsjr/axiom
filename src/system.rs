@@ -17,14 +17,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::actors::*;
-use crate::executor::AxiomExecutor;
+use crate::executor::{AxiomExecutor, ShutdownResult};
 use crate::message::*;
 use crate::*;
 
@@ -537,16 +537,17 @@ impl ActorSystem {
         self.data.uuid
     }
 
-    /// Triggers a shutdown but doesn't wait for threads to stop.
+    /// Triggers a shutdown but doesn't wait for the Reactors to stop.
     pub fn trigger_shutdown(&self) {
         self.data.shutdown_triggered.store(true, Ordering::Relaxed);
     }
 
-    /// Awaits for the actor system to be shutdown using a relatively CPU minimal `Condvar` as
-    /// a signaling mechanism. This function will block until all actor system threads have
-    /// stopped.
-    pub fn await_shutdown(&self) {
-        self.data.executor.shutdown();
+    /// Awaits the Executor shutting down all Reactors. This is backed by a Barrier that Reactors
+    /// will wait on after [`ActorSystem::trigger_shutdown`] is called, blocking until all Reactors
+    /// have stopped.
+    pub fn await_shutdown(&self) -> ShutdownResult {
+        info!("System awaiting shutdown");
+        self.data.executor.await_shutdown(None)
     }
 
     /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
@@ -554,11 +555,12 @@ impl ActorSystem {
     /// stopped or the timeout has expired. The function returns an `Ok` with the Duration
     /// that it waited or an `Err` if the system didn't shut down in time or something else went
     /// wrong.
-    //    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> Result<Duration, AxiomError> {
-    //
-    //    }
+    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> ShutdownResult {
+        info!("System awaiting shutdown");
+        self.data.executor.await_shutdown(timeout)
+    }
 
-    /// Triggers a shutdown of the system and returns only when all threads have joined.
+    /// Triggers a shutdown of the system and returns only when all Reactors have shutdown.
     pub fn trigger_and_await_shutdown(&self) {
         self.trigger_shutdown();
         self.await_shutdown();
