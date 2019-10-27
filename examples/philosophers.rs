@@ -21,11 +21,11 @@
 //! badly timeds messages. This is largely up to the user.
 
 use std::collections::HashMap;
+use std::env;
 use std::time::{Duration, Instant};
-use std::{env, thread};
 
-use log::error;
 use log::LevelFilter;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 
 use axiom::*;
@@ -394,7 +394,7 @@ impl Philosopher {
 
     /// A function that handles sending metrics to an actor that requests the metrics.
     fn send_metrics(self, context: Context, reply_to: Aid) -> AxiomResult<Self> {
-        // We copy the metrics becase we want to send immutable data. This call
+        // We copy the metrics because we want to send immutable data. This call
         // cant move the metrics out of self so it must copy them.
         reply_to.send_new(MetricsReply {
             aid: context.aid.clone(),
@@ -443,7 +443,7 @@ pub fn main() {
     let level = if args.contains(&"-v".to_string()) {
         LevelFilter::Debug
     } else {
-        LevelFilter::Error
+        LevelFilter::Info
     };
 
     env_logger::builder()
@@ -461,7 +461,7 @@ pub fn main() {
     let mut results: HashMap<Aid, Option<Metrics>> = HashMap::with_capacity(count);
 
     // Initialize the actor system.
-    let config = ActorSystemConfig::default();
+    let config = ActorSystemConfig::default().thread_pool_size(4);
     let system = ActorSystem::create(config);
 
     // Spawn the fork actors clockwise from top of table.
@@ -515,9 +515,9 @@ pub fn main() {
                         // output the results of the simulation and end the program by shutting
                         // down the actor system.
                         if !state.iter().any(|(_, metrics)| metrics.is_none()) {
-                            println!("Final Metrics:");
+                            info!("Final Metrics:");
                             for (aid, metrics) in state.iter() {
-                                println!("{}: {:?}", aid, metrics);
+                                info!("{}: {:?}", aid, metrics);
                             }
                             context.system.trigger_shutdown();
                         }
@@ -542,6 +542,5 @@ pub fn main() {
         )
         .expect("failed to create shutdown actor");
 
-    thread::sleep(Duration::from_secs(1));
     system.await_shutdown();
 }
