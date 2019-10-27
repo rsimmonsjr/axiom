@@ -153,7 +153,6 @@ impl AxiomReactor {
         let wakeup = Wakeup { id: task.id, waker };
         self.wait(task);
         self.wake(wakeup);
-        self.ensure_running();
     }
 
     /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
@@ -267,6 +266,7 @@ impl AxiomReactor {
             .write()
             .expect("Poisoned run_queue")
             .push_back(wakeup);
+        self.ensure_running();
     }
 
     /// Pop the next Wakeup.
