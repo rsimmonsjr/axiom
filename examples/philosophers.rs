@@ -20,15 +20,13 @@
 //! panics ensue. Some FSM implementations might be quite a bit more lose, preferring to ignore
 //! badly timeds messages. This is largely up to the user.
 
+use axiom::*;
 use std::collections::HashMap;
 use std::env;
 use std::time::{Duration, Instant};
-
 use log::LevelFilter;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-
-use axiom::*;
 
 /// A command sent to a fork actor.
 #[derive(Debug, Serialize, Deserialize)]

@@ -8,12 +8,10 @@
 //! * Using monitors to allow a manager actor to know when each of its child actors have completed
 //!   their work.
 
-use std::collections::HashMap;
-
+use axiom::*;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
-
-use axiom::*;
+use std::collections::HashMap;
 
 /// Represents the state of a simplified gambling game as described on the website linked above.
 #[derive(Debug, Copy, Clone)]
