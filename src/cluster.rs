@@ -8,6 +8,8 @@
 //! for a reference. It is designed to be the default way Axiom is clustered and thus it will be
 //! robust and well tested like the rest of Axiom.
 
+use log::{error, info};
+use secc::*;
 use std::collections::HashMap;
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter};
@@ -18,9 +20,6 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-
-use log::{error, info};
-use secc::*;
 use uuid::Uuid;
 
 use crate::*;

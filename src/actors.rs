@@ -6,6 +6,16 @@
 //! created by calling `system::spawn().with()` with any kind of function or closure that
 //! implements the `Processor` trait.
 
+use crate::message::*;
+use crate::system::*;
+use crate::*;
+use futures::{FutureExt, Stream};
+use log::error;
+use secc::*;
+use serde::de::Deserializer;
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
@@ -15,19 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
-
-use futures::{FutureExt, Stream};
-use log::error;
-use secc::*;
-use serde::de::Deserializer;
-use serde::ser::Serializer;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::message::*;
-use crate::system::*;
-use crate::*;
-use std::cell::UnsafeCell;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.

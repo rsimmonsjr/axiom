@@ -227,7 +227,6 @@
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
 use std::sync::RwLock;
-
 use serde::{Deserialize, Serialize};
 
 pub use crate::actors::Aid;

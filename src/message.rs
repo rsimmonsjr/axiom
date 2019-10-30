@@ -1,13 +1,12 @@
 //! Defines the types associated with messages sent to actors.
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::{Any, TypeId};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::{Arc, RwLock};
-
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub trait ActorMessage: Send + Sync + Any {
     /// Gets a bincode serialized version of the message.

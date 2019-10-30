@@ -1,3 +1,11 @@
+//! The Executor is responsible for the high-level scheduling of Actors.
+
+use crate::actors::PinnedActorRef;
+use crate::{ActorSystemConfig, AxiomError, Status};
+use dashmap::DashMap;
+use futures::task::ArcWake;
+use futures::Stream;
+use log::debug;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -5,18 +13,10 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-
-use dashmap::DashMap;
-use futures::task::ArcWake;
-use futures::Stream;
-use log::debug;
 use uuid::Uuid;
 
-use crate::actors::PinnedActorRef;
-use crate::{ActorSystemConfig, AxiomError, Status};
-
-/// The Executor is responsible for the starting and high-level scheduling of Actors. When an
-/// Actor is registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
+/// The Executor is responsible for the high-level scheduling of Actors. When an Actor is
+/// registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
 /// woken by a sent message, the Executor will check its scheduling data and queue it in the
 /// appropriate Reactor.
 #[derive(Clone)]
