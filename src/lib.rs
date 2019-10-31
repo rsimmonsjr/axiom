@@ -242,6 +242,16 @@ use serde::{Deserialize, Serialize};
 /// Errors returned by various parts of Axiom.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AxiomError {
+    /// This error is returned when a message cannot be converted to bincode. This will happen if
+    /// the message is not Serde serializable and the user has not implemented ActorMessage to
+    /// provide the correct implementation.
+    CantConvertToBincode,
+
+    /// This error is returned when a message cannot be converted from bincode. This will happen
+    /// ifg the message is not Serde serailizable and the user has not implemented ActorMessage to
+    /// provide the correct implementation.
+    CantConvertFromBincode,
+
     /// Error sent when attempting to send to an actor that has already been stopped. A stopped
     /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
     /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
