@@ -179,7 +179,7 @@ impl Message {
     /// ```
     pub fn content_as<T>(&self) -> Option<Arc<T>>
     where
-        T: 'static + ActorMessage + DeserializeOwned + ?Sized,
+        T: 'static + ActorMessage,
     {
         // To make this fail fast we will first check against the hash of the type_id that the
         // user wants to convert the message content to.

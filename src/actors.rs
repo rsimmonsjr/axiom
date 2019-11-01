@@ -901,6 +901,43 @@ mod tests {
             .unwrap();
     }
 
+    /// Tests that unserializable messages can be sent locally.
+    #[test]
+    fn test_send_unserializable() {
+        use std::time::Duration;
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+
+        // We declare a message type that we know is unserializable and then we implement the
+        // `ActorMessage` with the default methods which error on attempting to serialize. Note
+        // that this could be used for sending any unserialized type in other libs by simply
+        // wrapping that value in a user-made struct.
+        struct Foo {}
+        impl ActorMessage for Foo {}
+        assert!(Foo {}.to_bincode().is_err());
+        assert!(Foo::from_bincode(&vec![1, 2, 3]).is_err());
+
+        let aid = system
+            .spawn()
+            .with(
+                0 as usize,
+                move |_state: &mut usize, context: &Context, message: &Message| {
+                    if let Some(_) = message.content_as::<Foo>() {
+                        context.system.trigger_shutdown();
+                    }
+                    Ok(Status::Done)
+                },
+            )
+            .unwrap();
+
+        aid.send(Message::new(Foo {})).unwrap();
+        await_received(&aid, 2, 1000).unwrap();
+
+        system
+            .await_shutdown_with_timeout(Duration::from_millis(1000))
+            .unwrap();
+    }
+
     /// This test verifies that an actor's functions that retrieve basic info are working for
     /// unnamed actors.
     #[test]
