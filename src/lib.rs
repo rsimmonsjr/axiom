@@ -290,7 +290,7 @@ mod tests {
 
     pub fn init_test_log() {
         let _ = env_logger::builder()
-            .filter_level(LevelFilter::Debug)
+            .filter_level(LevelFilter::Warn)
             .is_test(true)
             .try_init();
     }

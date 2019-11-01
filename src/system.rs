@@ -16,7 +16,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use dashmap::DashMap;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, trace};
 use once_cell::sync::OnceCell;
 use secc::*;
 use serde::{Deserialize, Serialize};
