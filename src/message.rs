@@ -1,17 +1,28 @@
 //! Defines the types associated with messages sent to actors.
 
+use crate::AxiomError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::{Any, TypeId};
 use std::collections::hash_map::DefaultHasher;
+use std::error::Error;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::{Arc, RwLock};
 
 pub trait ActorMessage: Send + Sync + Any {
-    /// Gets a bincode serialized version of the message.
-    /// FIXME have this return a result so not all messages need to be serializable.
-    fn to_bincode(&self) -> Vec<u8>;
+    /// Gets a bincode serialized version of the message and returns it in a result or an error
+    /// indicating what went wrong.
+    fn to_bincode(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        Err(Box::new(AxiomError::CantConvertToBincode))
+    }
+
+    fn from_bincode(_data: &Vec<u8>) -> Result<Self, Box<dyn Error>>
+    where
+        Self: Sized,
+    {
+        Err(Box::new(AxiomError::CantConvertFromBincode))
+    }
 }
 
 impl dyn ActorMessage {
@@ -31,8 +42,14 @@ impl<T: 'static> ActorMessage for T
 where
     T: Serialize + DeserializeOwned + Sync + Send + Any + ?Sized,
 {
-    fn to_bincode(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap()
+    fn to_bincode(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let data = bincode::serialize(self)?;
+        Ok(data)
+    }
+
+    fn from_bincode(data: &Vec<u8>) -> Result<Self, Box<dyn Error>> {
+        let decoded: Self = bincode::deserialize(data)?;
+        Ok(decoded)
     }
 }
 
@@ -52,7 +69,10 @@ impl Serialize for MessageContent {
     {
         match self {
             MessageContent::Local(v) => {
-                MessageContent::Remote(v.to_bincode()).serialize(serializer)
+                let data = v
+                    .to_bincode()
+                    .map_err(|e| serde::ser::Error::custom(format!("{}", e)))?;
+                MessageContent::Remote(data).serialize(serializer)
             }
             MessageContent::Remote(content) => serializer.serialize_bytes(content),
         }
@@ -159,7 +179,7 @@ impl Message {
     /// ```
     pub fn content_as<T>(&self) -> Option<Arc<T>>
     where
-        T: 'static + ActorMessage + DeserializeOwned + ?Sized,
+        T: 'static + ActorMessage,
     {
         // To make this fail fast we will first check against the hash of the type_id that the
         // user wants to convert the message content to.
@@ -187,7 +207,7 @@ impl Message {
                         MessageContent::Remote(content) => {
                             // We deserialize the content and replace it in the message with a
                             // new local variant.
-                            match bincode::deserialize::<T>(&content) {
+                            match T::from_bincode(&content) {
                                 Ok(concrete) => {
                                     let new_value: Arc<T> = Arc::new(concrete);
                                     *write_guard = MessageContent::Local(new_value.clone());
