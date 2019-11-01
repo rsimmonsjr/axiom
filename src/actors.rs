@@ -318,7 +318,7 @@ impl Aid {
     ///     )
     ///     .unwrap();
     ///
-    /// let arc = Arc::new(11);
+    /// let arc = Arc::new(11 as i32);
     /// match aid.send_arc(arc.clone()) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),

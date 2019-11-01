@@ -26,13 +26,7 @@
 //!   mutable reference to the state of the actor. The state needs to live at least as long as 
 //!   the future and our research could find no way to do this easily. So now when the actor 
 //!   returns a status it will return the new state as well (Erlang style). See the examples for
-//!   more info.  The signature for the processor is now: 
-//!   ```rust
-//!       impl<F, S, R> Processor<S, R> for F where
-//!           S: Send + Sync,
-//!           R: Future<Output = AxiomResult<S>> + Send + 'static,
-//!           F: (FnMut(S, Context, Message) -> R) + Send + Sync + 'static  {} 
-//!   ```
+//!   more info.
 //!   * The user should take note that their actor will run now when it is POLLED and not
 //!   immediately as this may have some effect on the actor. Although depending on timing in actor
 //!   systems is chancy at best anyway, it's even more unreliable now. 
