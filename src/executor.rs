@@ -1,11 +1,11 @@
 //! The Executor is responsible for the high-level scheduling of Actors.
 
 use crate::actors::PinnedActorRef;
-use crate::{ActorSystemConfig, AxiomError, Status};
+use crate::{ActorSystem, AxiomError, Status};
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
-use log::debug;
+use log::{debug, trace};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -21,8 +21,6 @@ use uuid::Uuid;
 /// appropriate Reactor.
 #[derive(Clone)]
 pub(crate) struct AxiomExecutor {
-    /// The Config of the owning ActorSystem.
-    config: ActorSystemConfig,
     /// The system's "is shutting down" flag.
     shutdown_triggered: Arc<AtomicBool>,
     /// Barrier to await shutdown on.
@@ -38,12 +36,10 @@ pub(crate) struct AxiomExecutor {
 impl AxiomExecutor {
     /// Creates a new Executor with the given actor system configuration. This will govern the
     /// configuration of the executor.
-    pub(crate) fn new(config: ActorSystemConfig, shutdown_triggered: Arc<AtomicBool>) -> Self {
-        let reactor_count = config.thread_pool_size.clone();
+    pub(crate) fn new(shutdown_triggered: Arc<AtomicBool>) -> Self {
         Self {
-            config,
             shutdown_triggered,
-            shutdown_semaphore: Arc::new(DrainAwait::new(reactor_count)),
+            shutdown_semaphore: Arc::new(DrainAwait::new()),
             sleeping: Arc::new(Default::default()),
             reactors: Arc::new(Default::default()),
             actors_per_reactor: Default::default(),
@@ -53,9 +49,10 @@ impl AxiomExecutor {
     /// Initializes the executor and starts the AxiomReactor instances based on the count of the
     /// number of threads configured in the actor system. This must be called before any work can
     /// be performed with the actor system.
-    pub(crate) fn init(&self) {
-        for i in 0..self.config.thread_pool_size {
-            self.reactors.insert(i, AxiomReactor::new(self.clone(), i));
+    pub(crate) fn init(&self, system: ActorSystem) {
+        for i in 0..system.data.config.thread_pool_size {
+            self.reactors
+                .insert(i, AxiomReactor::new(self.clone(), system.clone(), i));
             self.actors_per_reactor.insert(i, 0);
         }
     }
@@ -121,16 +118,16 @@ struct DrainAwait {
 }
 
 impl DrainAwait {
-    pub fn new(initial_capacity: u16) -> Self {
-        assert_ne!(
-            initial_capacity, 0,
-            "Initial capacity must be greater than 0, else it will not function correctly."
-        );
+    pub fn new() -> Self {
         Self {
-            pool: AtomicU16::new(initial_capacity),
+            pool: AtomicU16::new(0),
             mutex: Mutex::new(()),
             condvar: Condvar::new(),
         }
+    }
+
+    pub fn increment(&self) {
+        self.pool.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn decrement(&self) {
@@ -173,6 +170,7 @@ impl DrainAwait {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum ShutdownResult {
     Ok,
     TimedOut,
@@ -187,12 +185,18 @@ pub enum ShutdownResult {
 pub(crate) struct AxiomReactor {
     /// The ID of the Reactor
     id: u16,
+    /// The diagnostic ID of this Reactor.
+    name: String,
     /// The Executor that owns this Reactor.
     executor: AxiomExecutor,
+    /// The System that owns the Executor that owns this Reactor.
+    system: ActorSystem,
     /// The queue of Actors that are ready to be polled.
     run_queue: Arc<RwLock<VecDeque<Wakeup>>>,
     /// The queue of Actors this Reactor is responsible for.
     wait_queue: Arc<RwLock<BTreeMap<Uuid, Task>>>,
+    /// This is used to pause/resume threads that run out of work.
+    thread_condvar: Arc<RwLock<(Mutex<()>, Condvar)>>,
     /// This is used as a semaphore to ensure the Reactor has only a single active thread.
     thread_join: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
@@ -200,17 +204,21 @@ pub(crate) struct AxiomReactor {
 enum LoopResult<T> {
     Ok(T),
     Continue,
-    Break,
 }
 
 impl AxiomReactor {
     /// Creates a new Reactor
-    fn new(executor: AxiomExecutor, id: u16) -> AxiomReactor {
+    fn new(executor: AxiomExecutor, system: ActorSystem, id: u16) -> AxiomReactor {
+        let name = format!("{:08x?}-{}", system.data.uuid.as_fields().0, id);
+
         AxiomReactor {
             id,
+            name,
             executor,
+            system,
             run_queue: Arc::new(RwLock::new(Default::default())),
             wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
+            thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
             thread_join: Arc::new(RwLock::new(None)),
         }
     }
@@ -230,22 +238,20 @@ impl AxiomReactor {
     /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
     /// dedicated thread, else it will block the executor.
     fn thread(&self) {
-        debug!("Actor-Reactor-{} thread started", self.id);
+        debug!("Reactor-{} thread started", self.name);
         loop {
             // If we're shutting down, quit.
             if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
-                debug!("Actor-Reactor-{} acknowledging shutdown", self.id);
-                self.executor.shutdown_semaphore.decrement();
+                debug!("Reactor-{} acknowledging shutdown", self.name);
                 break;
             }
 
             let (w, mut task) = match self.get_work() {
                 LoopResult::Ok(v) => v,
                 LoopResult::Continue => continue,
-                LoopResult::Break => break,
             };
 
-            let end = Instant::now() + self.executor.config.time_slice;
+            let end = Instant::now() + self.system.data.config.time_slice;
             loop {
                 // This polls the Actor as a Stream.
                 match task.poll(&w.waker) {
@@ -287,36 +293,38 @@ impl AxiomReactor {
                 }
             }
         }
-        debug!("Actor-Reactor-{} thread ended", self.id);
+        debug!("Reactor-{} thread ended", self.name);
     }
 
-    // If there's no Actors woken, the Reactor thread can end until it's needed again.
-    // If there's an Wakeup without an Actor (which might happen due to an acceptable race
-    // condition), we can continue to the next woken Actor, and drop this Wakeup. Otherwise,
-    // we have the Wakeup and Task we need, and can continue.
+    // If there's no Actors woken, the Reactor thread will block on the condvar. If there's a Wakeup
+    // without an Actor (which might happen due to an acceptable race condition), we can continue to
+    // the next woken Actor, and drop this Wakeup. Otherwise, we have the Wakeup and Task we need,
+    // and can continue.
     //
     // While this arrangement is a little dense, it saves a level of indentation, and early
     // returns are easier to read.
+    #[inline]
     fn get_work(&self) -> LoopResult<(Wakeup, Task)> {
         if let Some(w) = self.get_woken() {
             if let Some(task) = self.remove_waiting(&w.id) {
+                trace!("Reactor-{} Got work", self.name);
                 LoopResult::Ok((w, task))
             } else {
                 LoopResult::Continue
             }
         } else {
-            // We almost certainly should have work, so let's double check, in case of lock
-            // contention.
-            thread::sleep(self.executor.config.thread_wait_time);
-            if let Some(w) = self.get_woken() {
-                if let Some(task) = self.remove_waiting(&w.id) {
-                    LoopResult::Ok((w, task))
-                } else {
-                    LoopResult::Continue
-                }
-            } else {
-                LoopResult::Break
-            }
+            let (mutex, condvar) = &*self
+                .thread_condvar
+                .read()
+                .expect("Poisoned Reactor condvar");
+
+            trace!("Reactor-{} waiting on condvar", self.name);
+            let g = mutex.lock().expect("Poisoned Reactor condvar");
+            let _ = condvar
+                .wait_timeout(g, self.system.data.config.thread_wait_time)
+                .expect("Poisoned Reactor condvar");
+            trace!("Reactor-{} resuming", self.name);
+            LoopResult::Continue
         }
     }
 
@@ -334,16 +342,24 @@ impl AxiomReactor {
         join.get_or_insert_with(|| {
             self.thread_builder()
                 .spawn(move || {
+                    r.executor.shutdown_semaphore.increment();
+                    r.system.init_current();
                     r.thread();
                     r.thread_join.write().expect("Poisoned thread_join").take();
+                    r.executor.shutdown_semaphore.decrement();
                 })
                 .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e))
         });
+        self.thread_condvar
+            .read()
+            .expect("Poisoned Reactor condvar")
+            .1
+            .notify_one();
     }
 
     #[inline]
     fn thread_builder(&self) -> thread::Builder {
-        thread::Builder::new().name(format!("ActorReactor-{}", self.id))
+        thread::Builder::new().name(format!("Reactor-{}", self.name))
     }
 
     /// Add an Actor's Wakeup to the run_queue.

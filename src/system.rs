@@ -253,17 +253,19 @@ impl std::cmp::Ord for DelayedMessage {
 }
 
 /// Contains the inner data used by the actor system.
-struct ActorSystemData {
+pub(crate) struct ActorSystemData {
     /// Unique version 4 UUID for this actor system.
-    uuid: Uuid,
+    pub(crate) uuid: Uuid,
     /// The config for the actor system which was passed to it when created.
-    config: ActorSystemConfig,
+    pub(crate) config: ActorSystemConfig,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
     executor: AxiomExecutor,
     /// A flag holding whether or not the system is currently shutting down.
     shutdown_triggered: Arc<AtomicBool>,
+    /// A flag holding whether or not the system has shutdown.
+    shutdown_completed: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
     actors_by_aid: Arc<DashMap<Aid, PinnedActorRef>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
@@ -287,7 +289,7 @@ pub struct ActorSystem {
     /// This field means the user doesnt have to worry about declaring `Arc<ActorSystem>` all
     /// over the place but can just use `ActorSystem` instead. Wrapping the data also allows
     /// `&self` semantics on the methods which feels more ergonomic.
-    data: Arc<ActorSystemData>,
+    pub(crate) data: Arc<ActorSystemData>,
 }
 
 impl ActorSystem {
@@ -295,20 +297,21 @@ impl ActorSystem {
     /// are needed in the work channel, the number of threads they need in the system and and so
     /// on in order to satisfy the requirements of the software they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
+        let uuid = Uuid::new_v4();
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
         let shutdown_triggered = Arc::new(AtomicBool::new(false));
 
-        let executor = AxiomExecutor::new(config.clone(), shutdown_triggered.clone());
-        executor.init();
+        let executor = AxiomExecutor::new(shutdown_triggered.clone());
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
-                uuid: Uuid::new_v4(),
+                uuid,
                 config,
                 threads,
                 executor,
                 shutdown_triggered,
+                shutdown_completed: Arc::new(AtomicBool::new(false)),
                 actors_by_aid: Arc::new(DashMap::default()),
                 aids_by_uuid: Arc::new(DashMap::default()),
                 aids_by_name: Arc::new(DashMap::default()),
@@ -317,6 +320,9 @@ impl ActorSystem {
                 delayed_messages: Arc::new((Mutex::new(BinaryHeap::new()), Condvar::new())),
             }),
         };
+
+        info!("ActorSystem {} has spawned", uuid);
+        system.data.executor.init(system.clone());
 
         // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
         // system not being created yet but needed by the thread. We put this code in a block to
@@ -356,7 +362,7 @@ impl ActorSystem {
                 match data.peek() {
                     None => {
                         // wait to be notified something is added.
-                        let _result = condvar.wait(data).unwrap();
+                        let _ = condvar.wait(data).unwrap();
                     }
                     Some(msg) => {
                         let now = Instant::now();
@@ -545,7 +551,13 @@ impl ActorSystem {
     /// have stopped.
     pub fn await_shutdown(&self) -> ShutdownResult {
         info!("System awaiting shutdown");
-        self.data.executor.await_shutdown(None)
+        if !self.data.shutdown_completed.load(Ordering::Relaxed) {
+            let r = self.data.executor.await_shutdown(None);
+            self.data.shutdown_completed.swap(true, Ordering::Relaxed);
+            r
+        } else {
+            ShutdownResult::Ok
+        }
     }
 
     /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
@@ -555,7 +567,13 @@ impl ActorSystem {
     /// wrong.
     pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> ShutdownResult {
         info!("System awaiting shutdown");
-        self.data.executor.await_shutdown(timeout)
+        if !self.data.shutdown_completed.load(Ordering::Relaxed) {
+            let r = self.data.executor.await_shutdown(timeout);
+            self.data.shutdown_completed.swap(true, Ordering::Relaxed);
+            r
+        } else {
+            ShutdownResult::Ok
+        }
     }
 
     /// Triggers a shutdown of the system and returns only when all Reactors have shutdown.
@@ -729,6 +747,7 @@ impl ActorSystem {
     /// FIXME (Issue #72) Add try_send ability.
     pub fn send_to_system_actors(&self, message: Message) {
         let remotes = &*self.data.remotes;
+        trace!("Sending message to Remote System Actors");
         for remote in remotes.iter() {
             let aid = &remote.value().system_actor_aid;
             aid.send(message.clone()).unwrap_or_else(|error| {
@@ -791,6 +810,7 @@ async fn system_actor_processor(_: (), context: Context, message: Message) -> Ax
         match &*msg {
             // Someone requested that this system actor find an actor by name.
             SystemActorMessage::FindByName { reply_to, name } => {
+                debug!("Attempting to locate Actor by name: {}", name);
                 let found = context.system.find_aid_by_name(&name);
                 let reply = Message::new(SystemActorMessage::FindByNameResult {
                     system_uuid: context.system.uuid(),
@@ -862,13 +882,25 @@ mod tests {
             .spawn()
             .with((), |_state: (), context: Context, _: Message| {
                 async move {
-                    thread::sleep(Duration::from_millis(5));
+                    // Block for enough time so we can test timeout twice
+                    thread::sleep(Duration::from_millis(100));
                     context.system.trigger_shutdown();
                     Ok(((), Status::Done))
                 }
             })
             .unwrap();
-        system.await_shutdown();
+
+        // Expecting to timeout
+        assert_eq!(
+            system.await_shutdown_with_timeout(Duration::from_millis(10)),
+            ShutdownResult::TimedOut
+        );
+
+        // Expecting to NOT timeout
+        assert_eq!(
+            system.await_shutdown_with_timeout(Duration::from_millis(200)),
+            ShutdownResult::Ok
+        );
 
         // Validate that if the system is already shutdown the method doesn't hang.
         // FIXME Design a means that this cannot ever hang the test.
@@ -1187,11 +1219,13 @@ mod tests {
             .spawn()
             .with((), move |_: (), context: Context, message: Message| {
                 if let Some(_) = message.content_as::<Reply>() {
+                    debug!("Received reply, shutting down");
                     context.system.trigger_shutdown();
                     future::ok(((), Status::Stop))
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
                         SystemMsg::Start => {
+                            debug!("Starting request actor");
                             let target_aid: Aid = bincode::deserialize(&serialized).unwrap();
                             target_aid
                                 .send_new(Request {
@@ -1222,10 +1256,14 @@ mod tests {
         let aid1 = system1
             .spawn()
             .name("A")
-            .with((), |_: (), context: Context, _: Message| {
+            .with((), |_: (), context: Context, message: Message| {
                 async move {
-                    context.system.trigger_shutdown();
-                    Ok(((), Status::Done))
+                    if let Some(_) = message.content_as::<bool>() {
+                        context.system.trigger_shutdown();
+                        Ok(((), Status::Stop))
+                    } else {
+                        Ok(((), Status::Done))
+                    }
                 }
             })
             .unwrap();
@@ -1240,6 +1278,7 @@ mod tests {
                     if let Some(msg) = message.content_as::<SystemActorMessage>() {
                         match &*msg {
                             SystemActorMessage::FindByNameResult { aid: found, .. } => {
+                                debug!("FindByNameResult received");
                                 if let Some(target) = found {
                                     assert_eq!(target.uuid(), aid1.uuid());
                                     target.send_new(true).unwrap();
@@ -1252,6 +1291,7 @@ mod tests {
                             _ => panic!("Unexpected message received!"),
                         }
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        debug!("Actor started, attempting to send FindByName request");
                         if let SystemMsg::Start = &*msg {
                             context.system.send_to_system_actors(Message::new(
                                 SystemActorMessage::FindByName {
