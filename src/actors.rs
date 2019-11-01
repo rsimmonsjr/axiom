@@ -962,23 +962,20 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with(
-                0 as usize,
-                move |_state: &mut usize, context: &Context, message: &Message| {
+            .with((), move |_state: (), context: Context, message: Message| {
+                async move {
                     if let Some(_) = message.content_as::<Foo>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok(Status::Done)
-                },
-            )
+                    Ok(((), Status::Done))
+                }
+            })
             .unwrap();
 
         aid.send(Message::new(Foo {})).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
-        system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .unwrap();
+        system.await_shutdown_with_timeout(Duration::from_millis(1000));
     }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for

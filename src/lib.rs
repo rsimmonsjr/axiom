@@ -15,22 +15,22 @@
 //! ### What's New
 //! * 2019-11-xx 0.2.0
 //!   * Massive internal refactor in order to support async Actors using Rust futures.
-//!   * BREAKING CHANGE: The signature for Processors has changed from references for `Context` and 
-//!   `Message` to values. For closures-as-actors, wrap the body in an `async` block. 
-//!   `move |...| {...}` becomes `|...| async move { ... }`. For regular function syntax, simply 
+//!   * BREAKING CHANGE: The signature for Processors has changed from references for `Context` and
+//!   `Message` to values. For closures-as-actors, wrap the body in an `async` block.
+//!   `move |...| {...}` becomes `|...| async move { ... }`. For regular function syntax, simply
 //!   add `async` in front of `fn`.
 //!   * BREAKING CHANGE: Due to the ongoing development around async closures, the user will have
 //!   to put an async block inside handlers that are closures. See the examples for more
-//!   information. 
+//!   information.
 //!   * BREAKING CHANGE: Due to the nature of futures, the actor's processor cannot be given a
-//!   mutable reference to the state of the actor. The state needs to live at least as long as 
-//!   the future and our research could find no way to do this easily. So now when the actor 
+//!   mutable reference to the state of the actor. The state needs to live at least as long as
+//!   the future and our research could find no way to do this easily. So now when the actor
 //!   returns a status it will return the new state as well (Erlang style). See the examples for
 //!   more info.
 //!   * The user should take note that their actor will run now when it is POLLED and not
 //!   immediately as this may have some effect on the actor. Although depending on timing in actor
-//!   systems is chancy at best anyway, it's even more unreliable now. 
-//! 
+//!   systems is chancy at best anyway, it's even more unreliable now.
+//!
 //! [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 //!
 //! # Getting Started
@@ -204,8 +204,8 @@
 //! architected code.  
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
-use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
+use std::sync::RwLock;
 
 pub use crate::actors::Aid;
 pub use crate::actors::Context;
