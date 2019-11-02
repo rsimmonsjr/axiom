@@ -111,34 +111,41 @@ impl AxiomExecutor {
     }
 }
 
+/// A semaphore or sorts that unblocks when its internal counter hits 0
 struct DrainAwait {
-    pool: AtomicU16,
+    /// Internal counter
+    counter: AtomicU16,
+    /// Mutex for blocking on
     mutex: Mutex<()>,
+    /// Condvar for waiting on
     condvar: Condvar,
 }
 
 impl DrainAwait {
     pub fn new() -> Self {
         Self {
-            pool: AtomicU16::new(0),
+            counter: AtomicU16::new(0),
             mutex: Mutex::new(()),
             condvar: Condvar::new(),
         }
     }
 
+    /// Increment the counter
     pub fn increment(&self) {
-        self.pool.fetch_add(1, Ordering::Relaxed);
+        self.counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Decrement the counter, notify condvar if it hits 0
     pub fn decrement(&self) {
-        let val = self.pool.fetch_sub(1, Ordering::Relaxed) - 1;
-        debug!("Decrement to {}", val);
+        let val = self.counter.fetch_sub(1, Ordering::Relaxed) - 1;
+        trace!("Decrementing DrainAwait to {}", val);
         if val == 0 {
-            debug!("Notifying all");
+            debug!("Notifying blocked threads");
             self.condvar.notify_all();
         }
     }
 
+    /// Block on the condvar
     pub fn wait(&self) -> ShutdownResult {
         let guard = match self.mutex.lock() {
             Ok(g) => g,
@@ -151,6 +158,7 @@ impl DrainAwait {
         }
     }
 
+    /// Block on the condvar until it times out
     pub fn wait_timeout(&self, timeout: Duration) -> ShutdownResult {
         let guard = match self.mutex.lock() {
             Ok(g) => g,
