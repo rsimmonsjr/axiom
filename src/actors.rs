@@ -709,8 +709,8 @@ impl ActorBuilder {
         R: Future<Output = AxiomResult<S>> + Send + 'static,
         F: Processor<S, R> + 'static,
     {
-        let actor = Actor::new(self.system.clone(), &self, state, processor);
-        let result = self.system.register_actor(actor)?;
+        let (actor, stream) = Actor::new(self.system.clone(), &self, state, processor);
+        let result = self.system.register_actor(actor, stream)?;
         Ok(result)
     }
 
@@ -730,11 +730,7 @@ impl ActorBuilder {
     }
 }
 
-pub(crate) type PinnedActorRef = Arc<RwLock<Pin<Box<Actor>>>>;
-
-/// The implementation of the actor in the system. Please see overview and library documentation
-/// for more detail.
-pub(crate) struct Actor {
+pub(crate) struct ActorStream {
     /// The context data for the actor containing the `aid` as well as other immutable data.
     pub context: Context,
     /// Receiver for the actor's message channel.
@@ -745,6 +741,13 @@ pub(crate) struct Actor {
     handler: Mutex<Box<dyn Handler>>,
     /// The pending result of the current handler invocation.
     pending: Mutex<Option<Pin<Box<ActorFuture>>>>,
+}
+
+/// The implementation of the actor in the system. Please see overview and library documentation
+/// for more detail.
+pub(crate) struct Actor {
+    /// The context data for the actor containing the `aid` as well as other immutable data.
+    pub context: Context,
 }
 
 /// This is exclusively used in contexts we can be more than confident are safe.
@@ -771,7 +774,7 @@ impl Actor {
         builder: &ActorBuilder,
         state: S,
         mut processor: F,
-    ) -> PinnedActorRef
+    ) -> (Arc<Actor>, ActorStream)
     where
         S: Send + Sync + 'static,
         R: Future<Output = AxiomResult<S>> + Send + 'static,
@@ -819,15 +822,21 @@ impl Actor {
         let context = Context { aid, system };
 
         let actor = Actor {
+            context: context.clone(),
+        };
+
+        let stream = ActorStream {
             context,
             receiver,
             handler: Mutex::new(handler),
             pending: Mutex::new(None),
         };
 
-        Arc::new(RwLock::new(Box::pin(actor)))
+        (Arc::new(actor), stream)
     }
+}
 
+impl ActorStream {
     pub(crate) fn handle_result(&self, result: &Result<Status, AxiomError>) {
         match result {
             Ok(Status::Done) => self.receiver.pop().unwrap(),
@@ -852,7 +861,7 @@ impl Actor {
     }
 }
 
-impl Stream for Actor {
+impl Stream for ActorStream {
     type Item = Result<Status, AxiomError>;
 
     fn poll_next(

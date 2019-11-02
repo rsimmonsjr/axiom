@@ -1,6 +1,6 @@
 //! The Executor is responsible for the high-level scheduling of Actors.
 
-use crate::actors::PinnedActorRef;
+use crate::actors::ActorStream;
 use crate::{ActorSystem, AxiomError, Status};
 use dashmap::DashMap;
 use futures::task::ArcWake;
@@ -14,6 +14,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+use std::pin::Pin;
 
 /// The Executor is responsible for the high-level scheduling of Actors. When an Actor is
 /// registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
@@ -59,8 +60,10 @@ impl AxiomExecutor {
 
     /// This gives the Actor to the Executor to manage. This must be ran before any messages are
     /// sent to the Actor, else it will fail to be woken until after its registered.
-    pub(crate) fn register_actor(&self, actor: PinnedActorRef) {
-        let id = actor.read().expect("Poisoned Actor").context.aid.uuid();
+    pub(crate) fn register_actor(&self, actor: ActorStream) {
+        let id = actor.context.aid.uuid();
+        let actor = Mutex::new(Box::pin(actor));
+
         self.sleeping.insert(id, Task { id, actor });
     }
 
@@ -273,7 +276,7 @@ impl AxiomReactor {
                         // The Actor should handle its own internal modifications in response to the
                         // result.
                         task.actor
-                            .read()
+                            .lock()
                             .expect("Poisoned Actor")
                             .handle_result(&result);
                         match result {
@@ -309,8 +312,7 @@ impl AxiomReactor {
     // the next woken Actor, and drop this Wakeup. Otherwise, we have the Wakeup and Task we need,
     // and can continue.
     //
-    // While this arrangement is a little dense, it saves a level of indentation, and early
-    // returns are easier to read.
+    // While this arrangement is a little dense, it saves a level of indentation.
     #[inline]
     fn get_work(&self) -> LoopResult<(Wakeup, Task)> {
         if let Some(w) = self.get_woken() {
@@ -318,6 +320,7 @@ impl AxiomReactor {
                 trace!("Reactor-{} Got work", self.name);
                 LoopResult::Ok((w, task))
             } else {
+                trace!("Reactor-{} dropping futile WakeUp", self.name);
                 LoopResult::Continue
             }
         } else {
@@ -345,6 +348,7 @@ impl AxiomReactor {
         if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
             return;
         }
+        // Get the Option<JoinHandle>. If it's not running, start it back up
         let mut join = self.thread_join.write().expect("Poisoned thread_join");
         let r = self.clone();
         join.get_or_insert_with(|| {
@@ -358,6 +362,7 @@ impl AxiomReactor {
                 })
                 .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e))
         });
+        // We've ensured it's running, let's make sure it's not waiting
         self.thread_condvar
             .read()
             .expect("Poisoned Reactor condvar")
@@ -407,7 +412,7 @@ impl AxiomReactor {
 /// Tasks represent the unit of work that an Executor-Reactor system is responsible for.
 struct Task {
     id: Uuid,
-    actor: PinnedActorRef,
+    actor: Mutex<Pin<Box<ActorStream>>>,
 }
 
 impl Task {
@@ -415,7 +420,7 @@ impl Task {
         let mut ctx = Context::from_waker(waker);
 
         self.actor
-            .write()
+            .lock()
             .expect("Poisoned Actor")
             .as_mut()
             .poll_next(&mut ctx)

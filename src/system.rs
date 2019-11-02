@@ -267,7 +267,7 @@ pub(crate) struct ActorSystemData {
     /// A flag holding whether or not the system has shutdown.
     shutdown_completed: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
-    actors_by_aid: Arc<DashMap<Aid, PinnedActorRef>>,
+    actors_by_aid: Arc<DashMap<Aid, Arc<Actor>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
     /// when an actor is spawned using version 4 UUIDs.
     aids_by_uuid: Arc<DashMap<Uuid, Aid>>,
@@ -583,11 +583,11 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: PinnedActorRef) -> Result<Aid, AxiomError> {
+    pub(crate) fn register_actor(&self, actor: Arc<Actor>, stream: ActorStream) -> Result<Aid, AxiomError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
-        let aid = actor.read().expect("Poisoned Actor").context.aid.clone();
+        let aid = actor.context.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
                 return Err(AxiomError::NameAlreadyUsed(name_string.clone()));
@@ -597,7 +597,7 @@ impl ActorSystem {
         }
         actors_by_aid.insert(aid.clone(), actor.clone());
         aids_by_uuid.insert(aid.uuid(), aid.clone());
-        self.data.executor.register_actor(actor);
+        self.data.executor.register_actor(stream);
         aid.send(Message::new(SystemMsg::Start))?;
         Ok(aid)
     }
@@ -646,7 +646,7 @@ impl ActorSystem {
             Some(actor) => self
                 .data
                 .executor
-                .wake(actor.read().expect("Poisoned Actor").context.aid.uuid()),
+                .wake(actor.context.aid.uuid()),
             None => {
                 // The actor was removed from the map so ignore the problem and just log
                 // a warning.
