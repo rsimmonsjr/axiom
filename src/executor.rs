@@ -7,7 +7,7 @@ use futures::task::ArcWake;
 use futures::Stream;
 use log::{debug, trace};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
@@ -114,12 +114,10 @@ impl AxiomExecutor {
     }
 }
 
-/// A semaphore or sorts that unblocks when its internal counter hits 0
+/// A semaphore of sorts that unblocks when its internal counter hits 0
 struct DrainAwait {
-    /// Internal counter
-    counter: AtomicU16,
     /// Mutex for blocking on
-    mutex: Mutex<()>,
+    mutex: Mutex<u16>,
     /// Condvar for waiting on
     condvar: Condvar,
 }
@@ -127,22 +125,22 @@ struct DrainAwait {
 impl DrainAwait {
     pub fn new() -> Self {
         Self {
-            counter: AtomicU16::new(0),
-            mutex: Mutex::new(()),
+            mutex: Mutex::new(0),
             condvar: Condvar::new(),
         }
     }
 
     /// Increment the counter
     pub fn increment(&self) {
-        self.counter.fetch_add(1, Ordering::Relaxed);
+        *self.mutex.lock().expect("DrainAwait poisoned") += 1;
     }
 
     /// Decrement the counter, notify condvar if it hits 0
     pub fn decrement(&self) {
-        let val = self.counter.fetch_sub(1, Ordering::Relaxed) - 1;
-        trace!("Decrementing DrainAwait to {}", val);
-        if val == 0 {
+        let mut guard = self.mutex.lock().expect("DrainAwait poisoned");
+        *guard -= 1;
+        trace!("Decrementing DrainAwait to {}", *guard);
+        if *guard == 0 {
             debug!("Notifying blocked threads");
             self.condvar.notify_all();
         }
@@ -150,34 +148,39 @@ impl DrainAwait {
 
     /// Block on the condvar
     pub fn wait(&self) -> ShutdownResult {
-        let guard = match self.mutex.lock() {
+        let mut guard = match self.mutex.lock() {
             Ok(g) => g,
             Err(_) => return ShutdownResult::Panicked,
         };
 
-        match self.condvar.wait(guard) {
-            Ok(_) => ShutdownResult::Ok,
-            Err(_) => ShutdownResult::Panicked,
+        while *guard != 0 {
+            guard = match self.condvar.wait(guard) {
+                Ok(g) => g,
+                Err(_) => return ShutdownResult::Panicked,
+            };
         }
+        ShutdownResult::Ok
     }
 
     /// Block on the condvar until it times out
     pub fn wait_timeout(&self, timeout: Duration) -> ShutdownResult {
-        let guard = match self.mutex.lock() {
+        let mut guard = match self.mutex.lock() {
             Ok(g) => g,
             Err(_) => return ShutdownResult::Panicked,
         };
 
-        match self.condvar.wait_timeout(guard, timeout) {
-            Ok((_, timeout)) => {
-                if timeout.timed_out() {
-                    ShutdownResult::TimedOut
-                } else {
-                    ShutdownResult::Ok
-                }
+        while *guard != 0 {
+            let (new_guard, timeout) = match self.condvar.wait_timeout(guard, timeout) {
+                Ok(ret) => (ret.0, ret.1),
+                Err(_) => return ShutdownResult::Panicked,
+            };
+
+            if timeout.timed_out() {
+                return ShutdownResult::TimedOut;
             }
-            Err(_) => ShutdownResult::Panicked,
+            guard = new_guard;
         }
+        ShutdownResult::Ok
     }
 }
 
