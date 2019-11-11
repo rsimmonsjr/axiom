@@ -262,8 +262,8 @@ pub(crate) struct ActorSystemData {
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
     executor: AxiomExecutor,
-    /// A flag holding whether or not the system is currently shutting down.
-    shutdown_triggered: Arc<AtomicBool>,
+    /// A flag and condvar that can be used to send a signal when the system begins to shutdown.
+    shutdown_triggered: Arc<(Mutex<bool>, Condvar)>,
     /// A flag holding whether or not the system has shutdown.
     shutdown_completed: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
@@ -299,7 +299,7 @@ impl ActorSystem {
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
         let uuid = Uuid::new_v4();
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
-        let shutdown_triggered = Arc::new(AtomicBool::new(false));
+        let shutdown_triggered = Arc::new((Mutex::new(false), Condvar::new()));
 
         let executor = AxiomExecutor::new(shutdown_triggered.clone());
 
@@ -356,7 +356,7 @@ impl ActorSystem {
         let system = self.clone();
         let delayed_messages = self.data.delayed_messages.clone();
         thread::spawn(move || {
-            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+            while !*system.data.shutdown_triggered.0.lock().unwrap() {
                 let (ref mutex, ref condvar) = &*delayed_messages;
                 let mut data = mutex.lock().unwrap();
                 match data.peek() {
@@ -432,7 +432,7 @@ impl ActorSystem {
             system.init_current();
             // FIXME (Issue #76) Add graceful shutdown for threads handling remotes including
             // informing remote that the system is exiting.
-            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+            while !*system.data.shutdown_triggered.0.lock().unwrap() {
                 match receiver_clone.receive_await_timeout(thread_timeout) {
                     Err(_) => (), // not an error, just loop and try again.
                     Ok(wire_msg) => system.process_wire_message(&sys_uuid, &wire_msg),
@@ -543,7 +543,9 @@ impl ActorSystem {
 
     /// Triggers a shutdown but doesn't wait for the Reactors to stop.
     pub fn trigger_shutdown(&self) {
-        self.data.shutdown_triggered.store(true, Ordering::Relaxed);
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        *mutex.lock().unwrap() = true;
+        condvar.notify_all();
     }
 
     /// Awaits the Executor shutting down all Reactors. This is backed by a Barrier that Reactors
@@ -565,10 +567,31 @@ impl ActorSystem {
     /// stopped or the timeout has expired. The function returns an `Ok` with the Duration
     /// that it waited or an `Err` if the system didn't shut down in time or something else went
     /// wrong.
-    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> ShutdownResult {
+    pub fn await_shutdown_with_timeout(&self, mut dur: Duration) -> ShutdownResult {
         info!("System awaiting shutdown");
+
+        // First wait for the system to begin shutting down if it has not already
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        let mut guard = mutex.lock().unwrap();
+        while !*guard {
+            let started = Instant::now();
+            let (new_guard, timeout) = match condvar.wait_timeout(guard, dur) {
+                Ok(ret) => ret,
+                Err(_) => return ShutdownResult::Panicked,
+            };
+
+            if timeout.timed_out() {
+                return ShutdownResult::TimedOut;
+            }
+
+            guard = new_guard;
+            dur -= started.elapsed();
+        }
+        drop(guard);
+
+        // Wait for the system to finish shutting down
         if !self.data.shutdown_completed.load(Ordering::Relaxed) {
-            let r = self.data.executor.await_shutdown(timeout);
+            let r = self.data.executor.await_shutdown(dur);
             self.data.shutdown_completed.swap(true, Ordering::Relaxed);
             r
         } else {

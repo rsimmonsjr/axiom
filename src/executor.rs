@@ -7,7 +7,6 @@ use futures::task::ArcWake;
 use futures::Stream;
 use log::{debug, trace};
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
@@ -23,7 +22,7 @@ use std::pin::Pin;
 #[derive(Clone)]
 pub(crate) struct AxiomExecutor {
     /// The system's "is shutting down" flag.
-    shutdown_triggered: Arc<AtomicBool>,
+    shutdown_triggered: Arc<(Mutex<bool>, Condvar)>,
     /// Barrier to await shutdown on.
     shutdown_semaphore: Arc<DrainAwait>,
     /// Actors that have no messages available.
@@ -37,7 +36,7 @@ pub(crate) struct AxiomExecutor {
 impl AxiomExecutor {
     /// Creates a new Executor with the given actor system configuration. This will govern the
     /// configuration of the executor.
-    pub(crate) fn new(shutdown_triggered: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(shutdown_triggered: Arc<(Mutex<bool>, Condvar)>) -> Self {
         Self {
             shutdown_triggered,
             shutdown_semaphore: Arc::new(DrainAwait::new()),
@@ -255,7 +254,7 @@ impl AxiomReactor {
         debug!("Reactor-{} thread started", self.name);
         loop {
             // If we're shutting down, quit.
-            if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
+            if *self.executor.shutdown_triggered.0.lock().unwrap() {
                 debug!("Reactor-{} acknowledging shutdown", self.name);
                 break;
             }
@@ -348,7 +347,7 @@ impl AxiomReactor {
     // TODO: Check if the thread has panicked.
     fn ensure_running(&self) {
         // Ensure running? Nah, we're shutting down.
-        if self.executor.shutdown_triggered.load(Ordering::Relaxed) {
+        if *self.executor.shutdown_triggered.0.lock().unwrap() {
             return;
         }
         // Get the Option<JoinHandle>. If it's not running, start it back up
