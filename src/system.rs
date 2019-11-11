@@ -553,6 +553,19 @@ impl ActorSystem {
     /// have stopped.
     pub fn await_shutdown(&self) -> ShutdownResult {
         info!("System awaiting shutdown");
+
+        // First wait for the system to begin shutting down if it has not already
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        let mut guard = mutex.lock().unwrap();
+        while !*guard {
+            guard = match condvar.wait(guard) {
+                Ok(ret) => ret,
+                Err(_) => return ShutdownResult::Panicked,
+            };
+        }
+        drop(guard);
+
+        // Wait for the system to finish shutting down
         if !self.data.shutdown_completed.load(Ordering::Relaxed) {
             let r = self.data.executor.await_shutdown(None);
             self.data.shutdown_completed.swap(true, Ordering::Relaxed);
