@@ -38,7 +38,7 @@ impl Game {
     }
 
     /// This is the Processor function for the game actors.
-    async fn play(mut self, ctx: Context, msg: Message) -> AxiomResult<Self> {
+    async fn play(mut self, ctx: Context, msg: Message) -> ActorResult<Self> {
         // A game instance starts when the `GameManager` actor sends a message containing its `Aid`.
         // This allows this actor to send its results back to the manager once the game is complete.
         if let Some(results_aid) = msg.content_as::<Aid>() {
@@ -125,7 +125,7 @@ impl GameManager {
 
 impl GameManager {
     // This is the Processor function for the manager actor.
-    async fn gather_results(mut self, ctx: Context, msg: Message) -> AxiomResult<Self> {
+    async fn gather_results(mut self, ctx: Context, msg: Message) -> ActorResult<Self> {
         // Receive messages from the Game actors and aggregate their results in a `HashMap`.
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
             self.results
@@ -161,7 +161,7 @@ impl GameManager {
                 // This code runs each time a monitored `Game` actor stops. Once all the actors are
                 // finished, the average final results of each game will be printed and then the
                 // actor system will be shut down.
-                SystemMsg::Stopped(_) => {
+                SystemMsg::Stopped { .. } => {
                     self.games_finished += 1;
                     if self.games_finished == self.total_games {
                         // Each vec of results contains the entire history of a game for every time that

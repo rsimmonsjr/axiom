@@ -20,7 +20,7 @@ enum HelloMessages {
 }
 
 /// This is the handler that will be used by the actor.
-async fn hello(_: (), context: Context, message: Message) -> AxiomResult<()> {
+async fn hello(_: (), context: Context, message: Message) -> ActorResult<()> {
     if let Some(_msg) = message.content_as::<HelloMessages>() {
         println!("Hello World from Actor: {:?}", context.aid);
         context.system.trigger_shutdown();

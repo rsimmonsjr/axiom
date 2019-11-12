@@ -61,7 +61,7 @@ impl Fork {
     }
 
     /// Request that a fork be sent to a philosopher.
-    fn fork_requested(mut self, context: Context, requester: Aid) -> AxiomResult<Self> {
+    fn fork_requested(mut self, context: Context, requester: Aid) -> ActorResult<Self> {
         match &self.owned_by {
             Some(owner) => {
                 if self.clean {
@@ -81,7 +81,7 @@ impl Fork {
 
     /// The philosopher that is the current owner of the fork has put it down, making it available
     /// for other philosophers to pick up.
-    fn fork_put_down(mut self, context: Context, sender: Aid) -> AxiomResult<Self> {
+    fn fork_put_down(mut self, context: Context, sender: Aid) -> ActorResult<Self> {
         match &self.owned_by {
             Some(owner) => {
                 if owner == &sender {
@@ -110,7 +110,7 @@ impl Fork {
     /// The owner of the fork is notifying the fork that they are going to use the fork. This
     /// will mark the fork as dirty and make it available to be sent to another philosopher if
     /// they request the fork.
-    fn using_fork(mut self, context: Context, sender: Aid) -> AxiomResult<Self> {
+    fn using_fork(mut self, context: Context, sender: Aid) -> ActorResult<Self> {
         match &self.owned_by {
             Some(owner) => {
                 if owner == &sender {
@@ -132,7 +132,7 @@ impl Fork {
 
     /// Handles actor messages, downcasting them to the proper types and then sends the messages
     /// to the other functions to handle the details.
-    pub async fn handle(self, context: Context, message: Message) -> AxiomResult<Self> {
+    pub async fn handle(self, context: Context, message: Message) -> ActorResult<Self> {
         if let Some(msg) = message.content_as::<ForkCommand>() {
             match &*msg {
                 ForkCommand::RequestFork(requester) => {
@@ -266,7 +266,7 @@ impl Philosopher {
 
     /// The philosopher received a fork. Once they have both forks they can start eating.
     /// Otherwise they have to wait for the other fork to begin eating.
-    fn fork_received(mut self, context: Context, fork_aid: Aid) -> AxiomResult<Self> {
+    fn fork_received(mut self, context: Context, fork_aid: Aid) -> ActorResult<Self> {
         if self.left_fork_aid == fork_aid {
             self.has_left_fork = true;
             self.left_fork_requested = false;
@@ -303,7 +303,7 @@ impl Philosopher {
     /// forks to eat. Note that since the `BecomeHungry` message is sent as a scheduled message
     /// it may arrive after the philosopher has already changed state. For this reason we track
     /// the state change count and compare it with the number in the message.
-    fn become_hungry(mut self, context: Context, state_num: u16) -> AxiomResult<Self> {
+    fn become_hungry(mut self, context: Context, state_num: u16) -> ActorResult<Self> {
         if self.metrics.state_change_count == state_num {
             if self.has_left_fork && self.has_right_fork {
                 self.begin_eating(context)?;
@@ -345,7 +345,7 @@ impl Philosopher {
     /// it is a delayed message send and thus it was enqueued when the philosopher was in the
     /// eating state but the philosopher might be in another state when received. That is why
     /// we track the state change count and compare it with the number in the message.
-    fn stop_eating(mut self, context: Context, state_num: u16) -> AxiomResult<Self> {
+    fn stop_eating(mut self, context: Context, state_num: u16) -> ActorResult<Self> {
         if self.metrics.state_change_count == state_num {
             if let PhilosopherState::Eating = &self.state {
                 self.begin_thinking(context)?;
@@ -359,7 +359,7 @@ impl Philosopher {
     /// unless he is asked to. A philosopher can be eating, stop eating and start thinking
     /// and then start eating again if no one asked for his forks. The fork actor is the only
     /// actor sending this message and it will only do so if the fork is dirty.
-    fn give_up_fork(mut self, context: Context, fork_aid: Aid) -> AxiomResult<Self> {
+    fn give_up_fork(mut self, context: Context, fork_aid: Aid) -> ActorResult<Self> {
         if self.left_fork_aid == fork_aid {
             if self.has_left_fork {
                 self.has_left_fork = false;
@@ -391,7 +391,7 @@ impl Philosopher {
     }
 
     /// A function that handles sending metrics to an actor that requests the metrics.
-    fn send_metrics(self, context: Context, reply_to: Aid) -> AxiomResult<Self> {
+    fn send_metrics(self, context: Context, reply_to: Aid) -> ActorResult<Self> {
         // We copy the metrics because we want to send immutable data. This call
         // cant move the metrics out of self so it must copy them.
         reply_to.send_new(MetricsReply {
@@ -404,7 +404,7 @@ impl Philosopher {
     /// Handle a message for a dining philosopher, mostly dispatching to another method to
     /// manage the details of handling the message. The only exception being the `Start`
     /// system message which is handled inline.
-    pub async fn handle(self, context: Context, message: Message) -> AxiomResult<Self> {
+    pub async fn handle(self, context: Context, message: Message) -> ActorResult<Self> {
         if let Some(msg) = message.content_as::<Command>() {
             match &*msg {
                 Command::StopEating(state_num) => self.stop_eating(context, *state_num),

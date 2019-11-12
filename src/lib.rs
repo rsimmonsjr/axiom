@@ -118,7 +118,7 @@
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(mut self, message: bool) -> AxiomResult<Self> {
+//!     fn handle_bool(mut self, message: bool) -> ActorResult<Self> {
 //!         if message {
 //!             self.value += 1;
 //!         } else {
@@ -127,12 +127,12 @@
 //!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle_i32(mut self, message: i32) -> AxiomResult<Self> {
+//!     fn handle_i32(mut self, message: i32) -> ActorResult<Self> {
 //!         self.value += message;
 //!         Ok((self, Status::Done))
 //!     }
 //!
-//!     async fn handle(mut self, _context: Context, message: Message) -> AxiomResult<Self> {
+//!     async fn handle(mut self, _context: Context, message: Message) -> ActorResult<Self> {
 //!         if let Some(msg) = message.content_as::<bool>() {
 //!             self.handle_bool(*msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
@@ -214,6 +214,7 @@ pub use crate::system::ActorSystem;
 pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
 pub use crate::system::WireMessage;
+use std::error::Error;
 
 pub mod actors;
 pub mod cluster;
@@ -250,7 +251,7 @@ pub enum AxiomError {
 
     /// Used when unable to send to an actor's message channel within the scheduled timeout
     /// configured in the actor system. This could result from the actor's channel being too
-    /// small to accomodate the message flow, the lack of thread count to process messages fast
+    /// small to accommodate the message flow, the lack of thread count to process messages fast
     /// enough to keep up with the flow or something wrong with the actor itself that it is
     /// taking too long to clear the messages.
     SendTimedOut(Aid),
@@ -261,15 +262,6 @@ pub enum AxiomError {
     /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of
     /// time or not finish at all.
     UnableToSchedule,
-
-    /// Returned by actors when there is an error in the actor. The optional enclosed string
-    /// will be sent to monitoring actors and can tell the monitoring actors the nature of the
-    /// error that occurred.
-    ActorError(Option<String>),
-
-    /// Returned when calling `ActorSystem::await_shutdown_with_timeout` and the timeout expires
-    /// or some other error occurs while awaiting the shutdown.
-    ShutdownError(String),
 }
 
 impl std::fmt::Display for AxiomError {
@@ -284,9 +276,11 @@ impl std::error::Error for AxiomError {
     }
 }
 
+pub type StdError = dyn Error + Send + Sync + 'static;
+
 /// A type for a result from an actor's message processor.
 /// A Result::Err is treated as a fatal error, and the Actor will be stopped.
-pub type AxiomResult<State> = Result<(State, Status), AxiomError>;
+pub type ActorResult<State> = Result<(State, Status), Box<StdError>>;
 
 #[cfg(test)]
 mod tests {
@@ -306,7 +300,7 @@ mod tests {
 
     /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
-    pub async fn simple_handler(_: (), _: Context, _: Message) -> AxiomResult<()> {
+    pub async fn simple_handler(_: (), _: Context, _: Message) -> ActorResult<()> {
         Ok(((), Status::Done))
     }
 
@@ -367,7 +361,7 @@ mod tests {
         struct Data {}
 
         impl Data {
-            async fn handle(self, _: Context, _: Message) -> AxiomResult<Self> {
+            async fn handle(self, _: Context, _: Message) -> ActorResult<Self> {
                 Ok((self, Status::Done))
             }
         }
@@ -450,7 +444,7 @@ mod tests {
         }
 
         impl Data {
-            fn handle_bool(mut self, message: bool) -> AxiomResult<Self> {
+            fn handle_bool(mut self, message: bool) -> ActorResult<Self> {
                 if message {
                     self.value += 1;
                 } else {
@@ -459,12 +453,12 @@ mod tests {
                 Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle_i32(mut self, message: i32) -> AxiomResult<Self> {
+            fn handle_i32(mut self, message: i32) -> ActorResult<Self> {
                 self.value += message;
                 Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            async fn handle(self, _context: Context, message: Message) -> AxiomResult<Self> {
+            async fn handle(self, _context: Context, message: Message) -> ActorResult<Self> {
                 if let Some(msg) = message.content_as::<bool>() {
                     self.handle_bool(*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
@@ -534,16 +528,14 @@ mod tests {
             Pong,
         }
 
-        async fn ping(_: (), context: Context, message: Message) -> AxiomResult<()> {
+        async fn ping(_: (), context: Context, message: Message) -> ActorResult<()> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
                         Ok(((), Status::Done))
                     }
-                    _ => Err(AxiomError::ActorError(Some(
-                        "Unexpected message".to_string(),
-                    ))),
+                    _ => Err("Unexpected message".to_string().into()),
                 }
             } else if let Some(msg) = message.content_as::<SystemMsg>() {
                 // Start messages happen only once so we keep them last.
@@ -561,16 +553,14 @@ mod tests {
             }
         }
 
-        async fn pong(_: (), _: Context, message: Message) -> AxiomResult<()> {
+        async fn pong(_: (), _: Context, message: Message) -> ActorResult<()> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
                         from.send_new(PingPong::Pong)?;
                         Ok(((), Status::Done))
                     }
-                    _ => Err(AxiomError::ActorError(Some(
-                        "Unexpected message".to_string(),
-                    ))),
+                    _ => Err("Unexpected message".into()),
                 }
             } else {
                 Ok(((), Status::Done))

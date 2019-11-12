@@ -49,7 +49,10 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
-    Stopped(Aid),
+    Stopped {
+        aid: Aid,
+        error: Option<String>,
+    },
 }
 
 /// A type used for sending messages to other actor systems.
@@ -641,7 +644,7 @@ impl ActorSystem {
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
     ///
-    /// async fn handler(mut count: usize, _: Context, _: Message) -> AxiomResult<usize> {
+    /// async fn handler(mut count: usize, _: Context, _: Message) -> ActorResult<usize> {
     ///     count += 1;
     ///     Ok((count, Status::Done))
     /// }
@@ -697,6 +700,12 @@ impl ActorSystem {
     /// This is something that should rarely be called from the outside as it is much better to
     /// send the actor a [`SystemMsg::Stop`] message and allow it to stop gracefully.
     pub fn stop_actor(&self, aid: &Aid) {
+        self.internal_stop_actor(aid, None);
+    }
+
+    /// Internal implementation of stop_actor, so we have the ability to send an error along with
+    /// the notification of stop.
+    fn internal_stop_actor(&self, aid: &Aid, error: impl Into<Option<Box<dyn Error>>>) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
             let aids_by_uuid = &self.data.aids_by_uuid;
@@ -712,8 +721,9 @@ impl ActorSystem {
         // Notify all of the actors monitoring the actor that is stopped and remove the
         // actor from the map of monitors.
         if let Some((_, monitoring)) = self.data.monitoring_by_monitored.remove(&aid) {
+            let error = error.into().map(|e| format!("{}", e));
             for m_aid in monitoring {
-                let value = SystemMsg::Stopped(aid.clone());
+                let value = SystemMsg::Stopped { aid: aid.clone(), error: error.clone() };
                 m_aid.send(Message::new(value)).unwrap_or_else(|error| {
                     error!(
                         "Could not send 'Stopped' to monitoring actor {}: Error: {:?}",
@@ -835,7 +845,7 @@ enum SystemActorMessage {
 
 /// A processor for the system actor.
 /// FIXME Issue #89: Refactor into a full struct based actor in another file.
-async fn system_actor_processor(_: (), context: Context, message: Message) -> AxiomResult<()> {
+async fn system_actor_processor(_: (), context: Context, message: Message) -> ActorResult<()> {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
             // Someone requested that this system actor find an actor by name.
@@ -1125,11 +1135,12 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        async fn monitor_handler(state: Aid, _: Context, message: Message) -> AxiomResult<Aid> {
+        async fn monitor_handler(state: Aid, _: Context, message: Message) -> ActorResult<Aid> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
-                    SystemMsg::Stopped(aid) => {
+                    SystemMsg::Stopped { aid, error } => {
                         assert!(Aid::ptr_eq(&state, aid));
+                        assert!(error.is_none());
                         Ok((state, Status::Done))
                     }
                     SystemMsg::Start => Ok((state, Status::Done)),

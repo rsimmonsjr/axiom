@@ -657,7 +657,7 @@ impl std::fmt::Display for Context {
 /// * `context` - The immutable context for this actor and its system.
 /// * `message` - The current message to process.
 /// The actor must return the state on success as a `(State, Status)` tuple.
-pub trait Processor<S: Send + Sync, R: Future<Output = AxiomResult<S>> + Send + 'static>:
+pub trait Processor<S: Send + Sync, R: Future<Output = ActorResult<S>> + Send + 'static>:
     (FnMut(S, Context, Message) -> R) + Send + Sync
 {
 }
@@ -666,13 +666,13 @@ pub trait Processor<S: Send + Sync, R: Future<Output = AxiomResult<S>> + Send + 
 impl<F, S, R> Processor<S, R> for F
 where
     S: Send + Sync,
-    R: Future<Output = AxiomResult<S>> + Send + 'static,
+    R: Future<Output = ActorResult<S>> + Send + 'static,
     F: (FnMut(S, Context, Message) -> R) + Send + Sync + 'static,
 {
 }
 
 pub(crate) type ActorFuture =
-    Pin<Box<dyn Future<Output = Result<Status, AxiomError>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<Status, Box<StdError>>> + Send + 'static>>;
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
@@ -706,7 +706,7 @@ impl ActorBuilder {
     pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, AxiomError>
     where
         S: Send + Sync + 'static,
-        R: Future<Output = AxiomResult<S>> + Send + 'static,
+        R: Future<Output = ActorResult<S>> + Send + 'static,
         F: Processor<S, R> + 'static,
     {
         let (actor, stream) = Actor::new(self.system.clone(), &self, state, processor);
@@ -777,7 +777,7 @@ impl Actor {
     ) -> (Arc<Actor>, ActorStream)
     where
         S: Send + Sync + 'static,
-        R: Future<Output = AxiomResult<S>> + Send + 'static,
+        R: Future<Output = ActorResult<S>> + Send + 'static,
         F: Processor<S, R> + 'static,
     {
         let (sender, receiver) = secc::create::<Message>(
@@ -837,7 +837,7 @@ impl Actor {
 }
 
 impl ActorStream {
-    pub(crate) fn handle_result(&self, result: &Result<Status, AxiomError>) {
+    pub(crate) fn handle_result(&self, result: &Result<Status, Box<StdError>>) {
         match result {
             Ok(Status::Done) => self.receiver.pop().unwrap(),
             Ok(Status::Skip) => self.receiver.skip().unwrap(),
@@ -853,7 +853,7 @@ impl ActorStream {
                 self.receiver.pop().unwrap();
                 self.context.system.stop_actor(&self.context.aid);
                 error!(
-                    "[{}] Returned an error when processing: {:?}",
+                    "[{}] returned an error when processing: {}",
                     self.context.aid, e
                 );
             }
@@ -862,7 +862,7 @@ impl ActorStream {
 }
 
 impl Stream for ActorStream {
-    type Item = Result<Status, AxiomError>;
+    type Item = Result<Status, Box<StdError>>;
 
     fn poll_next(
         mut self: Pin<&mut Self>,

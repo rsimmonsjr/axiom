@@ -1,7 +1,7 @@
 //! The Executor is responsible for the high-level scheduling of Actors.
 
 use crate::actors::ActorStream;
-use crate::{ActorSystem, AxiomError, Status};
+use crate::{ActorSystem, Status, StdError};
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
@@ -475,7 +475,7 @@ struct Task {
 }
 
 impl Task {
-    fn poll(&mut self, waker: &Waker) -> Poll<Option<Result<Status, AxiomError>>> {
+    fn poll(&mut self, waker: &Waker) -> Poll<Option<Result<Status, Box<StdError>>>> {
         let mut ctx = Context::from_waker(waker);
 
         self.actor
