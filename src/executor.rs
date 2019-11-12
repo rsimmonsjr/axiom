@@ -1,7 +1,7 @@
 //! The Executor is responsible for the high-level scheduling of Actors.
 
 use crate::actors::ActorStream;
-use crate::{ActorSystem, Status, StdError};
+use crate::{ActorSystem, Status, StdError, Aid};
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
@@ -11,7 +11,6 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 use std::pin::Pin;
 
 /// The Executor is responsible for the high-level scheduling of Actors. When an Actor is
@@ -25,7 +24,7 @@ pub(crate) struct AxiomExecutor {
     /// Barrier to await shutdown on.
     shutdown_semaphore: Arc<DrainAwait>,
     /// Actors that have no messages available.
-    sleeping: Arc<DashMap<Uuid, Task>>,
+    sleeping: Arc<DashMap<Aid, Task>>,
     /// All Reactors owned by this Executor.
     reactors: Arc<DashMap<u16, AxiomReactor>>,
     /// Counting actors per reactor for even distribution of Actors.
@@ -59,15 +58,15 @@ impl AxiomExecutor {
     /// This gives the Actor to the Executor to manage. This must be ran before any messages are
     /// sent to the Actor, else it will fail to be woken until after its registered.
     pub(crate) fn register_actor(&self, actor: ActorStream) {
-        let id = actor.context.aid.uuid();
+        let id = actor.context.aid.clone();
         let actor = Mutex::new(Box::pin(actor));
 
-        self.sleeping.insert(id, Task { id, actor });
+        self.sleeping.insert(id.clone(), Task { id, actor });
     }
 
     /// This wakes an Actor in the Executor which will cause its future to be polled. The Aid,
     /// through the ActorSystem, will call this on Message Send.
-    pub(crate) fn wake(&self, id: Uuid) {
+    pub(crate) fn wake(&self, id: Aid) {
         // Pull the Task
         let task = match self.sleeping.remove(&id) {
             Some((_, task)) => task,
@@ -97,7 +96,7 @@ impl AxiomExecutor {
     /// the Actor count for that Reactor.
     fn return_task(&self, task: Task, reactor: u16) {
         // Put the Task back.
-        self.sleeping.insert(task.id, task);
+        self.sleeping.insert(task.id.clone(), task);
         // Decrement the Reactor's Actor count.
         *self.actors_per_reactor.get_mut(&reactor).unwrap() -= 1;
     }
@@ -204,7 +203,7 @@ pub(crate) struct AxiomReactor {
     /// The queue of Actors that are ready to be polled.
     run_queue: Arc<RwLock<VecDeque<Wakeup>>>,
     /// The queue of Actors this Reactor is responsible for.
-    wait_queue: Arc<RwLock<BTreeMap<Uuid, Task>>>,
+    wait_queue: Arc<RwLock<BTreeMap<Aid, Task>>>,
     /// This is used to pause/resume threads that run out of work.
     thread_condvar: Arc<RwLock<(Mutex<()>, Condvar)>>,
     /// This is used as a semaphore to ensure the Reactor has only a single active thread.
@@ -260,11 +259,11 @@ impl AxiomReactor {
     /// Moves an Actor from the executor into a reactor.
     fn insert(&self, task: Task) {
         let token = Token {
-            id: task.id,
+            id: task.id.clone(),
             reactor: self.clone(),
         };
         let waker = futures::task::waker(Arc::new(token));
-        let wakeup = Wakeup { id: task.id, waker };
+        let wakeup = Wakeup { id: task.id.clone(), waker };
         self.wait(task);
         self.wake(wakeup);
     }
@@ -456,11 +455,11 @@ impl AxiomReactor {
         self.wait_queue
             .write()
             .expect("Poisoned wait_queue")
-            .insert(task.id, task);
+            .insert(task.id.clone(), task);
     }
 
     /// Remove a Task from the Reactor's wait_queue.
-    fn remove_waiting(&self, id: &Uuid) -> Option<Task> {
+    fn remove_waiting(&self, id: &Aid) -> Option<Task> {
         self.wait_queue
             .write()
             .expect("Poisoned wait_queue")
@@ -470,7 +469,7 @@ impl AxiomReactor {
 
 /// Tasks represent the unit of work that an Executor-Reactor system is responsible for.
 struct Task {
-    id: Uuid,
+    id: Aid,
     actor: Mutex<Pin<Box<ActorStream>>>,
 }
 
@@ -488,13 +487,13 @@ impl Task {
 
 /// Object used for generating our wakers.
 struct Token {
-    id: Uuid,
+    id: Aid,
     reactor: AxiomReactor,
 }
 
 impl ArcWake for Token {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        let id = arc_self.id;
+        let id = arc_self.id.clone();
 
         let wakeup = Wakeup {
             id,
@@ -507,6 +506,6 @@ impl ArcWake for Token {
 
 /// Object representing the need to wake an Actor, to be enqueued for waking.
 struct Wakeup {
-    id: Uuid,
+    id: Aid,
     waker: Waker,
 }
