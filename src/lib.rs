@@ -222,16 +222,16 @@ mod executor;
 pub mod message;
 pub mod system;
 
-/// Errors returned by various parts of Axiom.
+/// Errors returned by the Aid
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AxiomError {
+pub enum AidError {
     /// This error is returned when a message cannot be converted to bincode. This will happen if
     /// the message is not Serde serializable and the user has not implemented ActorMessage to
     /// provide the correct implementation.
     CantConvertToBincode,
 
     /// This error is returned when a message cannot be converted from bincode. This will happen
-    /// ifg the message is not Serde serailizable and the user has not implemented ActorMessage to
+    /// ifg the message is not Serde serializable and the user has not implemented ActorMessage to
     /// provide the correct implementation.
     CantConvertFromBincode,
 
@@ -239,11 +239,6 @@ pub enum AxiomError {
     /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
     /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
     ActorAlreadyStopped,
-
-    /// An error returned when an actor is already using a local name at the time the user tries
-    /// to register that name for a new actor. The error contains the name that was attempted
-    /// to be registered.
-    NameAlreadyUsed(String),
 
     /// Error returned when an Aid is not local and a user is trying to do operations that
     /// only work on local Aid instances.
@@ -264,13 +259,13 @@ pub enum AxiomError {
     UnableToSchedule,
 }
 
-impl std::fmt::Display for AxiomError {
+impl std::fmt::Display for AidError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl std::error::Error for AxiomError {
+impl std::error::Error for AidError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         None
     }

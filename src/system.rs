@@ -207,6 +207,23 @@ impl Default for ActorSystemConfig {
     }
 }
 
+/// Errors produced by the ActorSystem
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum SystemError {
+    /// An error returned when an actor is already using a local name at the time the user tries
+    /// to register that name for a new actor. The error contains the name that was attempted
+    /// to be registered.
+    NameAlreadyUsed(String),
+}
+
+impl std::fmt::Display for SystemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for SystemError { }
+
 /// Information for communicating with a remote actor system.
 pub struct RemoteInfo {
     /// The UUID of the remote system.
@@ -459,7 +476,7 @@ impl ActorSystem {
 
     /// Disconnects this actor system from the remote actor system with the given UUID.
     /// FIXME Connectivity management needs a lot of work and testing.
-    pub fn disconnect(&self, system_uuid: Uuid) -> Result<(), AxiomError> {
+    pub fn disconnect(&self, system_uuid: Uuid) -> Result<(), AidError> {
         self.data.remotes.remove(&system_uuid);
         Ok(())
     }
@@ -616,14 +633,14 @@ impl ActorSystem {
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: Arc<Actor>, stream: ActorStream) -> Result<Aid, AxiomError> {
+    pub(crate) fn register_actor(&self, actor: Arc<Actor>, stream: ActorStream) -> Result<Aid, SystemError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
         let aid = actor.context.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
-                return Err(AxiomError::NameAlreadyUsed(name_string.clone()));
+                return Err(SystemError::NameAlreadyUsed(name_string.clone()));
             } else {
                 aids_by_name.insert(name_string.clone(), aid.clone());
             }
@@ -631,7 +648,7 @@ impl ActorSystem {
         actors_by_aid.insert(aid.clone(), actor.clone());
         aids_by_uuid.insert(aid.uuid(), aid.clone());
         self.data.executor.register_actor(stream);
-        aid.send(Message::new(SystemMsg::Start))?;
+        aid.send(Message::new(SystemMsg::Start)).unwrap(); // Actor was just made
         Ok(aid)
     }
 
@@ -1199,7 +1216,7 @@ mod tests {
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
         // attempt returns an error to be handled.
         let result = system.spawn().name("A").with((), simple_handler);
-        assert_eq!(Err(AxiomError::NameAlreadyUsed("A".to_string())), result);
+        assert_eq!(Err(SystemError::NameAlreadyUsed("A".to_string())), result);
 
         // Verify that the same actor has "A" name and is still up.
         let found1 = system.find_aid_by_name("A").unwrap();

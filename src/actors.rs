@@ -258,7 +258,7 @@ impl Aid {
     ///
     /// system.await_shutdown(None);
     /// ```
-    pub fn send(&self, message: Message) -> Result<(), AxiomError> {
+    pub fn send(&self, message: Message) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local {
                 stopped,
@@ -266,7 +266,7 @@ impl Aid {
                 system,
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    Err(AxiomError::ActorAlreadyStopped)
+                    Err(AidError::ActorAlreadyStopped)
                 } else {
                     match sender.send_await_timeout(message, system.config().send_timeout) {
                         Ok(_) => {
@@ -276,7 +276,7 @@ impl Aid {
                             };
                             Ok(())
                         }
-                        Err(_) => Err(AxiomError::SendTimedOut(self.clone())),
+                        Err(_) => Err(AidError::SendTimedOut(self.clone())),
                     }
                 }
             }
@@ -326,7 +326,7 @@ impl Aid {
     ///
     /// system.await_shutdown(None);
     /// ```
-    pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AxiomError>
+    pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -366,7 +366,7 @@ impl Aid {
     ///
     /// system.await_shutdown(None);
     /// ```
-    pub fn send_new<T>(&self, value: T) -> Result<(), AxiomError>
+    pub fn send_new<T>(&self, value: T) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -409,13 +409,13 @@ impl Aid {
     ///
     /// system.await_shutdown(None);
     /// ```
-    pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
+    pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local {
                 stopped, system, ..
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    Err(AxiomError::ActorAlreadyStopped)
+                    Err(AidError::ActorAlreadyStopped)
                 } else {
                     system.send_after(message, self.clone(), duration);
                     Ok(())
@@ -469,7 +469,7 @@ impl Aid {
     ///
     /// system.await_shutdown(None);
     /// ```
-    pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AxiomError>
+    pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -510,7 +510,7 @@ impl Aid {
     ///
     /// system.await_shutdown(None);
     /// ```
-    pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AxiomError>
+    pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -563,19 +563,19 @@ impl Aid {
 
     /// Determines how many messages the actor with the aid has been sent. This method works only
     /// for local `aid`s, remote `aid`s will return an error if this is called.
-    pub fn sent(&self) -> Result<usize, AxiomError> {
+    pub fn sent(&self) -> Result<usize, AidError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.sent()),
-            _ => Err(AxiomError::AidNotLocal),
+            _ => Err(AidError::AidNotLocal),
         }
     }
 
     /// Determines how many messages the actor with the `aid` has received. This method works only
     /// for local `aid`s, remote `aid`s will return an error if this is called.    
-    pub fn received(&self) -> Result<usize, AxiomError> {
+    pub fn received(&self) -> Result<usize, AidError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.received()),
-            _ => Err(AxiomError::AidNotLocal),
+            _ => Err(AidError::AidNotLocal),
         }
     }
 
@@ -583,13 +583,13 @@ impl Aid {
     /// cause no more messages to be sent to the actor. Note that once stopped, an [`Aid`] can
     /// never be started again. Note that this is `pub(crate)` because the user should be sending
     /// `SystemMsg::Stop` to actors or, at worst, calling `ActorSystem::stop()` to stop an actor.
-    pub(crate) fn stop(&self) -> Result<(), AxiomError> {
+    pub(crate) fn stop(&self) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local { stopped, .. } => {
                 stopped.fetch_or(true, Ordering::AcqRel);
                 Ok(())
             }
-            _ => Err(AxiomError::AidNotLocal),
+            _ => Err(AidError::AidNotLocal),
         }
     }
 
@@ -703,7 +703,7 @@ impl ActorBuilder {
     /// `ActorSystem::spawn` for more information and examples.
     ///
     /// FIXME Consider implementing `using` to spawn a stateless actor.
-    pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, AxiomError>
+    pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, SystemError>
     where
         S: Send + Sync + 'static,
         R: Future<Output = ActorResult<S>> + Send + 'static,
@@ -1121,7 +1121,7 @@ mod tests {
 
         // Make sure that the actor is actually stopped and can't get more messages.
         match aid.send(Message::new(42 as i32)) {
-            Err(AxiomError::ActorAlreadyStopped) => assert!(true), // all OK!
+            Err(AidError::ActorAlreadyStopped) => assert!(true), // all OK!
             Ok(_) => panic!("Expected the actor to be shut down!"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }

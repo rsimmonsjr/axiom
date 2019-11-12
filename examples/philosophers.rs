@@ -246,7 +246,7 @@ impl Philosopher {
     }
 
     /// Changes the philosopher to a state of eating.
-    fn begin_eating(&mut self, context: Context) -> Result<(), AxiomError> {
+    fn begin_eating(&mut self, context: Context) -> Result<(), Box<StdError>> {
         self.metrics.time_hungry += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
         self.state = PhilosopherState::Eating;
@@ -285,7 +285,7 @@ impl Philosopher {
     }
 
     /// Helper to request forks that the philosopher doesnt have.
-    fn request_missing_forks(&mut self, context: Context) -> Result<(), AxiomError> {
+    fn request_missing_forks(&mut self, context: Context) -> Result<(), Box<StdError>> {
         if !self.has_left_fork && !self.left_fork_requested {
             self.left_fork_requested = true;
             self.left_fork_aid
@@ -330,7 +330,7 @@ impl Philosopher {
 
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
     /// philosopher will put down his forks. He will only do that if requested to.
-    fn begin_thinking(&mut self, context: Context) -> Result<(), AxiomError> {
+    fn begin_thinking(&mut self, context: Context) -> Result<(), Box<StdError>> {
         self.state = PhilosopherState::Thinking;
         self.metrics.state_change_count += 1;
         self.metrics.time_eating += Instant::elapsed(&self.last_state_change);
