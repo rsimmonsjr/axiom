@@ -371,7 +371,7 @@ impl ActorSystem {
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
     /// delays have elapsed.
-    /// FIXME Add a graceful shutdown to this thread and notifications.
+    // FIXME Add a graceful shutdown to this thread and notifications.
     fn start_send_after_thread(&self) -> JoinHandle<()> {
         let system = self.clone();
         let delayed_messages = self.data.delayed_messages.clone();
@@ -475,7 +475,7 @@ impl ActorSystem {
     }
 
     /// Disconnects this actor system from the remote actor system with the given UUID.
-    /// FIXME Connectivity management needs a lot of work and testing.
+    // FIXME Connectivity management needs a lot of work and testing.
     pub fn disconnect(&self, system_uuid: Uuid) -> Result<(), AidError> {
         self.data.remotes.remove(&system_uuid);
         Ok(())
@@ -501,8 +501,7 @@ impl ActorSystem {
 
     /// A helper function to process a wire message from another actor system. The passed uuid
     /// is the uuid of the remote that sent the message.
-    ///
-    /// FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
+    // FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
     fn process_wire_message(&self, _uuid: &Uuid, wire_message: &WireMessage) {
         match wire_message {
             WireMessage::ActorMessage {
@@ -568,7 +567,7 @@ impl ActorSystem {
         condvar.notify_all();
     }
 
-    /// Awaits the Executor shutting down all Reactors. This is backed by a Barrier that Reactors
+    /// Awaits the Executor shutting down all Reactors. This is backed by a barrier that Reactors
     /// will wait on after [`ActorSystem::trigger_shutdown`] is called, blocking until all Reactors
     /// have stopped.
     pub fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
@@ -688,8 +687,7 @@ impl ActorSystem {
     /// 1 receivable message. If the actor has more receivable messages then this will not be
     /// needed to be called because the dispatcher threads will handle the process of resending
     /// the actor to the work channel.
-    ///
-    /// TODO Put tests verifying the resend on multiple messages.
+    // TODO Put tests verifying the resend on multiple messages.
     pub(crate) fn schedule(&self, aid: Aid) {
         let actors_by_aid = &self.data.actors_by_aid;
         if actors_by_aid.contains_key(&aid) {
@@ -721,7 +719,7 @@ impl ActorSystem {
 
     /// Internal implementation of stop_actor, so we have the ability to send an error along with
     /// the notification of stop.
-    pub(crate) fn internal_stop_actor(&self, aid: &Aid, error: impl Into<Option<Box<StdError>>>) {
+    pub(crate) fn internal_stop_actor(&self, aid: &Aid, error: impl Into<Option<StdError>>) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
             let aids_by_uuid = &self.data.aids_by_uuid;
@@ -800,7 +798,7 @@ impl ActorSystem {
     }
 
     /// Asynchronously send a message to the system actors on all connected actor systems.
-    /// FIXME (Issue #72) Add try_send ability.
+    // FIXME (Issue #72) Add try_send ability.
     pub fn send_to_system_actors(&self, message: Message) {
         let remotes = &*self.data.remotes;
         trace!("Sending message to Remote System Actors");
@@ -860,7 +858,7 @@ enum SystemActorMessage {
 }
 
 /// A processor for the system actor.
-/// FIXME Issue #89: Refactor into a full struct based actor in another file.
+// FIXME Issue #89: Refactor into a full struct based actor in another file.
 async fn system_actor_processor(_: (), context: Context, message: Message) -> ActorResult<()> {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {

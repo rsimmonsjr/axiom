@@ -16,9 +16,9 @@
 //!   * Ability to use a struct, `MetricsReply` and `EndSimulation` as a message.
 //!   * Use of `enum` as well as `struct` values for messages.
 //!  
-//! This example is extremely strict. If the FSM at any time gets out of synch with expectations
+//! This example is extremely strict. If the FSM at any time gets out of sync with expectations
 //! panics ensue. Some FSM implementations might be quite a bit more lose, preferring to ignore
-//! badly timeds messages. This is largely up to the user.
+//! badly timed messages. This is largely up to the user.
 
 use axiom::*;
 use log::LevelFilter;
@@ -246,7 +246,7 @@ impl Philosopher {
     }
 
     /// Changes the philosopher to a state of eating.
-    fn begin_eating(&mut self, context: Context) -> Result<(), Box<StdError>> {
+    fn begin_eating(&mut self, context: Context) -> Result<(), StdError> {
         self.metrics.time_hungry += Instant::elapsed(&self.last_state_change);
         self.last_state_change = Instant::now();
         self.state = PhilosopherState::Eating;
@@ -285,7 +285,7 @@ impl Philosopher {
     }
 
     /// Helper to request forks that the philosopher doesnt have.
-    fn request_missing_forks(&mut self, context: Context) -> Result<(), Box<StdError>> {
+    fn request_missing_forks(&mut self, context: Context) -> Result<(), StdError> {
         if !self.has_left_fork && !self.left_fork_requested {
             self.left_fork_requested = true;
             self.left_fork_aid
@@ -330,7 +330,7 @@ impl Philosopher {
 
     /// Changes the philosopher to the state of thinking. Note that this doesn't mean that the
     /// philosopher will put down his forks. He will only do that if requested to.
-    fn begin_thinking(&mut self, context: Context) -> Result<(), Box<StdError>> {
+    fn begin_thinking(&mut self, context: Context) -> Result<(), StdError> {
         self.state = PhilosopherState::Thinking;
         self.metrics.state_change_count += 1;
         self.metrics.time_eating += Instant::elapsed(&self.last_state_change);

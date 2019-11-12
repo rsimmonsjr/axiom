@@ -12,8 +12,8 @@
 use axiom::*;
 use serde::{Deserialize, Serialize};
 
-/// The messages we will be sending to our actor. All messages must be serializeable and
-/// deserializeable with serde.
+/// The messages we will be sending to our actor. All messages must be serializable and
+/// deserializable with serde.
 #[derive(Serialize, Deserialize)]
 enum HelloMessages {
     Greet,

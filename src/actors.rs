@@ -424,7 +424,7 @@ impl Aid {
             ActorSender::Remote { sender } => {
                 sender
                     .send_await(WireMessage::DelayedActorMessage {
-                        duration: duration,
+                        duration,
                         actor_uuid: self.data.uuid,
                         system_uuid: self.data.system_uuid,
                         message,
@@ -672,7 +672,7 @@ where
 }
 
 pub(crate) type ActorFuture =
-    Pin<Box<dyn Future<Output = Result<Status, Box<StdError>>> + Send + 'static>>;
+    Pin<Box<dyn Future<Output = Result<Status, StdError>> + Send + 'static>>;
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
@@ -702,7 +702,7 @@ impl ActorBuilder {
     /// consuming the builder in the process and using the provided state and handler. See
     /// `ActorSystem::spawn` for more information and examples.
     ///
-    /// FIXME Consider implementing `using` to spawn a stateless actor.
+    // FIXME Consider implementing `using` to spawn a stateless actor.
     pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, SystemError>
     where
         S: Send + Sync + 'static,
@@ -800,7 +800,11 @@ impl Actor {
                 },
             }),
         };
-
+        // Here we wrap the state in an UnsafeCell so we can do more performant retention of state.
+        // While it might normally be prudent to have the unsafe block encompass the code that keeps
+        // the safe guarantees, that isn't possible here as the guarantees are the same that keep
+        // the Actor Model sound, and are stretched across multiple parts of the infrastructure. If
+        // the unsoundness of this were to leak, there would be problems beyond this one UnsafeCell.
         let state_box = SendSyncUnsafeCell(UnsafeCell::new(Some(state)));
 
         let handler = Box::new(move |ctx: Context, msg: Message| {
@@ -837,7 +841,9 @@ impl Actor {
 }
 
 impl ActorStream {
-    pub(crate) fn handle_result(&self, result: Result<Status, Box<StdError>>) {
+    /// This takes the result and executes the subsequent steps in respect to the result. Namely,
+    /// handling the Actor's message channel and informing the ActorSystem of errors.
+    pub(crate) fn handle_result(&self, result: Result<Status, StdError>) {
         match result {
             Ok(Status::Done) => self.receiver.pop().unwrap(),
             Ok(Status::Skip) => self.receiver.skip().unwrap(),
@@ -862,8 +868,9 @@ impl ActorStream {
     }
 }
 
+/// The meat of the Actor's handling
 impl Stream for ActorStream {
-    type Item = Result<Status, Box<StdError>>;
+    type Item = Result<Status, StdError>;
 
     fn poll_next(
         mut self: Pin<&mut Self>,
@@ -896,6 +903,7 @@ impl Stream for ActorStream {
 
                         return Poll::Ready(Some(result));
                     } else {
+                        // Future isn't done, store it for the next poll.
                         self.pending = Some(future);
 
                         return Poll::Pending;

@@ -101,6 +101,8 @@ impl AxiomExecutor {
         *self.actors_per_reactor.get_mut(&reactor).unwrap() -= 1;
     }
 
+    /// Block until the threads have finished shutting down. This MUST be called AFTER shutdown is
+    /// triggered.
     pub(crate) fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
         match timeout.into() {
             Some(timeout) => self.shutdown_semaphore.wait_timeout(timeout),
@@ -212,11 +214,13 @@ pub(crate) struct AxiomReactor {
     current_actor: Arc<Mutex<Option<Aid>>>,
 }
 
+// A little hack to dictate a loop from inside a function call.
 enum LoopResult<T> {
     Ok(T),
     Continue,
 }
 
+/// This is used to track the state of the Reactor's thread.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ThreadState {
     Running,
@@ -224,6 +228,8 @@ enum ThreadState {
     Panicked,
 }
 
+/// Held as long as the thread is alive. Dropping the lease lets us know what the state is precisely
+/// when the thread ends.
 struct ThreadLease(Arc<RwLock<ThreadState>>);
 
 impl Drop for ThreadLease {
@@ -487,7 +493,8 @@ struct Task {
 }
 
 impl Task {
-    fn poll(&mut self, waker: &Waker) -> Poll<Option<Result<Status, Box<StdError>>>> {
+    /// Proxy poll into the ActorStream
+    fn poll(&mut self, waker: &Waker) -> Poll<Option<Result<Status, StdError>>> {
         let mut ctx = Context::from_waker(waker);
 
         self.actor

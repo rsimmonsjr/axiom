@@ -265,17 +265,14 @@ impl std::fmt::Display for AidError {
     }
 }
 
-impl std::error::Error for AidError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+impl std::error::Error for AidError { }
 
-pub type StdError = dyn Error + Send + Sync + 'static;
+/// A helper alias to ensure returned errors conform as needed.
+pub type StdError = Box<dyn Error + Send + Sync + 'static>;
 
 /// A type for a result from an actor's message processor.
 /// A Result::Err is treated as a fatal error, and the Actor will be stopped.
-pub type ActorResult<State> = Result<(State, Status), Box<StdError>>;
+pub type ActorResult<State> = Result<(State, Status), StdError>;
 
 #[cfg(test)]
 mod tests {
