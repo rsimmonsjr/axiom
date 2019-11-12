@@ -449,6 +449,8 @@ impl AxiomReactor {
     /// locks so it can release them all at once. Additionally, informs the ActorSystem of the Actor
     /// that poisoned it.
     fn recover_from_panic(&self) {
+        self.executor.shutdown_semaphore.decrement();
+
         let _run_queue_guard = match self.run_queue.write() {
             Ok(g) => g,
             Err(psn) => psn.into_inner(),
