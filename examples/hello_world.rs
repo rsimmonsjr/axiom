@@ -38,5 +38,5 @@ pub fn main() {
     aid.send(Message::new(HelloMessages::Greet)).unwrap();
 
     // The actor will trigger shutdown, we just wait for it.
-    system.await_shutdown();
+    system.await_shutdown(None);
 }

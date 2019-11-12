@@ -540,5 +540,5 @@ pub fn main() {
         )
         .expect("failed to create shutdown actor");
 
-    system.await_shutdown();
+    system.await_shutdown(None);
 }

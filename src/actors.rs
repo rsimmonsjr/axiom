@@ -256,7 +256,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system.await_shutdown();
+    /// system.await_shutdown(None);
     /// ```
     pub fn send(&self, message: Message) -> Result<(), AxiomError> {
         match &self.data.sender {
@@ -324,7 +324,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system.await_shutdown();
+    /// system.await_shutdown(None);
     /// ```
     pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AxiomError>
     where
@@ -364,7 +364,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system.await_shutdown();
+    /// system.await_shutdown(None);
     /// ```
     pub fn send_new<T>(&self, value: T) -> Result<(), AxiomError>
     where
@@ -407,7 +407,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system.await_shutdown();
+    /// system.await_shutdown(None);
     /// ```
     pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
         match &self.data.sender {
@@ -467,7 +467,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system.await_shutdown();
+    /// system.await_shutdown(None);
     /// ```
     pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AxiomError>
     where
@@ -508,7 +508,7 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system.await_shutdown();
+    /// system.await_shutdown(None);
     /// ```
     pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AxiomError>
     where
@@ -938,7 +938,7 @@ mod tests {
             Err(e) => println!("Ooops {:?}", e),
         }
 
-        system.await_shutdown();
+        system.await_shutdown(None);
     }
 
     /// Tests that unserializable messages can be sent locally.
@@ -972,7 +972,7 @@ mod tests {
         aid.send(Message::new(Foo {})).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
-        system.await_shutdown_with_timeout(Duration::from_millis(1000));
+        system.await_shutdown(Duration::from_millis(1000));
     }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
@@ -990,7 +990,7 @@ mod tests {
         assert_eq!(None, aid.data.name);
         assert_eq!(aid.data.name, aid.name());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(Some("A".to_string()), aid.data.name);
         assert_eq!(aid.data.name, aid.name());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests serialization and deserialization of `Aid`s. This verifies that deserialized
@@ -1107,7 +1107,7 @@ mod tests {
 
         // Wait for the Start and our message to get there because test is asynchronous.
         await_received(&aid, 2, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that messages cannot be sent to an `aid` for an actor that has been stopped.
@@ -1166,7 +1166,7 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that an actor cannot override the processing of a `Stop` message by returning a
@@ -1210,6 +1210,6 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 }

@@ -350,7 +350,7 @@ mod tests {
 
         // The actor will get two messages including the Start message.
         await_received(&aid, 2, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test shows how the simplest struct-based actor can be built and used. This actor
@@ -378,7 +378,7 @@ mod tests {
         aid.send_new(11).unwrap();
 
         await_received(&aid, 2, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test shows how a closure based actor can be created to process different kinds of
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(4, aid.sent().unwrap());
 
         await_received(&aid, 4, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test shows how a struct-based actor can be used and process different kinds of
@@ -490,7 +490,7 @@ mod tests {
         aid.send_new(false).unwrap();
 
         await_received(&aid, 4, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests and demonstrates the process to create a closure that captures the environment
@@ -517,7 +517,7 @@ mod tests {
 
         aid.send_new(11).unwrap();
         await_received(&target_aid, 2, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests an example where one actor starts another actor, the actors exchange a simple
@@ -579,7 +579,7 @@ mod tests {
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         system.spawn().with((), ping).unwrap();
-        system.await_shutdown();
+        system.await_shutdown(None);
 
         assert_eq!(2 + 2, 4);
     }

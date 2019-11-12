@@ -551,71 +551,65 @@ impl ActorSystem {
     /// Awaits the Executor shutting down all Reactors. This is backed by a Barrier that Reactors
     /// will wait on after [`ActorSystem::trigger_shutdown`] is called, blocking until all Reactors
     /// have stopped.
-    pub fn await_shutdown(&self) -> ShutdownResult {
+    pub fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
         info!("System awaiting shutdown");
 
-        // First wait for the system to begin shutting down if it has not already
-        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
-        let mut guard = mutex.lock().unwrap();
-        while !*guard {
-            guard = match condvar.wait(guard) {
-                Ok(ret) => ret,
-                Err(_) => return ShutdownResult::Panicked,
-            };
+        let result = match timeout.into() {
+            Some(dur) => self.await_shutdown_trigger_with_timeout(dur),
+            None => self.await_shutdown_trigger_without_timeout(),
+        };
+
+        if let Some(r) = result {
+            return r;
         }
-        drop(guard);
 
         // Wait for the system to finish shutting down
         if !self.data.shutdown_completed.load(Ordering::Relaxed) {
             let r = self.data.executor.await_shutdown(None);
-            self.data.shutdown_completed.swap(true, Ordering::Relaxed);
+            self.data.shutdown_completed.swap(true, Ordering::AcqRel);
             r
         } else {
             ShutdownResult::Ok
         }
     }
 
-    /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
-    /// a signaling mechanism. This function will block until all actor system threads have
-    /// stopped or the timeout has expired. The function returns an `Ok` with the Duration
-    /// that it waited or an `Err` if the system didn't shut down in time or something else went
-    /// wrong.
-    pub fn await_shutdown_with_timeout(&self, mut dur: Duration) -> ShutdownResult {
-        info!("System awaiting shutdown");
-
-        // First wait for the system to begin shutting down if it has not already
+    fn await_shutdown_trigger_with_timeout(&self, mut dur: Duration) -> Option<ShutdownResult> {
         let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
         let mut guard = mutex.lock().unwrap();
         while !*guard {
             let started = Instant::now();
             let (new_guard, timeout) = match condvar.wait_timeout(guard, dur) {
                 Ok(ret) => ret,
-                Err(_) => return ShutdownResult::Panicked,
+                Err(_) => return Some(ShutdownResult::Panicked),
             };
 
             if timeout.timed_out() {
-                return ShutdownResult::TimedOut;
+                return Some(ShutdownResult::TimedOut);
             }
 
             guard = new_guard;
             dur -= started.elapsed();
         }
-        drop(guard);
+        None
+    }
 
-        // Wait for the system to finish shutting down
-        if !self.data.shutdown_completed.load(Ordering::Relaxed) {
-            let r = self.data.executor.await_shutdown(dur);
-            self.data.shutdown_completed.swap(true, Ordering::Relaxed);
-            r
-        } else {
-            ShutdownResult::Ok
+    fn await_shutdown_trigger_without_timeout(&self) -> Option<ShutdownResult> {
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        let mut guard = mutex.lock().unwrap();
+        while !*guard {
+            guard = match condvar.wait(guard) {
+                Ok(ret) => ret,
+                Err(_) => return Some(ShutdownResult::Panicked),
+            };
         }
+        None
     }
 
     /// Triggers a shutdown of the system and returns only when all Reactors have shutdown.
-    pub fn trigger_and_await_shutdown(&self) {
+    pub fn trigger_and_await_shutdown(&self, timeout: impl Into<Option<Duration>>)
+        -> ShutdownResult {
         self.trigger_shutdown();
-        self.await_shutdown();
+        self.await_shutdown(timeout)
     }
 
     // A internal helper to register an actor in the actor system.
@@ -896,11 +890,11 @@ mod tests {
     /// 2000 milliseconds.
     fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
         let h1 = thread::spawn(move || {
-            system1.await_shutdown();
+            system1.await_shutdown(None);
         });
 
         let h2 = thread::spawn(move || {
-            system2.await_shutdown();
+            system2.await_shutdown(None);
         });
 
         h1.join().unwrap();
@@ -928,19 +922,19 @@ mod tests {
 
         // Expecting to timeout
         assert_eq!(
-            system.await_shutdown_with_timeout(Duration::from_millis(10)),
+            system.await_shutdown(Duration::from_millis(10)),
             ShutdownResult::TimedOut
         );
 
         // Expecting to NOT timeout
         assert_eq!(
-            system.await_shutdown_with_timeout(Duration::from_millis(200)),
+            system.await_shutdown(Duration::from_millis(200)),
             ShutdownResult::Ok
         );
 
         // Validate that if the system is already shutdown the method doesn't hang.
         // FIXME Design a means that this cannot ever hang the test.
-        system.await_shutdown();
+        system.await_shutdown(None);
     }
 
     /// This test verifies that an actor can be found by its uuid.
@@ -957,7 +951,7 @@ mod tests {
 
         assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that an actor can be found by its name if it has one.
@@ -974,7 +968,7 @@ mod tests {
 
         assert_eq!(None, system.find_aid_by_name("B"));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This tests the find_aid function that takes a system uuid and an actor uuid.
@@ -991,7 +985,7 @@ mod tests {
         assert_eq!(None, system.find_aid(&aid.system_uuid(), &Uuid::new_v4()));
         assert_eq!(None, system.find_aid(&Uuid::new_v4(), &aid.uuid()));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that actors that are stopped are removed from all relevant lookup maps and
@@ -1018,7 +1012,7 @@ mod tests {
         assert_eq!(None, system.find_aid_by_name("A"));
         assert_eq!(None, system.find_aid_by_uuid(&aid.uuid()));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that the system can send a message after a particular delay.
@@ -1037,7 +1031,7 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
         assert_eq!(2, aid.received().unwrap());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that if we execute two send_after calls, one for a longer duration than the
@@ -1076,7 +1070,7 @@ mod tests {
         assert_eq!(2, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that the system does not panic if we schedule to an actor that does
@@ -1100,7 +1094,7 @@ mod tests {
         // Send a message to the actor which should not schedule it but write out a warning.
         aid.send_new(11).unwrap();
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests connection between two different actor systems using channels.
@@ -1174,7 +1168,7 @@ mod tests {
         await_received(&monitoring2, 2, 1000).unwrap();
         await_received(&not_monitoring, 1, 1000).unwrap();
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that the concept of named actors works properly. When a user wants
@@ -1213,7 +1207,7 @@ mod tests {
         let found2 = system.find_aid_by_name("B").unwrap();
         assert!(Aid::ptr_eq(&aid3, &found2));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that remote actors can send and receive messages between each other.

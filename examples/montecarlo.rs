@@ -205,5 +205,5 @@ fn main() {
         .unwrap();
 
     // Wait for the actor system to shut down.
-    system.await_shutdown();
+    system.await_shutdown(None);
 }
