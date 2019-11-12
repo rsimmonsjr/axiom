@@ -408,14 +408,15 @@ impl AxiomReactor {
         let reactor = self.clone();
         thread::Builder::new().name(format!("Reactor-{}", self.name))
             .spawn(move || {
-                { *reactor.thread_state.write()
-                    .expect("thread_state poisoned at thread start")
-                = ThreadState::Running; }
+                let lease = ThreadLease(reactor.thread_state.clone());
+                { *lease.0.write()
+                    .expect("thread_state poisoned at thread start") = ThreadState::Running;
+                }
                 reactor.executor.shutdown_semaphore.increment();
                 reactor.system.init_current();
                 reactor.thread();
                 reactor.executor.shutdown_semaphore.decrement();
-                *reactor.thread_state.write()
+                *lease.0.write()
                     .expect("thread_state poisoned at thread end")
                 = ThreadState::Stopped;
             })
