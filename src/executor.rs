@@ -1,17 +1,17 @@
 //! The Executor is responsible for the high-level scheduling of Actors.
 
 use crate::actors::ActorStream;
-use crate::{ActorSystem, Status, StdError, Aid};
+use crate::{ActorSystem, Aid, Status, StdError};
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
 use log::{debug, trace};
 use std::collections::{BTreeMap, VecDeque};
+use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::pin::Pin;
 
 /// The Executor is responsible for the high-level scheduling of Actors. When an Actor is
 /// registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
@@ -236,10 +236,12 @@ struct ThreadLease(Arc<RwLock<ThreadState>>);
 impl Drop for ThreadLease {
     fn drop(&mut self) {
         // Get the current state of the thread. A poisoned lock would indicate something VERY wrong
-        let current_state = { match self.0.read() {
-            Ok(state) => *state,
-            Err(err) => *err.into_inner()
-        }};
+        let current_state = {
+            match self.0.read() {
+                Ok(state) => *state,
+                Err(err) => *err.into_inner(),
+            }
+        };
 
         // If it was dropped before it was set to Stopped, then it panicked.
         if let ThreadState::Running = current_state {
@@ -262,7 +264,7 @@ impl AxiomReactor {
             wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
             thread_state: Arc::new(RwLock::new(ThreadState::Stopped)),
-            current_actor: Arc::new(Mutex::new(None))
+            current_actor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -273,7 +275,10 @@ impl AxiomReactor {
             reactor: self.clone(),
         };
         let waker = futures::task::waker(Arc::new(token));
-        let wakeup = Wakeup { id: task.id.clone(), waker };
+        let wakeup = Wakeup {
+            id: task.id.clone(),
+            waker,
+        };
         self.wait(task);
         self.wake(wakeup);
     }
@@ -285,8 +290,13 @@ impl AxiomReactor {
         loop {
             // If we're shutting down, quit.
             {
-                if *self.executor.shutdown_triggered.0.lock()
-                    .expect("Poisoned shutdown_triggered condvar") {
+                if *self
+                    .executor
+                    .shutdown_triggered
+                    .0
+                    .lock()
+                    .expect("Poisoned shutdown_triggered condvar")
+                {
                     debug!("Reactor-{} acknowledging shutdown", self.name);
                     break;
                 }
@@ -357,7 +367,9 @@ impl AxiomReactor {
         if let Some(w) = self.get_woken() {
             if let Some(task) = self.remove_waiting(&w.id) {
                 trace!("Reactor-{} Got work", self.name);
-                { *self.current_actor.lock().expect("Poisoned current_actor") = Some(w.id.clone()) }
+                {
+                    *self.current_actor.lock().expect("Poisoned current_actor") = Some(w.id.clone())
+                }
                 LoopResult::Ok((w, task))
             } else {
                 trace!("Reactor-{} dropping futile WakeUp", self.name);
@@ -383,13 +395,18 @@ impl AxiomReactor {
     /// panic if necessary. We should call this function as much as we need.
     fn ensure_running(&self) {
         // Ensure running? Nah, we're shutting down.
-        {if *self.executor.shutdown_triggered.0.lock().unwrap() {
-            return;
-        }}
+        {
+            if *self.executor.shutdown_triggered.0.lock().unwrap() {
+                return;
+            }
+        }
 
         match { *self.thread_state.read().expect("Poisoned thread_state") } {
             ThreadState::Running => {}
-            ThreadState::Panicked => { self.recover_from_panic(); self.start_thread() }
+            ThreadState::Panicked => {
+                self.recover_from_panic();
+                self.start_thread()
+            }
             // This is the coldest path in the current impl, because we don't let the thread die
             // unless shutdown is triggered.
             ThreadState::Stopped => self.start_thread(),
@@ -406,19 +423,24 @@ impl AxiomReactor {
     #[cold]
     fn start_thread(&self) {
         let reactor = self.clone();
-        thread::Builder::new().name(format!("Reactor-{}", self.name))
+        thread::Builder::new()
+            .name(format!("Reactor-{}", self.name))
             .spawn(move || {
                 let lease = ThreadLease(reactor.thread_state.clone());
-                { *lease.0.write()
-                    .expect("thread_state poisoned at thread start") = ThreadState::Running;
+                {
+                    *lease
+                        .0
+                        .write()
+                        .expect("thread_state poisoned at thread start") = ThreadState::Running;
                 }
                 reactor.executor.shutdown_semaphore.increment();
                 reactor.system.init_current();
                 reactor.thread();
                 reactor.executor.shutdown_semaphore.decrement();
-                *lease.0.write()
-                    .expect("thread_state poisoned at thread end")
-                = ThreadState::Stopped;
+                *lease
+                    .0
+                    .write()
+                    .expect("thread_state poisoned at thread end") = ThreadState::Stopped;
             })
             .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e));
     }
@@ -438,7 +460,10 @@ impl AxiomReactor {
         };
 
         let _thread_condvar_guard = match self.thread_condvar.write() {
-            Ok(g) => { let _ = g.0.lock().map_err(|psn| psn.into_inner()); g },
+            Ok(g) => {
+                let _ = g.0.lock().map_err(|psn| psn.into_inner());
+                g
+            }
             Err(psn) => psn.into_inner(),
         };
 

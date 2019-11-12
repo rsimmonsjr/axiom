@@ -49,10 +49,7 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
-    Stopped {
-        aid: Aid,
-        error: Option<String>,
-    },
+    Stopped { aid: Aid, error: Option<String> },
 }
 
 /// A type used for sending messages to other actor systems.
@@ -222,7 +219,7 @@ impl std::fmt::Display for SystemError {
     }
 }
 
-impl Error for SystemError { }
+impl Error for SystemError {}
 
 /// Information for communicating with a remote actor system.
 pub struct RemoteInfo {
@@ -625,14 +622,20 @@ impl ActorSystem {
     }
 
     /// Triggers a shutdown of the system and returns only when all Reactors have shutdown.
-    pub fn trigger_and_await_shutdown(&self, timeout: impl Into<Option<Duration>>)
-        -> ShutdownResult {
+    pub fn trigger_and_await_shutdown(
+        &self,
+        timeout: impl Into<Option<Duration>>,
+    ) -> ShutdownResult {
         self.trigger_shutdown();
         self.await_shutdown(timeout)
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: Arc<Actor>, stream: ActorStream) -> Result<Aid, SystemError> {
+    pub(crate) fn register_actor(
+        &self,
+        actor: Arc<Actor>,
+        stream: ActorStream,
+    ) -> Result<Aid, SystemError> {
         let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
@@ -691,10 +694,7 @@ impl ActorSystem {
     pub(crate) fn schedule(&self, aid: Aid) {
         let actors_by_aid = &self.data.actors_by_aid;
         if actors_by_aid.contains_key(&aid) {
-            self
-                .data
-                .executor
-                .wake(aid);
+            self.data.executor.wake(aid);
         } else {
             // The actor was removed from the map so ignore the problem and just log
             // a warning.
@@ -737,7 +737,10 @@ impl ActorSystem {
         if let Some((_, monitoring)) = self.data.monitoring_by_monitored.remove(&aid) {
             let error = error.into().map(|e| format!("{}", e));
             for m_aid in monitoring {
-                let value = SystemMsg::Stopped { aid: aid.clone(), error: error.clone() };
+                let value = SystemMsg::Stopped {
+                    aid: aid.clone(),
+                    error: error.clone(),
+                };
                 m_aid.send(Message::new(value)).unwrap_or_else(|error| {
                     error!(
                         "Could not send 'Stopped' to monitoring actor {}: Error: {:?}",

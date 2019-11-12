@@ -862,7 +862,9 @@ impl ActorStream {
                     "[{}] returned an error when processing: {}",
                     self.context.aid, &e
                 );
-                self.context.system.internal_stop_actor(&self.context.aid, e);
+                self.context
+                    .system
+                    .internal_stop_actor(&self.context.aid, e);
             }
         }
     }

@@ -265,7 +265,7 @@ impl std::fmt::Display for AidError {
     }
 }
 
-impl std::error::Error for AidError { }
+impl std::error::Error for AidError {}
 
 /// A helper alias to ensure returned errors conform as needed.
 pub type StdError = Box<dyn Error + Send + Sync + 'static>;
