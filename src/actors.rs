@@ -10,7 +10,7 @@ use crate::message::*;
 use crate::system::*;
 use crate::*;
 use futures::{FutureExt, Stream};
-use log::error;
+use log::{debug, error};
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -837,7 +837,7 @@ impl Actor {
 }
 
 impl ActorStream {
-    pub(crate) fn handle_result(&self, result: &Result<Status, Box<StdError>>) {
+    pub(crate) fn handle_result(&self, result: Result<Status, Box<StdError>>) {
         match result {
             Ok(Status::Done) => self.receiver.pop().unwrap(),
             Ok(Status::Skip) => self.receiver.skip().unwrap(),
@@ -846,16 +846,17 @@ impl ActorStream {
                 self.receiver.reset_skip().unwrap();
             }
             Ok(Status::Stop) => {
+                debug!("Actor \"{}\" stopping", self.context.aid.name_or_uuid());
                 self.receiver.pop().unwrap();
                 self.context.system.stop_actor(&self.context.aid);
             }
             Err(e) => {
                 self.receiver.pop().unwrap();
-                self.context.system.stop_actor(&self.context.aid);
                 error!(
                     "[{}] returned an error when processing: {}",
-                    self.context.aid, e
+                    self.context.aid, &e
                 );
+                self.context.system.internal_stop_actor(&self.context.aid, e);
             }
         }
     }

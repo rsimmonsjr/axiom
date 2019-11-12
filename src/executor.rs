@@ -208,6 +208,8 @@ pub(crate) struct AxiomReactor {
     thread_condvar: Arc<RwLock<(Mutex<()>, Condvar)>>,
     /// This is used as a semaphore to ensure the Reactor has only a single active thread.
     thread_state: Arc<RwLock<ThreadState>>,
+    /// The current Actor being processed by the Reactor.
+    current_actor: Arc<Mutex<Option<Aid>>>,
 }
 
 enum LoopResult<T> {
@@ -253,6 +255,7 @@ impl AxiomReactor {
             wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
             thread_state: Arc::new(RwLock::new(ThreadState::Stopped)),
+            current_actor: Arc::new(Mutex::new(None))
         }
     }
 
@@ -298,28 +301,30 @@ impl AxiomReactor {
                             break;
                         }
                         let result = result.unwrap();
+                        let is_stopping = match &result {
+                            Ok(Status::Stop) | Err(_) => true,
+                            _ => false,
+                        };
                         // The Actor should handle its own internal modifications in response to the
                         // result.
                         {
                             task.actor
                                 .lock()
                                 .expect("Poisoned Actor")
-                                .handle_result(&result);
+                                .handle_result(result);
                         }
-                        match result {
-                            // Intentional or error'd stop means drop. It's dead, Jim.
-                            Ok(Status::Stop) | Err(_) => break,
-                            _ => {
-                                // If we're past this timeslice, add back into the queues and move
-                                // to the next woken Actor. Else, keep going.
-                                if Instant::now() >= end {
-                                    self.wait(task);
-                                    self.wake(w);
-                                    break;
-                                } else {
-                                    continue;
-                                }
-                            }
+                        // Intentional or error'd stop means drop. It's dead, Jim.
+                        if is_stopping {
+                            break;
+                        }
+                        // If we're past this timeslice, add back into the queues and move
+                        // to the next woken Actor. Else, poll it again.
+                        if Instant::now() >= end {
+                            self.wait(task);
+                            self.wake(w);
+                            break;
+                        } else {
+                            continue;
                         }
                     }
                     // Still pending, return to wait_queue. Drop the wakeup, because the futures
@@ -345,6 +350,7 @@ impl AxiomReactor {
         if let Some(w) = self.get_woken() {
             if let Some(task) = self.remove_waiting(&w.id) {
                 trace!("Reactor-{} Got work", self.name);
+                { *self.current_actor.lock().expect("Poisoned current_actor") = Some(w.id.clone()) }
                 LoopResult::Ok((w, task))
             } else {
                 trace!("Reactor-{} dropping futile WakeUp", self.name);
@@ -410,7 +416,8 @@ impl AxiomReactor {
     }
 
     /// Goes over all the locks in the Reactor and ensures they aren't poisoned. It holds onto the
-    /// locks so it can release them all at once.
+    /// locks so it can release them all at once. Additionally, informs the ActorSystem of the Actor
+    /// that poisoned it.
     fn recover_from_panic(&self) {
         let _run_queue_guard = match self.run_queue.write() {
             Ok(g) => g,
@@ -431,6 +438,12 @@ impl AxiomReactor {
             Ok(g) => g,
             Err(psn) => psn.into_inner(),
         };
+
+        let perpetrator = match self.current_actor.lock() {
+            Ok(id) => (*id).clone().unwrap(),
+            Err(psn) => (*psn.into_inner()).clone().unwrap(),
+        };
+        self.system.stop_actor(&perpetrator);
     }
 
     /// Add an Actor's Wakeup to the run_queue.

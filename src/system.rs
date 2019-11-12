@@ -675,21 +675,20 @@ impl ActorSystem {
     /// TODO Put tests verifying the resend on multiple messages.
     pub(crate) fn schedule(&self, aid: Aid) {
         let actors_by_aid = &self.data.actors_by_aid;
-        match actors_by_aid.get(&aid) {
-            Some(actor) => self
+        if actors_by_aid.contains_key(&aid) {
+            self
                 .data
                 .executor
-                .wake(actor.context.aid.uuid()),
-            None => {
-                // The actor was removed from the map so ignore the problem and just log
-                // a warning.
-                warn!(
-                    "Attempted to schedule actor with aid {:?} on system with node_id {:?} but 
-                    the actor does not exist.",
-                    aid.clone(),
-                    self.data.uuid.to_string(),
-                );
-            }
+                .wake(aid);
+        } else {
+            // The actor was removed from the map so ignore the problem and just log
+            // a warning.
+            warn!(
+                "Attempted to schedule actor with aid {:?} on system with node_id {:?} but
+                the actor does not exist.",
+                aid.clone(),
+                self.data.uuid.to_string(),
+            );
         }
     }
 
@@ -705,7 +704,7 @@ impl ActorSystem {
 
     /// Internal implementation of stop_actor, so we have the ability to send an error along with
     /// the notification of stop.
-    fn internal_stop_actor(&self, aid: &Aid, error: impl Into<Option<Box<dyn Error>>>) {
+    pub(crate) fn internal_stop_actor(&self, aid: &Aid, error: impl Into<Option<Box<StdError>>>) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
             let aids_by_uuid = &self.data.aids_by_uuid;
