@@ -188,10 +188,11 @@ pub enum ShutdownResult {
     Panicked,
 }
 
-/// The Reactor is a single-threaded loop that will poll the woken Actors. It will run scheduling
-/// checks for `Ready(Some)`, either re-running or returning to the Executor for schedule
-/// adjustments. It will return the Task to the Executor on `Ready(None)`, until the Actor wakes
-/// again. It will return the Task to the wait_queue on `Pending`.
+/// The Reactor is a wrapper for a worker thread. It contains the queues, locks, and other state
+/// information necessary to manage the work load and worker thread.
+///
+/// Actors are added to the Reactor on waking, queued for polling. If they can be polled again, they
+/// are retained till they are depleted of messages or are stopped.
 #[derive(Clone)]
 pub(crate) struct AxiomReactor {
     /// The ID of the Reactor
