@@ -394,22 +394,19 @@ impl AxiomReactor {
     /// This function ensures the Reactor is running when it is needed to be, recovering from a
     /// panic if necessary. We should call this function as much as we need.
     fn ensure_running(&self) {
+        let mut thread_state = { *self.thread_state.read().expect("Poisoned thread_state") };
+        if let ThreadState::Panicked = thread_state {
+            self.recover_from_panic();
+            thread_state = ThreadState::Stopped;
+        }
         // Ensure running? Nah, we're shutting down.
         {
             if *self.executor.shutdown_triggered.0.lock().unwrap() {
                 return;
             }
         }
-
-        match { *self.thread_state.read().expect("Poisoned thread_state") } {
-            ThreadState::Running => {}
-            ThreadState::Panicked => {
-                self.recover_from_panic();
-                self.start_thread()
-            }
-            // This is the coldest path in the current impl, because we don't let the thread die
-            // unless shutdown is triggered.
-            ThreadState::Stopped => self.start_thread(),
+        if let ThreadState::Stopped = thread_state {
+            self.start_thread();
         }
         // We've ensured it's running, let's make sure it's not waiting
         self.thread_condvar
