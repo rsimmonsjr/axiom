@@ -254,9 +254,12 @@ impl AxiomReactor {
         debug!("Reactor-{} thread started", self.name);
         loop {
             // If we're shutting down, quit.
-            if *self.executor.shutdown_triggered.0.lock().unwrap() {
-                debug!("Reactor-{} acknowledging shutdown", self.name);
-                break;
+            {
+                if *self.executor.shutdown_triggered.0.lock()
+                    .expect("Poisoned shutdown_triggered condvar") {
+                    debug!("Reactor-{} acknowledging shutdown", self.name);
+                    break;
+                }
             }
 
             let (w, mut task) = match self.get_work() {
@@ -277,10 +280,12 @@ impl AxiomReactor {
                         let result = result.unwrap();
                         // The Actor should handle its own internal modifications in response to the
                         // result.
-                        task.actor
-                            .lock()
-                            .expect("Poisoned Actor")
-                            .handle_result(&result);
+                        {
+                            task.actor
+                                .lock()
+                                .expect("Poisoned Actor")
+                                .handle_result(&result);
+                        }
                         match result {
                             // Intentional or error'd stop means drop. It's dead, Jim.
                             Ok(Status::Stop) | Err(_) => break,
@@ -414,7 +419,7 @@ impl AxiomReactor {
 /// Tasks represent the unit of work that an Executor-Reactor system is responsible for.
 struct Task {
     id: Uuid,
-    actor: Mutex<Pin<Box<ActorStream>>>,
+    actor: Pin<Box<ActorStream>>,
 }
 
 impl Task {
@@ -422,8 +427,6 @@ impl Task {
         let mut ctx = Context::from_waker(waker);
 
         self.actor
-            .lock()
-            .expect("Poisoned Actor")
             .as_mut()
             .poll_next(&mut ctx)
     }

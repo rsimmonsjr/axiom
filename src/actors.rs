@@ -22,7 +22,7 @@ use std::marker::{Send, Sync};
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 use uuid::Uuid;
@@ -738,9 +738,9 @@ pub(crate) struct ActorStream {
     /// An async function processing a message sent to the actor, wrapped in a closure to
     /// erase the state type that the actor is managing. The inner state is Arc<Mutex>'d to
     /// ensure the Actor is synchronous in relation to itself.
-    handler: Mutex<Box<dyn Handler>>,
+    handler: Box<dyn Handler>,
     /// The pending result of the current handler invocation.
-    pending: Mutex<Option<Pin<Box<ActorFuture>>>>,
+    pending: Option<Pin<Box<ActorFuture>>>,
 }
 
 /// The implementation of the actor in the system. Please see overview and library documentation
@@ -828,8 +828,8 @@ impl Actor {
         let stream = ActorStream {
             context,
             receiver,
-            handler: Mutex::new(handler),
-            pending: Mutex::new(None),
+            handler,
+            pending: None,
         };
 
         (Arc::new(actor), stream)
@@ -865,17 +865,11 @@ impl Stream for ActorStream {
     type Item = Result<Status, AxiomError>;
 
     fn poll_next(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        // Usage of `self.pending` should be synchronous and only here.
-        let mut pending = self
-            .pending
-            .try_lock()
-            .expect("Contention on Pending Mutex");
-
         // If we have a pending future, that's what we poll.
-        if let Some(pending) = &mut *pending {
+        if let Some(pending) = &mut self.pending {
             match pending.as_mut().poll(cx) {
                 Poll::Ready(r) => Poll::Ready(Some(r)),
                 Poll::Pending => Poll::Pending,
@@ -884,15 +878,9 @@ impl Stream for ActorStream {
             // Else, we go for another.
             match self.receiver.peek() {
                 Ok(msg) => {
-                    // As with the pending future, the handler should be synchronously used, and
-                    // only used here.
-                    let mut handler = self
-                        .handler
-                        .try_lock()
-                        .expect("Contention on Handler Mutex");
-
                     // Get the next future
-                    let mut future = Box::pin((&mut **handler)(self.context.clone(), msg.clone()));
+                    let ctx = self.context.clone();
+                    let mut future = Box::pin((&mut self.handler)(ctx, msg.clone()));
 
                     // Just give it a ~~wave~~ poll.
                     if let Poll::Ready(mut result) = future.as_mut().poll(cx) {
@@ -907,7 +895,7 @@ impl Stream for ActorStream {
 
                         return Poll::Ready(Some(result));
                     } else {
-                        *pending = Some(future);
+                        self.pending = Some(future);
 
                         return Poll::Pending;
                     }
