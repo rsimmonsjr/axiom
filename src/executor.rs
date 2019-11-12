@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use std::pin::Pin;
@@ -94,10 +93,8 @@ impl AxiomExecutor {
         iter_state.0
     }
 
-    /// When a Reactor is done with an Actor, it will be sent here.  If it is sent with a `Some`
-    /// `new_reactor`, it's been reassigned to a different reactor and will be sent to that
-    /// reactor immediately.  Otherwise, it's been depleted of messages to process and should be
-    /// stored as sleeping.
+    /// When a Reactor is done with an Actor, it will be sent here, and the Executor will decrement
+    /// the Actor count for that Reactor.
     fn return_task(&self, task: Task, reactor: u16) {
         // Put the Task back.
         self.sleeping.insert(task.id, task);
@@ -211,12 +208,36 @@ pub(crate) struct AxiomReactor {
     /// This is used to pause/resume threads that run out of work.
     thread_condvar: Arc<RwLock<(Mutex<()>, Condvar)>>,
     /// This is used as a semaphore to ensure the Reactor has only a single active thread.
-    thread_join: Arc<RwLock<Option<JoinHandle<()>>>>,
+    thread_state: Arc<RwLock<ThreadState>>,
 }
 
 enum LoopResult<T> {
     Ok(T),
     Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ThreadState {
+    Running,
+    Stopped,
+    Panicked,
+}
+
+struct ThreadLease(Arc<RwLock<ThreadState>>);
+
+impl Drop for ThreadLease {
+    fn drop(&mut self) {
+        // Get the current state of the thread. A poisoned lock would indicate something VERY wrong
+        let current_state = { match self.0.read() {
+            Ok(state) => *state,
+            Err(err) => *err.into_inner()
+        }};
+
+        // If it was dropped before it was set to Stopped, then it panicked.
+        if let ThreadState::Running = current_state {
+            *self.0.write().unwrap() = ThreadState::Panicked;
+        }
+    }
 }
 
 impl AxiomReactor {
@@ -232,7 +253,7 @@ impl AxiomReactor {
             run_queue: Arc::new(RwLock::new(Default::default())),
             wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
-            thread_join: Arc::new(RwLock::new(None)),
+            thread_state: Arc::new(RwLock::new(ThreadState::Stopped)),
         }
     }
 
@@ -346,29 +367,21 @@ impl AxiomReactor {
         }
     }
 
-    /// This function ensures the Reactor is running when it is needed to be.
-    /// By allowing it to conclude and simply restart as necessary, we avoid
-    /// CPU spin locking. We should call this function as much as we need.
-    // TODO: Check if the thread has panicked.
+    /// This function ensures the Reactor is running when it is needed to be, recovering from a
+    /// panic if necessary. We should call this function as much as we need.
     fn ensure_running(&self) {
         // Ensure running? Nah, we're shutting down.
-        if *self.executor.shutdown_triggered.0.lock().unwrap() {
+        {if *self.executor.shutdown_triggered.0.lock().unwrap() {
             return;
+        }}
+
+        match { *self.thread_state.read().expect("Poisoned thread_state") } {
+            ThreadState::Running => {}
+            ThreadState::Panicked => { self.recover_from_panic(); self.start_thread() }
+            // This is the coldest path in the current impl, because we don't let the thread die
+            // unless shutdown is triggered.
+            ThreadState::Stopped => self.start_thread(),
         }
-        // Get the Option<JoinHandle>. If it's not running, start it back up
-        let mut join = self.thread_join.write().expect("Poisoned thread_join");
-        let r = self.clone();
-        join.get_or_insert_with(|| {
-            self.thread_builder()
-                .spawn(move || {
-                    r.executor.shutdown_semaphore.increment();
-                    r.system.init_current();
-                    r.thread();
-                    r.thread_join.write().expect("Poisoned thread_join").take();
-                    r.executor.shutdown_semaphore.decrement();
-                })
-                .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e))
-        });
         // We've ensured it's running, let's make sure it's not waiting
         self.thread_condvar
             .read()
@@ -377,9 +390,48 @@ impl AxiomReactor {
             .notify_one();
     }
 
-    #[inline]
-    fn thread_builder(&self) -> thread::Builder {
+    /// Start a new thread. This should only be called when the state is Stopped or Panicked.
+    #[cold]
+    fn start_thread(&self) {
+        let reactor = self.clone();
         thread::Builder::new().name(format!("Reactor-{}", self.name))
+            .spawn(move || {
+                { *reactor.thread_state.write()
+                    .expect("thread_state poisoned at thread start")
+                = ThreadState::Running; }
+                reactor.executor.shutdown_semaphore.increment();
+                reactor.system.init_current();
+                reactor.thread();
+                reactor.executor.shutdown_semaphore.decrement();
+                *reactor.thread_state.write()
+                    .expect("thread_state poisoned at thread end")
+                = ThreadState::Stopped;
+            })
+            .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e));
+    }
+
+    /// Goes over all the locks in the Reactor and ensures they aren't poisoned. It holds onto the
+    /// locks so it can release them all at once.
+    fn recover_from_panic(&self) {
+        let _run_queue_guard = match self.run_queue.write() {
+            Ok(g) => g,
+            Err(psn) => psn.into_inner(),
+        };
+
+        let _wait_queue_guard = match self.wait_queue.write() {
+            Ok(g) => g,
+            Err(psn) => psn.into_inner(),
+        };
+
+        let _thread_condvar_guard = match self.thread_condvar.write() {
+            Ok(g) => { let _ = g.0.lock().map_err(|psn| psn.into_inner()); g },
+            Err(psn) => psn.into_inner(),
+        };
+
+        let _thread_state_guard = match self.thread_state.write() {
+            Ok(g) => g,
+            Err(psn) => psn.into_inner(),
+        };
     }
 
     /// Add an Actor's Wakeup to the run_queue.
@@ -419,7 +471,7 @@ impl AxiomReactor {
 /// Tasks represent the unit of work that an Executor-Reactor system is responsible for.
 struct Task {
     id: Uuid,
-    actor: Pin<Box<ActorStream>>,
+    actor: Mutex<Pin<Box<ActorStream>>>,
 }
 
 impl Task {
@@ -427,6 +479,8 @@ impl Task {
         let mut ctx = Context::from_waker(waker);
 
         self.actor
+            .lock()
+            .expect("Poisoned ActorStream")
             .as_mut()
             .poll_next(&mut ctx)
     }
