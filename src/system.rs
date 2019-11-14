@@ -1043,19 +1043,23 @@ mod tests {
     }
 
     /// This test verifies that the system can send a message after a particular delay.
-    /// FIXME need separate test for remotes.
+    // FIXME need separate test for remotes.
     #[test]
     fn test_send_after() {
         init_test_log();
 
+        info!("Preparing test");
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
+        info!("Test prepared, sending delayed message");
 
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
+        info!("Sleeping for initial check");
         thread::sleep(Duration::from_millis(5));
         assert_eq!(1, aid.received().unwrap());
-        thread::sleep(Duration::from_millis(20));
+        info!("Sleeping till we're 100% sure we should have the message");
+        thread::sleep(Duration::from_millis(15));
         assert_eq!(2, aid.received().unwrap());
 
         system.trigger_and_await_shutdown(None);
@@ -1069,7 +1073,6 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        thread::sleep(Duration::from_millis(10));
 
         let aid1 = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid1, 1, 1000).unwrap();
@@ -1078,11 +1081,9 @@ mod tests {
 
         aid1.send_after(Message::new(11), Duration::from_millis(200))
             .unwrap();
-        thread::sleep(Duration::from_millis(5));
 
-        aid2.send_after(Message::new(11), Duration::from_millis(50))
+        aid2.send_after(Message::new(11), Duration::from_millis(10))
             .unwrap();
-        thread::sleep(Duration::from_millis(5));
 
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(1, aid2.received().unwrap());

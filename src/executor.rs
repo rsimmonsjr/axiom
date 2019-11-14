@@ -10,8 +10,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
-use std::thread;
 use std::time::{Duration, Instant};
+use crate::executor::thread_pool::AxiomThreadPool;
+
+mod thread_pool;
 
 /// The Executor is responsible for the high-level scheduling of Actors. When an Actor is
 /// registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
@@ -22,7 +24,7 @@ pub(crate) struct AxiomExecutor {
     /// The system's "is shutting down" flag.
     shutdown_triggered: Arc<(Mutex<bool>, Condvar)>,
     /// Barrier to await shutdown on.
-    shutdown_semaphore: Arc<DrainAwait>,
+    thread_pool: Arc<AxiomThreadPool>,
     /// Actors that have no messages available.
     sleeping: Arc<DashMap<Aid, Task>>,
     /// All Reactors owned by this Executor.
@@ -37,9 +39,9 @@ impl AxiomExecutor {
     pub(crate) fn new(shutdown_triggered: Arc<(Mutex<bool>, Condvar)>) -> Self {
         Self {
             shutdown_triggered,
-            shutdown_semaphore: Arc::new(DrainAwait::new()),
-            sleeping: Arc::new(Default::default()),
-            reactors: Arc::new(Default::default()),
+            thread_pool: Default::default(),
+            sleeping: Default::default(),
+            reactors: Default::default(),
             actors_per_reactor: Default::default(),
         }
     }
@@ -49,9 +51,10 @@ impl AxiomExecutor {
     /// be performed with the actor system.
     pub(crate) fn init(&self, system: ActorSystem) {
         for i in 0..system.data.config.thread_pool_size {
-            self.reactors
-                .insert(i, AxiomReactor::new(self.clone(), system.clone(), i));
+            let reactor = AxiomReactor::new(self.clone(), system.clone(), i);
+            self.reactors.insert(i, reactor.clone());
             self.actors_per_reactor.insert(i, 0);
+            self.thread_pool.spawn(format!("ActorReactor-{}", reactor.name), move ||reactor.thread());
         }
     }
 
@@ -104,80 +107,7 @@ impl AxiomExecutor {
     /// Block until the threads have finished shutting down. This MUST be called AFTER shutdown is
     /// triggered.
     pub(crate) fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
-        match timeout.into() {
-            Some(timeout) => self.shutdown_semaphore.wait_timeout(timeout),
-            None => self.shutdown_semaphore.wait(),
-        }
-    }
-}
-
-/// A semaphore of sorts that unblocks when its internal counter hits 0
-struct DrainAwait {
-    /// Mutex for blocking on
-    mutex: Mutex<u16>,
-    /// Condvar for waiting on
-    condvar: Condvar,
-}
-
-impl DrainAwait {
-    pub fn new() -> Self {
-        Self {
-            mutex: Mutex::new(0),
-            condvar: Condvar::new(),
-        }
-    }
-
-    /// Increment the counter
-    pub fn increment(&self) {
-        *self.mutex.lock().expect("DrainAwait poisoned") += 1;
-    }
-
-    /// Decrement the counter, notify condvar if it hits 0
-    pub fn decrement(&self) {
-        let mut guard = self.mutex.lock().expect("DrainAwait poisoned");
-        *guard -= 1;
-        trace!("Decrementing DrainAwait to {}", *guard);
-        if *guard == 0 {
-            debug!("Notifying blocked threads");
-            self.condvar.notify_all();
-        }
-    }
-
-    /// Block on the condvar
-    pub fn wait(&self) -> ShutdownResult {
-        let mut guard = match self.mutex.lock() {
-            Ok(g) => g,
-            Err(_) => return ShutdownResult::Panicked,
-        };
-
-        while *guard != 0 {
-            guard = match self.condvar.wait(guard) {
-                Ok(g) => g,
-                Err(_) => return ShutdownResult::Panicked,
-            };
-        }
-        ShutdownResult::Ok
-    }
-
-    /// Block on the condvar until it times out
-    pub fn wait_timeout(&self, timeout: Duration) -> ShutdownResult {
-        let mut guard = match self.mutex.lock() {
-            Ok(g) => g,
-            Err(_) => return ShutdownResult::Panicked,
-        };
-
-        while *guard != 0 {
-            let (new_guard, timeout) = match self.condvar.wait_timeout(guard, timeout) {
-                Ok(ret) => (ret.0, ret.1),
-                Err(_) => return ShutdownResult::Panicked,
-            };
-
-            if timeout.timed_out() {
-                return ShutdownResult::TimedOut;
-            }
-            guard = new_guard;
-        }
-        ShutdownResult::Ok
+        self.thread_pool.await_shutdown(timeout)
     }
 }
 
@@ -209,8 +139,6 @@ pub(crate) struct AxiomReactor {
     wait_queue: Arc<RwLock<BTreeMap<Aid, Task>>>,
     /// This is used to pause/resume threads that run out of work.
     thread_condvar: Arc<RwLock<(Mutex<()>, Condvar)>>,
-    /// This is used as a semaphore to ensure the Reactor has only a single active thread.
-    thread_state: Arc<RwLock<ThreadState>>,
     /// The current Actor being processed by the Reactor.
     current_actor: Arc<Mutex<Option<Aid>>>,
 }
@@ -219,35 +147,6 @@ pub(crate) struct AxiomReactor {
 enum LoopResult<T> {
     Ok(T),
     Continue,
-}
-
-/// This is used to track the state of the Reactor's thread.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ThreadState {
-    Running,
-    Stopped,
-    Panicked,
-}
-
-/// Held as long as the thread is alive. Dropping the lease lets us know what the state is precisely
-/// when the thread ends.
-struct ThreadLease(Arc<RwLock<ThreadState>>);
-
-impl Drop for ThreadLease {
-    fn drop(&mut self) {
-        // Get the current state of the thread. A poisoned lock would indicate something VERY wrong
-        let current_state = {
-            match self.0.read() {
-                Ok(state) => *state,
-                Err(err) => *err.into_inner(),
-            }
-        };
-
-        // If it was dropped before it was set to Stopped, then it panicked.
-        if let ThreadState::Running = current_state {
-            *self.0.write().unwrap() = ThreadState::Panicked;
-        }
-    }
 }
 
 impl AxiomReactor {
@@ -263,7 +162,6 @@ impl AxiomReactor {
             run_queue: Arc::new(RwLock::new(Default::default())),
             wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
-            thread_state: Arc::new(RwLock::new(ThreadState::Stopped)),
             current_actor: Arc::new(Mutex::new(None)),
         }
     }
@@ -285,8 +183,9 @@ impl AxiomReactor {
 
     /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
     /// dedicated thread, else it will block the executor.
-    fn thread(&self) {
+    pub(crate) fn thread(&self) {
         debug!("Reactor-{} thread started", self.name);
+        self.system.init_current();
         loop {
             // If we're shutting down, quit.
             {
@@ -340,8 +239,6 @@ impl AxiomReactor {
                             self.wait(task);
                             self.wake(w);
                             break;
-                        } else {
-                            continue;
                         }
                     }
                     // Still pending, return to wait_queue. Drop the wakeup, because the futures
@@ -351,6 +248,7 @@ impl AxiomReactor {
                         break;
                     }
                 }
+                trace!("Reactor-{} executed poll", self.name);
             }
         }
         debug!("Reactor-{} thread ended", self.name);
@@ -366,7 +264,7 @@ impl AxiomReactor {
     fn get_work(&self) -> LoopResult<(Wakeup, Task)> {
         if let Some(w) = self.get_woken() {
             if let Some(task) = self.remove_waiting(&w.id) {
-                trace!("Reactor-{} Got work", self.name);
+                trace!("Reactor-{} received Wakeup", self.name);
                 {
                     *self.current_actor.lock().expect("Poisoned current_actor") = Some(w.id.clone())
                 }
@@ -391,100 +289,12 @@ impl AxiomReactor {
         }
     }
 
-    /// This function ensures the Reactor is running when it is needed to be, recovering from a
-    /// panic if necessary. We should call this function as much as we need.
-    fn ensure_running(&self) {
-        let mut thread_state = { *self.thread_state.read().expect("Poisoned thread_state") };
-        if let ThreadState::Panicked = thread_state {
-            self.recover_from_panic();
-            thread_state = ThreadState::Stopped;
-        }
-        // Ensure running? Nah, we're shutting down.
-        {
-            if *self.executor.shutdown_triggered.0.lock().unwrap() {
-                return;
-            }
-        }
-        if let ThreadState::Stopped = thread_state {
-            self.start_thread();
-        }
-        // We've ensured it's running, let's make sure it's not waiting
-        self.thread_condvar
-            .read()
-            .expect("Poisoned Reactor condvar")
-            .1
-            .notify_one();
-    }
-
-    /// Start a new thread. This should only be called when the state is Stopped or Panicked.
-    #[cold]
-    fn start_thread(&self) {
-        let reactor = self.clone();
-        thread::Builder::new()
-            .name(format!("Reactor-{}", self.name))
-            .spawn(move || {
-                let lease = ThreadLease(reactor.thread_state.clone());
-                {
-                    *lease
-                        .0
-                        .write()
-                        .expect("thread_state poisoned at thread start") = ThreadState::Running;
-                }
-                reactor.executor.shutdown_semaphore.increment();
-                reactor.system.init_current();
-                reactor.thread();
-                reactor.executor.shutdown_semaphore.decrement();
-                *lease
-                    .0
-                    .write()
-                    .expect("thread_state poisoned at thread end") = ThreadState::Stopped;
-            })
-            .unwrap_or_else(|e| panic!("Error creating Reactor thread: {}", e));
-    }
-
-    /// Goes over all the locks in the Reactor and ensures they aren't poisoned. It holds onto the
-    /// locks so it can release them all at once. Additionally, informs the ActorSystem of the Actor
-    /// that poisoned it.
-    fn recover_from_panic(&self) {
-        self.executor.shutdown_semaphore.decrement();
-
-        let _run_queue_guard = match self.run_queue.write() {
-            Ok(g) => g,
-            Err(psn) => psn.into_inner(),
-        };
-
-        let _wait_queue_guard = match self.wait_queue.write() {
-            Ok(g) => g,
-            Err(psn) => psn.into_inner(),
-        };
-
-        let _thread_condvar_guard = match self.thread_condvar.write() {
-            Ok(g) => {
-                let _ = g.0.lock().map_err(|psn| psn.into_inner());
-                g
-            }
-            Err(psn) => psn.into_inner(),
-        };
-
-        let _thread_state_guard = match self.thread_state.write() {
-            Ok(g) => g,
-            Err(psn) => psn.into_inner(),
-        };
-
-        let perpetrator = match self.current_actor.lock() {
-            Ok(id) => (*id).clone().unwrap(),
-            Err(psn) => (*psn.into_inner()).clone().unwrap(),
-        };
-        self.system.stop_actor(&perpetrator);
-    }
-
     /// Add an Actor's Wakeup to the run_queue.
     fn wake(&self, wakeup: Wakeup) {
         self.run_queue
             .write()
             .expect("Poisoned run_queue")
             .push_back(wakeup);
-        self.ensure_running();
     }
 
     /// Pop the next Wakeup.
