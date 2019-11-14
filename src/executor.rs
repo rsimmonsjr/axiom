@@ -1,6 +1,7 @@
 //! The Executor is responsible for the high-level scheduling of Actors.
 
 use crate::actors::ActorStream;
+use crate::executor::thread_pool::AxiomThreadPool;
 use crate::{ActorSystem, Aid, Status, StdError};
 use dashmap::DashMap;
 use futures::task::ArcWake;
@@ -11,7 +12,6 @@ use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
-use crate::executor::thread_pool::AxiomThreadPool;
 
 mod thread_pool;
 
@@ -54,7 +54,10 @@ impl AxiomExecutor {
             let reactor = AxiomReactor::new(self.clone(), system.clone(), i);
             self.reactors.insert(i, reactor.clone());
             self.actors_per_reactor.insert(i, 0);
-            self.thread_pool.spawn(format!("ActorReactor-{}", reactor.name), move ||reactor.thread());
+            self.thread_pool
+                .spawn(format!("ActorReactor-{}", reactor.name), move || {
+                    reactor.thread()
+                });
         }
     }
 

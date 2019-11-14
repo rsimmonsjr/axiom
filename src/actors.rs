@@ -13,12 +13,16 @@ use futures::{FutureExt, Stream};
 use log::{debug, error};
 use secc::*;
 use serde::de::Deserializer;
+use serde::export::Formatter;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::cell::UnsafeCell;
+use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,10 +30,6 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 use uuid::Uuid;
-use std::any::Any;
-use std::fmt::{Debug, Display};
-use serde::export::Formatter;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.
@@ -773,12 +773,10 @@ impl From<Box<dyn Any + Send + 'static>> for Panic {
     fn from(val: Box<dyn Any + Send + 'static>) -> Self {
         let panic_payload = match val.downcast::<&'static str>() {
             Ok(s) => String::from(*s),
-            Err(val) => {
-                match val.downcast::<String>() {
-                    Ok(s) => *s,
-                    Err(_) => String::from("Panic payload unserializable")
-                }
-            }
+            Err(val) => match val.downcast::<String>() {
+                Ok(s) => *s,
+                Err(_) => String::from("Panic payload unserializable"),
+            },
         };
         Self { panic_payload }
     }
@@ -892,7 +890,9 @@ impl ActorStream {
             Ok(Status::Stop) => {
                 debug!("Actor \"{}\" stopping", self.context.aid.name_or_uuid());
                 self.receiver.pop().unwrap();
-                self.context.system.internal_stop_actor(&self.context.aid, None);
+                self.context
+                    .system
+                    .internal_stop_actor(&self.context.aid, None);
                 stopping = true;
             }
             Err(e) => {
@@ -952,13 +952,11 @@ impl Stream for ActorStream {
                     let mut future = Box::pin((&mut self.handler)(ctx, msg.clone()));
                     // Just. give it a ~~wave~~ poll!!
                     match inner_poll(&mut future, cx) {
-                        Poll::Ready(r) => {
-                            Poll::Ready(Some(self.overwrite_on_stop(r)))
-                        },
+                        Poll::Ready(r) => Poll::Ready(Some(self.overwrite_on_stop(r))),
                         Poll::Pending => {
                             self.pending = Some(future);
                             Poll::Pending
-                        },
+                        }
                     }
                 }
                 Err(_) => return Poll::Ready(None), // Ready(None) is standard for "Stream is done"
@@ -967,7 +965,10 @@ impl Stream for ActorStream {
     }
 }
 
-fn inner_poll(future: &mut Pin<Box<ActorFuture>>, cx: &mut std::task::Context<'_>) -> Poll<Result<Status, StdError>> {
+fn inner_poll(
+    future: &mut Pin<Box<ActorFuture>>,
+    cx: &mut std::task::Context<'_>,
+) -> Poll<Result<Status, StdError>> {
     match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
         Ok(p) => p,
         Err(e) => Poll::Ready(Err(Panic::from(e).into())),
