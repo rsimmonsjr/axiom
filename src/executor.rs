@@ -242,6 +242,7 @@ impl AxiomReactor {
                     // Still pending, return to wait_queue. Drop the wakeup, because the futures
                     // will re-add it later through their wakers.
                     Poll::Pending => {
+                        trace!("Reactor-{} waiting on pending Actor", self.name);
                         self.wait(task);
                         break;
                     }
@@ -293,6 +294,11 @@ impl AxiomReactor {
             .write()
             .expect("Poisoned run_queue")
             .push_back(wakeup);
+        self.thread_condvar
+            .read()
+            .expect("Poisoned Reactor condvar")
+            .1
+            .notify_one();
     }
 
     /// Pop the next Wakeup.

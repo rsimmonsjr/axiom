@@ -384,6 +384,7 @@ impl ActorSystem {
                     Some(msg) => {
                         let now = Instant::now();
                         if now >= msg.instant {
+                            trace!("Sending delayed message");
                             msg.destination
                                 .send(msg.message.clone())
                                 .unwrap_or_else(|error| {
@@ -1059,7 +1060,7 @@ mod tests {
         thread::sleep(Duration::from_millis(5));
         assert_eq!(1, aid.received().unwrap());
         info!("Sleeping till we're 100% sure we should have the message");
-        thread::sleep(Duration::from_millis(15));
+        thread::sleep(Duration::from_millis(10));
         assert_eq!(2, aid.received().unwrap());
 
         system.trigger_and_await_shutdown(None);
@@ -1079,7 +1080,7 @@ mod tests {
         let aid2 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
-        aid1.send_after(Message::new(11), Duration::from_millis(200))
+        aid1.send_after(Message::new(11), Duration::from_millis(50))
             .unwrap();
 
         aid2.send_after(Message::new(11), Duration::from_millis(10))
@@ -1090,11 +1091,11 @@ mod tests {
 
         // We overshoot the timing on the asserts because when the tests are run the CPU is
         // busy and the timing can be tricky.
-        thread::sleep(Duration::from_millis(55));
+        thread::sleep(Duration::from_millis(15));
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
-        thread::sleep(Duration::from_millis(160));
+        thread::sleep(Duration::from_millis(50));
         assert_eq!(2, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
