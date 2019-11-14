@@ -913,7 +913,7 @@ impl ActorStream {
 
     fn overwrite_on_stop(&self, result: Result<Status, StdError>) -> Result<Status, StdError> {
         match self.stopping {
-            true => result.map(|_| Ok(Status::Stop)),
+            true => result.map(|_| Status::Stop),
             false => result,
         }
     }
