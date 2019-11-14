@@ -26,6 +26,10 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 use uuid::Uuid;
+use std::any::Any;
+use std::fmt::{Debug, Display};
+use serde::export::Formatter;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.
@@ -741,6 +745,8 @@ pub(crate) struct ActorStream {
     handler: Box<dyn Handler>,
     /// The pending result of the current handler invocation.
     pending: Option<Pin<Box<ActorFuture>>>,
+    /// Set to true when the stream receives SystemMsg::Stop
+    stopping: bool,
 }
 
 /// The implementation of the actor in the system. Please see overview and library documentation
@@ -748,6 +754,34 @@ pub(crate) struct ActorStream {
 pub(crate) struct Actor {
     /// The context data for the actor containing the `aid` as well as other immutable data.
     pub context: Context,
+}
+
+#[derive(Debug)]
+pub struct Panic {
+    panic_payload: String,
+}
+
+impl Display for Panic {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.panic_payload)
+    }
+}
+
+impl Error for Panic {}
+
+impl From<Box<dyn Any + Send + 'static>> for Panic {
+    fn from(val: Box<dyn Any + Send + 'static>) -> Self {
+        let panic_payload = match val.downcast::<&'static str>() {
+            Ok(s) => String::from(*s),
+            Err(val) => {
+                match val.downcast::<String>() {
+                    Ok(s) => *s,
+                    Err(_) => String::from("Panic payload unserializable")
+                }
+            }
+        };
+        Self { panic_payload }
+    }
 }
 
 /// This is exclusively used in contexts we can be more than confident are safe.
@@ -834,6 +868,7 @@ impl Actor {
             receiver,
             handler,
             pending: None,
+            stopping: false,
         };
 
         (Arc::new(actor), stream)
@@ -842,8 +877,11 @@ impl Actor {
 
 impl ActorStream {
     /// This takes the result and executes the subsequent steps in respect to the result. Namely,
-    /// handling the Actor's message channel and informing the ActorSystem of errors.
-    pub(crate) fn handle_result(&self, result: Result<Status, StdError>) {
+    /// handling the Actor's message channel and informing the ActorSystem of errors. Returns
+    /// whether the Actor is stopping or not.
+    pub(crate) fn handle_result(&self, result: Result<Status, StdError>) -> bool {
+        let mut stopping = false;
+
         match result {
             Ok(Status::Done) => self.receiver.pop().unwrap(),
             Ok(Status::Skip) => self.receiver.skip().unwrap(),
@@ -854,7 +892,8 @@ impl ActorStream {
             Ok(Status::Stop) => {
                 debug!("Actor \"{}\" stopping", self.context.aid.name_or_uuid());
                 self.receiver.pop().unwrap();
-                self.context.system.stop_actor(&self.context.aid);
+                self.context.system.internal_stop_actor(&self.context.aid, None);
+                stopping = true;
             }
             Err(e) => {
                 self.receiver.pop().unwrap();
@@ -865,7 +904,17 @@ impl ActorStream {
                 self.context
                     .system
                     .internal_stop_actor(&self.context.aid, e);
+                stopping = true;
             }
+        }
+
+        stopping
+    }
+
+    fn overwrite_on_stop(&self, result: Result<Status, StdError>) -> Result<Status, StdError> {
+        match self.stopping {
+            true => Ok(Status::Stop),
+            false => result,
         }
     }
 }
@@ -879,41 +928,49 @@ impl Stream for ActorStream {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         // If we have a pending future, that's what we poll.
-        if let Some(pending) = &mut self.pending {
-            match pending.as_mut().poll(cx) {
-                Poll::Ready(r) => Poll::Ready(Some(r)),
-                Poll::Pending => Poll::Pending,
-            }
+        if let Some(mut pending) = self.pending.take() {
+            // Poll, ensure we respect stopping condition.
+            inner_poll(&mut pending, cx).map(|r| Some(self.overwrite_on_stop(r)))
         } else {
+            // Are we stopped? If so, we should not have been polled, panic. This is only acceptable
+            // because it means a bug in the Executor or Reactor.
+            if self.stopping {
+                panic!("Stopped ActorStream was polled after stopping. Please open a bug report.")
+            }
             // Else, we go for another.
             match self.receiver.peek() {
                 Ok(msg) => {
+                    // We're stopping after this future, mark as such
+                    if let Some(m) = msg.content_as::<SystemMsg>() {
+                        if let SystemMsg::Stop = *m {
+                            self.stopping = true;
+                        }
+                    }
+
                     // Get the next future
                     let ctx = self.context.clone();
                     let mut future = Box::pin((&mut self.handler)(ctx, msg.clone()));
-
-                    // Just give it a ~~wave~~ poll.
-                    if let Poll::Ready(mut result) = future.as_mut().poll(cx) {
-                        // If the message was a system stop message then we override the actor
-                        // returned result with a 'Status::Stop'. Actors should be preparing for
-                        // drop.
-                        if let Some(m) = msg.content_as::<SystemMsg>() {
-                            if let SystemMsg::Stop = *m {
-                                result = Ok(Status::Stop)
-                            }
-                        };
-
-                        return Poll::Ready(Some(result));
-                    } else {
-                        // Future isn't done, store it for the next poll.
-                        self.pending = Some(future);
-
-                        return Poll::Pending;
+                    // Just. give it a ~~wave~~ poll!!
+                    match inner_poll(&mut future, cx) {
+                        Poll::Ready(r) => {
+                            Poll::Ready(Some(self.overwrite_on_stop(r)))
+                        },
+                        Poll::Pending => {
+                            self.pending = Some(future);
+                            Poll::Pending
+                        },
                     }
                 }
                 Err(_) => return Poll::Ready(None), // Ready(None) is standard for "Stream is done"
             }
         }
+    }
+}
+
+fn inner_poll(future: &mut Pin<Box<ActorFuture>>, cx: &mut std::task::Context<'_>) -> Poll<Result<Status, StdError>> {
+    match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+        Ok(p) => p,
+        Err(e) => Poll::Ready(Err(Panic::from(e).into())),
     }
 }
 

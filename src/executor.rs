@@ -216,20 +216,15 @@ impl AxiomReactor {
                             self.executor.return_task(task, self.id);
                             break;
                         }
-                        let result = result.unwrap();
-                        let is_stopping = match &result {
-                            Ok(Status::Stop) | Err(_) => true,
-                            _ => false,
-                        };
                         // The Actor should handle its own internal modifications in response to the
                         // result.
-                        {
+                        let is_stopping = {
                             task.actor
                                 .lock()
                                 .expect("Poisoned Actor")
-                                .handle_result(result);
-                        }
-                        // Intentional or error'd stop means drop. It's dead, Jim.
+                                .handle_result(result.unwrap())
+                        };
+                        // It's dead, Jim.
                         if is_stopping {
                             break;
                         }
