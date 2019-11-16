@@ -377,3 +377,54 @@ struct Wakeup {
     id: Aid,
     waker: Waker,
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::executor::ShutdownResult;
+    use crate::tests::*;
+    use crate::*;
+    use futures::future::poll_fn;
+    use log::*;
+    use std::task::Poll;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_nested_futures_wakeup() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let _aid = system
+            .spawn()
+            .with((), |_: (), c: Context, _: Message| {
+                async {
+                    let mut has_pended = false;
+                    poll_fn(move |ctx: &mut std::task::Context| match has_pended {
+                        false => {
+                            let waker = ctx.waker().clone();
+                            has_pended = true;
+                            debug!("Actor polled first time");
+                            thread::spawn(move || {
+                                thread::sleep(Duration::from_millis(50));
+                                debug!("Waking actor");
+                                waker.wake();
+                            });
+                            Poll::Pending
+                        }
+                        true => {
+                            debug!("Actor polled second time, shutting down");
+                            c.system.trigger_shutdown();
+                            Poll::Ready(Ok(((), Status::Done)))
+                        }
+                    })
+                    .await
+                }
+            })
+            .unwrap();
+        assert_ne!(
+            system.await_shutdown(Duration::from_millis(100)),
+            ShutdownResult::TimedOut,
+            "Failed to trigger shutdown, actor was never woken"
+        );
+    }
+}
