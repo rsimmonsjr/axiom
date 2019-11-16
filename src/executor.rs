@@ -49,14 +49,15 @@ impl AxiomExecutor {
     /// Initializes the executor and starts the AxiomReactor instances based on the count of the
     /// number of threads configured in the actor system. This must be called before any work can
     /// be performed with the actor system.
-    pub(crate) fn init(&self, system: ActorSystem) {
+    pub(crate) fn init(&self, system: &ActorSystem) {
         for i in 0..system.data.config.thread_pool_size {
-            let reactor = AxiomReactor::new(self.clone(), system.clone(), i);
+            let reactor = AxiomReactor::new(self.clone(), system, i);
             self.reactors.insert(i, reactor.clone());
             self.actors_per_reactor.insert(i, 0);
+            let sys = system.clone();
             self.thread_pool
                 .spawn(format!("ActorReactor-{}", reactor.name), move || {
-                    reactor.system.init_current();
+                    sys.init_current();
                     loop {
                         if !reactor.thread() {
                             break;
@@ -147,14 +148,16 @@ pub(crate) struct AxiomReactor {
     name: String,
     /// The Executor that owns this Reactor.
     executor: AxiomExecutor,
-    /// The System that owns the Executor that owns this Reactor.
-    system: ActorSystem,
     /// The queue of Actors that are ready to be polled.
     run_queue: Arc<RwLock<VecDeque<Wakeup>>>,
     /// The queue of Actors this Reactor is responsible for.
     wait_queue: Arc<RwLock<BTreeMap<Aid, Task>>>,
     /// This is used to pause/resume threads that run out of work.
     thread_condvar: Arc<RwLock<(Mutex<()>, Condvar)>>,
+    /// How long the thread waits on the thread_condvar before timing out and looping anyways.
+    thread_wait_time: Duration,
+    /// How long to work on an Actor before moving on to the next Wakeup.
+    time_slice: Duration,
     /// The current Actor being processed by the Reactor.
     current_actor: Arc<Mutex<Option<Aid>>>,
 }
@@ -167,17 +170,18 @@ enum LoopResult<T> {
 
 impl AxiomReactor {
     /// Creates a new Reactor
-    fn new(executor: AxiomExecutor, system: ActorSystem, id: u16) -> AxiomReactor {
+    fn new(executor: AxiomExecutor, system: &ActorSystem, id: u16) -> AxiomReactor {
         let name = format!("{:08x?}-{}", system.data.uuid.as_fields().0, id);
 
         AxiomReactor {
             id,
             name,
             executor,
-            system,
             run_queue: Arc::new(RwLock::new(Default::default())),
             wait_queue: Arc::new(RwLock::new(BTreeMap::new())),
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
+            thread_wait_time: system.config().thread_wait_time,
+            time_slice: system.config().time_slice,
             current_actor: Arc::new(Mutex::new(None)),
         }
     }
@@ -219,7 +223,7 @@ impl AxiomReactor {
             LoopResult::Continue => return true,
         };
 
-        let end = Instant::now() + self.system.data.config.time_slice;
+        let end = Instant::now() + self.time_slice;
         loop {
             // This polls the Actor as a Stream.
             match task.poll(&w.waker) {
@@ -290,7 +294,7 @@ impl AxiomReactor {
             trace!("Reactor-{} waiting on condvar", self.name);
             let g = mutex.lock().expect("Poisoned Reactor condvar");
             let _ = condvar
-                .wait_timeout(g, self.system.data.config.thread_wait_time)
+                .wait_timeout(g, self.thread_wait_time)
                 .expect("Poisoned Reactor condvar");
             trace!("Reactor-{} resuming", self.name);
             LoopResult::Continue

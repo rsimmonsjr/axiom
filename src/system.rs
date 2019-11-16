@@ -338,7 +338,7 @@ impl ActorSystem {
         };
 
         info!("ActorSystem {} has spawned", uuid);
-        system.data.executor.init(system.clone());
+        system.data.executor.init(&system);
 
         // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
         // system not being created yet but needed by the thread. We put this code in a block to
