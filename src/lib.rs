@@ -219,6 +219,9 @@ use std::any::Any;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+// Re-export futures so the user doesn't need to import it.
+pub use futures;
+
 pub mod actors;
 pub mod cluster;
 mod executor;
