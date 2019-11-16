@@ -214,7 +214,10 @@ pub use crate::system::ActorSystem;
 pub use crate::system::ActorSystemConfig;
 pub use crate::system::SystemMsg;
 pub use crate::system::WireMessage;
+use secc::{SeccReceiver, SeccSender};
+use std::any::Any;
 use std::error::Error;
+use std::fmt::{Display, Formatter};
 
 pub mod actors;
 pub mod cluster;
@@ -274,6 +277,62 @@ pub type StdError = Box<dyn Error + Send + Sync + 'static>;
 /// A Result::Err is treated as a fatal error, and the Actor will be stopped.
 pub type ActorResult<State> = Result<(State, Status), StdError>;
 
+#[derive(Debug)]
+pub struct Panic {
+    panic_payload: String,
+}
+
+impl Display for Panic {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.panic_payload)
+    }
+}
+
+impl Error for Panic {}
+
+impl From<Box<dyn Any + Send + 'static>> for Panic {
+    fn from(val: Box<dyn Any + Send + 'static>) -> Self {
+        let panic_payload = match val.downcast::<&'static str>() {
+            Ok(s) => String::from(*s),
+            Err(val) => match val.downcast::<String>() {
+                Ok(s) => *s,
+                Err(_) => String::from("Panic payload unserializable"),
+            },
+        };
+        Self { panic_payload }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct AssertCollect {
+    tx: SeccSender<(bool, String)>,
+    rx: SeccReceiver<(bool, String)>,
+}
+
+#[cfg(test)]
+impl AssertCollect {
+    pub fn new() -> Self {
+        use std::time::Duration;
+        let (tx, rx) = secc::create(256, Duration::from_millis(10));
+        Self { tx, rx }
+    }
+
+    pub fn assert(&self, cond: bool, msg: impl Into<String>) {
+        self.tx.send((cond, msg.into())).unwrap()
+    }
+
+    pub fn panic(&self, msg: impl Into<String>) {
+        self.tx.send((false, msg.into())).unwrap()
+    }
+
+    pub fn collect(&self) {
+        while let Ok((cond, s)) = self.rx.receive_await() {
+            assert!(cond, "{}", s);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -282,6 +341,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
+    use std::thread;
 
     pub fn init_test_log() {
         let _ = env_logger::builder()
@@ -311,6 +371,18 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_assert_receive() {
+        let tracker = AssertCollect::new();
+        let t2 = tracker.clone();
+
+        let join = thread::spawn(move || t2.panic("This is a panic"));
+        let _ = join.join();
+
+        tracker.collect();
     }
 
     /// This test shows how the simplest actor can be built and used. This actor uses a closure

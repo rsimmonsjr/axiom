@@ -8,17 +8,16 @@
 
 use crate::message::*;
 use crate::system::*;
+use crate::Panic;
 use crate::*;
 use futures::{FutureExt, Stream};
 use log::{debug, error};
 use secc::*;
 use serde::de::Deserializer;
-use serde::export::Formatter;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
-use std::any::Any;
 use std::cell::UnsafeCell;
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
@@ -756,32 +755,6 @@ pub(crate) struct Actor {
     pub context: Context,
 }
 
-#[derive(Debug)]
-pub struct Panic {
-    panic_payload: String,
-}
-
-impl Display for Panic {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.panic_payload)
-    }
-}
-
-impl Error for Panic {}
-
-impl From<Box<dyn Any + Send + 'static>> for Panic {
-    fn from(val: Box<dyn Any + Send + 'static>) -> Self {
-        let panic_payload = match val.downcast::<&'static str>() {
-            Ok(s) => String::from(*s),
-            Err(val) => match val.downcast::<String>() {
-                Ok(s) => *s,
-                Err(_) => String::from("Panic payload unserializable"),
-            },
-        };
-        Self { panic_payload }
-    }
-}
-
 /// This is exclusively used in contexts we can be more than confident are safe.
 /// This is required for holding onto the Actor State.
 #[repr(transparent)]
@@ -979,10 +952,9 @@ fn inner_poll(
 mod tests {
     use std::thread;
     use std::time::Instant;
-
     use crate::tests::*;
-
     use super::*;
+    use log::*;
 
     /// This is identical to the documentation but here so that its formatted by rust and we can
     /// copy paste this into the docs. It's also easier to debug here.
@@ -1148,6 +1120,8 @@ mod tests {
     fn test_aid_as_message() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
 
         #[derive(Serialize, Deserialize)]
         enum Op {
@@ -1156,16 +1130,18 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with((), |_: (), context: Context, message: Message| {
+            .with(t, |t: AssertCollect, context: Context, message: Message| {
                 async move {
                     if let Some(msg) = message.content_as::<Aid>() {
-                        assert!(Aid::ptr_eq(&context.aid, &msg));
+                        t.assert(Aid::ptr_eq(&context.aid, &msg), "Aid mutated in transit");
                     } else if let Some(msg) = message.content_as::<Op>() {
                         match &*msg {
-                            Op::Aid(a) => assert!(Aid::ptr_eq(&context.aid, &a)),
+                            Op::Aid(a) => {
+                                t.assert(Aid::ptr_eq(&context.aid, &a), "Aid mutated in transit")
+                            }
                         }
                     }
-                    Ok(((), Status::Done))
+                    Ok((t, Status::Done))
                 }
             })
             .unwrap();
@@ -1177,6 +1153,7 @@ mod tests {
         // Wait for the Start and our message to get there because test is asynchronous.
         await_received(&aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// Tests that messages cannot be sent to an `aid` for an actor that has been stopped.
@@ -1200,20 +1177,26 @@ mod tests {
     fn test_actor_returns_stop() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
 
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, message: Message| {
+            .with(t, |t: AssertCollect, _: Context, message: Message| {
                 async move {
                     if let Some(_msg) = message.content_as::<i32>() {
-                        Ok(((), Status::Stop))
+                        Ok((t, Status::Stop))
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
-                            SystemMsg::Start => Ok(((), Status::Done)),
-                            m => panic!("unexpected message: {:?}", m),
+                            SystemMsg::Start => Ok((t, Status::Done)),
+                            m => {
+                                t.panic(format!("unexpected message: {:?}", m));
+                                Ok((t, Status::Stop))
+                            }
                         }
                     } else {
-                        panic!("Unknown Message received");
+                        t.panic("Unknown Message received");
+                        Ok((t, Status::Stop))
                     }
                 }
             })
@@ -1236,6 +1219,7 @@ mod tests {
         }
 
         system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// Tests that an actor cannot override the processing of a `Stop` message by returning a
@@ -1244,20 +1228,26 @@ mod tests {
     fn test_actor_cannot_override_stop() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
 
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, message: Message| {
+            .with(t, |t: AssertCollect, _: Context, message: Message| {
                 async move {
                     if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
-                            SystemMsg::Start => Ok(((), Status::Done)),
-                            SystemMsg::Stop => Ok(((), Status::Done)),
-                            m => panic!("unexpected message: {:?}", m),
+                            SystemMsg::Start => Ok((t, Status::Done)),
+                            SystemMsg::Stop => Ok((t, Status::Done)),
+                            m => {
+                                t.panic(format!("unexpected message: {:?}", m));
+                                Ok((t, Status::Stop))
+                            }
                         }
                     } else {
-                        panic!("Unknown Message received");
+                        t.panic("Unknown Message received");
+                        Ok((t, Status::Stop))
                     }
                 }
             })
@@ -1278,7 +1268,8 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(1));
         }
-
         system.trigger_and_await_shutdown(None);
+        info!("Collecting potential panics from");
+        tracker.collect();
     }
 }
