@@ -110,6 +110,14 @@ impl AxiomExecutor {
     /// Block until the threads have finished shutting down. This MUST be called AFTER shutdown is
     /// triggered.
     pub(crate) fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
+        let start = Instant::now();
+        for r in self.reactors.iter() {
+            match r.thread_condvar.read() {
+                Ok(g) => g.1.notify_one(),
+                Err(_) => return ShutdownResult::Panicked,
+            }
+        }
+        let timeout = timeout.into().map(|t| t - (Instant::now() - start));
         self.thread_pool.await_shutdown(timeout)
     }
 }

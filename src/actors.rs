@@ -950,11 +950,11 @@ fn inner_poll(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::tests::*;
+    use log::*;
     use std::thread;
     use std::time::Instant;
-    use crate::tests::*;
-    use super::*;
-    use log::*;
 
     /// This is identical to the documentation but here so that its formatted by rust and we can
     /// copy paste this into the docs. It's also easier to debug here.
@@ -1269,7 +1269,6 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         system.trigger_and_await_shutdown(None);
-        info!("Collecting potential panics from");
         tracker.collect();
     }
 }

@@ -330,7 +330,7 @@ impl AssertCollect {
     }
 
     pub fn collect(&self) {
-        while let Ok((cond, s)) = self.rx.receive_await() {
+        while let Ok((cond, s)) = self.rx.receive() {
             assert!(cond, "{}", s);
         }
     }

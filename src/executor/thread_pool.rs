@@ -16,13 +16,14 @@ impl AxiomThreadPool {
             state: Mutex::new(ThreadState::Stopped),
             drain: self.drain.clone(),
         });
-
         self.thread(f, deed.clone());
-
         deed
     }
 
-    fn thread<F: FnMut() + Send + 'static>(&self, mut f: F, deed: Arc<ThreadDeed>) {
+    fn thread<F>(&self, mut f: F, deed: Arc<ThreadDeed>)
+    where
+        F: FnMut() + Send + 'static,
+    {
         thread::Builder::new()
             .name(deed.name.clone())
             .spawn(move || {
