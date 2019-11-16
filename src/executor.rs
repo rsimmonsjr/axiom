@@ -56,7 +56,12 @@ impl AxiomExecutor {
             self.actors_per_reactor.insert(i, 0);
             self.thread_pool
                 .spawn(format!("ActorReactor-{}", reactor.name), move || {
-                    reactor.thread()
+                    reactor.system.init_current();
+                    loop {
+                        if !reactor.thread() {
+                            break;
+                        }
+                    }
                 });
         }
     }
@@ -192,73 +197,69 @@ impl AxiomReactor {
         self.wake(wakeup);
     }
 
-    /// This is the logic for the core loop that drives the Reactor. It MUST be invoked inside a
-    /// dedicated thread, else it will block the executor.
-    pub(crate) fn thread(&self) {
-        debug!("Reactor-{} thread started", self.name);
-        self.system.init_current();
-        loop {
-            // If we're shutting down, quit.
+    /// This is the core unit of work that drives the Reactor. The Executor should run this on an
+    /// endless loop.
+    pub(crate) fn thread(&self) -> bool {
+        // If we're shutting down, quit.
+        {
+            if *self
+                .executor
+                .shutdown_triggered
+                .0
+                .lock()
+                .expect("Poisoned shutdown_triggered condvar")
             {
-                if *self
-                    .executor
-                    .shutdown_triggered
-                    .0
-                    .lock()
-                    .expect("Poisoned shutdown_triggered condvar")
-                {
-                    debug!("Reactor-{} acknowledging shutdown", self.name);
-                    break;
-                }
+                debug!("Reactor-{} acknowledging shutdown", self.name);
+                return false;
             }
+        }
 
-            let (w, mut task) = match self.get_work() {
-                LoopResult::Ok(v) => v,
-                LoopResult::Continue => continue,
-            };
+        let (w, mut task) = match self.get_work() {
+            LoopResult::Ok(v) => v,
+            LoopResult::Continue => return true,
+        };
 
-            let end = Instant::now() + self.system.data.config.time_slice;
-            loop {
-                // This polls the Actor as a Stream.
-                match task.poll(&w.waker) {
-                    Poll::Ready(result) => {
-                        // Ready(None) indicates an empty message queue. Time to sleep.
-                        if let None = result {
-                            self.executor.return_task(task, self.id);
-                            break;
-                        }
-                        // The Actor should handle its own internal modifications in response to the
-                        // result.
-                        let is_stopping = {
-                            task.actor
-                                .lock()
-                                .expect("Poisoned Actor")
-                                .handle_result(result.unwrap())
-                        };
-                        // It's dead, Jim.
-                        if is_stopping {
-                            break;
-                        }
-                        // If we're past this timeslice, add back into the queues and move
-                        // to the next woken Actor. Else, poll it again.
-                        if Instant::now() >= end {
-                            self.wait(task);
-                            self.wake(w);
-                            break;
-                        }
+        let end = Instant::now() + self.system.data.config.time_slice;
+        loop {
+            // This polls the Actor as a Stream.
+            match task.poll(&w.waker) {
+                Poll::Ready(result) => {
+                    // Ready(None) indicates an empty message queue. Time to sleep.
+                    if let None = result {
+                        self.executor.return_task(task, self.id);
+                        break;
                     }
-                    // Still pending, return to wait_queue. Drop the wakeup, because the futures
-                    // will re-add it later through their wakers.
-                    Poll::Pending => {
-                        trace!("Reactor-{} waiting on pending Actor", self.name);
+                    // The Actor should handle its own internal modifications in response to the
+                    // result.
+                    let is_stopping = {
+                        task.actor
+                            .lock()
+                            .expect("Poisoned Actor")
+                            .handle_result(result.unwrap())
+                    };
+                    // It's dead, Jim.
+                    if is_stopping {
+                        break;
+                    }
+                    // If we're past this timeslice, add back into the queues and move
+                    // to the next woken Actor. Else, poll it again.
+                    if Instant::now() >= end {
                         self.wait(task);
+                        self.wake(w);
                         break;
                     }
                 }
-                trace!("Reactor-{} executed poll", self.name);
+                // Still pending, return to wait_queue. Drop the wakeup, because the futures
+                // will re-add it later through their wakers.
+                Poll::Pending => {
+                    trace!("Reactor-{} waiting on pending Actor", self.name);
+                    self.wait(task);
+                    break;
+                }
             }
+            trace!("Reactor-{} executed poll", self.name);
         }
-        debug!("Reactor-{} thread ended", self.name);
+        true
     }
 
     // If there's no Actors woken, the Reactor thread will block on the condvar. If there's a Wakeup
