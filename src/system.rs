@@ -940,7 +940,7 @@ mod tests {
             .with((), |_state: (), context: Context, _: Message| {
                 async move {
                     // Block for enough time so we can test timeout twice
-                    thread::sleep(Duration::from_millis(100));
+                    sleep(100);
                     context.system.trigger_shutdown();
                     Ok(((), Status::Done))
                 }
@@ -1056,10 +1056,10 @@ mod tests {
 
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
         info!("Sleeping for initial check");
-        thread::sleep(Duration::from_millis(5));
+        sleep(5);
         assert_eq!(1, aid.received().unwrap());
         info!("Sleeping till we're 100% sure we should have the message");
-        thread::sleep(Duration::from_millis(10));
+        sleep(10);
         assert_eq!(2, aid.received().unwrap());
 
         system.trigger_and_await_shutdown(None);
@@ -1090,11 +1090,11 @@ mod tests {
 
         // We overshoot the timing on the asserts because when the tests are run the CPU is
         // busy and the timing can be tricky.
-        thread::sleep(Duration::from_millis(15));
+        sleep(15);
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
-        thread::sleep(Duration::from_millis(50));
+        sleep(50);
         assert_eq!(2, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 

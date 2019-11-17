@@ -353,6 +353,10 @@ mod tests {
             .try_init();
     }
 
+    pub fn sleep(millis: u64) {
+        thread::sleep(Duration::from_millis(millis))
+    }
+
     /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
     pub async fn simple_handler(_: (), _: Context, _: Message) -> ActorResult<()> {

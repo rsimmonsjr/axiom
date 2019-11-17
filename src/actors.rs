@@ -1215,7 +1215,7 @@ mod tests {
             } else if max < Instant::elapsed(&start) {
                 panic!("Timed out waiting for actor to stop!");
             }
-            thread::sleep(Duration::from_millis(1));
+            sleep(1);
         }
 
         system.trigger_and_await_shutdown(None);
@@ -1266,7 +1266,7 @@ mod tests {
             } else if max < Instant::elapsed(&start) {
                 panic!("Timed out waiting for actor to stop!");
             }
-            thread::sleep(Duration::from_millis(1));
+            sleep(1);
         }
         system.trigger_and_await_shutdown(None);
         tracker.collect();
