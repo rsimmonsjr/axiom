@@ -453,10 +453,13 @@ mod tests {
     fn test_dispatching_with_closure() {
         init_test_log();
 
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let starting_state: usize = 0 as usize;
-        let closure = |mut state: usize, context: Context, message: Message| {
+        let closure = move |mut state: usize, context: Context, message: Message| {
+            let t = t.clone();
             async move {
                 // Expected messages in the expected order.
                 let expected: Vec<i32> = vec![11, 13, 17];
@@ -465,8 +468,8 @@ mod tests {
                     state += 1;
                     Ok((state, Status::Done))
                 } else if let Some(msg) = message.content_as::<i32>() {
-                    assert_eq!(expected[state - 1], *msg);
-                    assert_eq!(state, context.aid.received().unwrap());
+                    t.assert(expected[state - 1] == *msg, "Unexpected message content");
+                    t.assert(state == context.aid.received().unwrap(), "Unexpected state");
                     state += 1;
                     Ok((state, Status::Done))
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
@@ -474,7 +477,8 @@ mod tests {
                     // want the most frequently received messages first.
                     Ok((state, Status::Done))
                 } else {
-                    panic!("Failed to dispatch properly");
+                    t.panic("Failed to dispatch properly");
+                    Ok((state, Status::Stop))
                 }
             }
         };
@@ -496,6 +500,7 @@ mod tests {
 
         await_received(&aid, 4, 1000).unwrap();
         system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// This test shows how a struct-based actor can be used and process different kinds of
@@ -505,6 +510,7 @@ mod tests {
     fn test_dispatching_with_struct() {
         init_test_log();
 
+        let tracker = AssertCollect::new();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         // We create a basic struct with a handler and use that handler to dispatch to other
@@ -512,6 +518,7 @@ mod tests {
         // and there is nothing forcing the handler to be an inherent method.
         struct Data {
             value: i32,
+            tracker: AssertCollect,
         }
 
         impl Data {
@@ -539,12 +546,16 @@ mod tests {
                     // want the most frequently received messages first.
                     Ok((self, Status::Done))
                 } else {
-                    panic!("Failed to dispatch properly");
+                    self.tracker.panic("Failed to dispatch properly");
+                    Ok((self, Status::Stop))
                 }
             }
         }
 
-        let data = Data { value: 0 };
+        let data = Data {
+            value: 0,
+            tracker: tracker.clone(),
+        };
 
         let aid = system.spawn().with(data, Data::handle).unwrap();
 
@@ -556,6 +567,7 @@ mod tests {
 
         await_received(&aid, 4, 1000).unwrap();
         system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// Tests and demonstrates the process to create a closure that captures the environment
@@ -641,7 +653,5 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         system.spawn().with((), ping).unwrap();
         system.await_shutdown(None);
-
-        assert_eq!(2 + 2, 4);
     }
 }

@@ -1158,19 +1158,31 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        async fn monitor_handler(state: Aid, _: Context, message: Message) -> ActorResult<Aid> {
+        let tracker = AssertCollect::new();
+
+        async fn monitor_handler(
+            state: (Aid, AssertCollect),
+            _: Context,
+            message: Message,
+        ) -> ActorResult<(Aid, AssertCollect)> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
                     SystemMsg::Stopped { aid, error } => {
-                        assert!(Aid::ptr_eq(&state, aid));
-                        assert!(error.is_none());
+                        state
+                            .1
+                            .assert(Aid::ptr_eq(&state.0, aid), "Pointers are not equal!");
+                        state.1.assert(error.is_none(), "Actor was errored!");
                         Ok((state, Status::Done))
                     }
                     SystemMsg::Start => Ok((state, Status::Done)),
-                    _ => panic!("Received some other message!"),
+                    _ => {
+                        state.1.panic("Received some other message!");
+                        Ok((state, Status::Stop))
+                    }
                 }
             } else {
-                panic!("Received some other message!");
+                state.1.panic("Received some other message!");
+                Ok((state, Status::Stop))
             }
         }
 
@@ -1179,11 +1191,11 @@ mod tests {
         let not_monitoring = system.spawn().with((), simple_handler).unwrap();
         let monitoring1 = system
             .spawn()
-            .with(monitored.clone(), monitor_handler)
+            .with((monitored.clone(), tracker.clone()), monitor_handler)
             .unwrap();
         let monitoring2 = system
             .spawn()
-            .with(monitored.clone(), monitor_handler)
+            .with((monitored.clone(), tracker.clone()), monitor_handler)
             .unwrap();
         system.monitor(&monitoring1, &monitored);
         system.monitor(&monitoring2, &monitored);
@@ -1203,6 +1215,7 @@ mod tests {
         await_received(&not_monitoring, 1, 1000).unwrap();
 
         system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// This test verifies that the concept of named actors works properly. When a user wants
@@ -1257,12 +1270,15 @@ mod tests {
         struct Reply {}
 
         init_test_log();
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
         let (system1, system2) = start_and_connect_two_systems();
 
         system1.init_current();
         let aid = system1
             .spawn()
-            .with((), |_: (), context: Context, message: Message| {
+            .with((), move |_: (), context: Context, message: Message| {
+                let t = t.clone();
                 async move {
                     if let Some(msg) = message.content_as::<Request>() {
                         msg.reply_to.send_new(Reply {}).unwrap();
@@ -1271,13 +1287,15 @@ mod tests {
                     } else if let Some(_) = message.content_as::<SystemMsg>() {
                         Ok(((), Status::Done))
                     } else {
-                        panic!("Unexpected message received!");
+                        t.panic("Unexpected message received!");
+                        Ok(((), Status::Stop))
                     }
                 }
             })
             .unwrap();
         await_received(&aid, 1, 1000).unwrap();
 
+        let t = tracker.clone();
         let serialized = bincode::serialize(&aid).unwrap();
         system2
             .spawn()
@@ -1301,12 +1319,14 @@ mod tests {
                         _ => future::ok(((), Status::Done)),
                     }
                 } else {
-                    panic!("Unexpected message received!");
+                    t.panic("Unexpected message received!");
+                    future::ok(((), Status::Stop))
                 }
             })
             .unwrap();
 
         await_two_system_shutdown(system1, system2);
+        tracker.collect();
     }
 
     /// Tests the ability to find an aid on a remote system by name using a `SystemActor`. This
@@ -1315,6 +1335,8 @@ mod tests {
     #[test]
     fn test_system_actor_find_by_name() {
         init_test_log();
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
         let (system1, system2) = start_and_connect_two_systems();
 
         let aid1 = system1
@@ -1338,21 +1360,29 @@ mod tests {
             .with((), move |_: (), context: Context, message: Message| {
                 // We have to do this so each async block future gets its own copy.
                 let aid1 = aid1.clone();
+                let t = t.clone();
                 async move {
                     if let Some(msg) = message.content_as::<SystemActorMessage>() {
                         match &*msg {
                             SystemActorMessage::FindByNameResult { aid: found, .. } => {
                                 debug!("FindByNameResult received");
                                 if let Some(target) = found {
-                                    assert_eq!(target.uuid(), aid1.uuid());
+                                    t.assert(
+                                        target.uuid() == aid1.uuid(),
+                                        "Target is not expected Actor",
+                                    );
                                     target.send_new(true).unwrap();
                                     context.system.trigger_shutdown();
                                     Ok(((), Status::Done))
                                 } else {
-                                    panic!("Didn't find AID.");
+                                    t.panic("Didn't find AID.");
+                                    Ok(((), Status::Stop))
                                 }
                             }
-                            _ => panic!("Unexpected message received!"),
+                            _ => {
+                                t.panic("Unexpected message received!");
+                                Ok(((), Status::Stop))
+                            }
                         }
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         debug!("Actor started, attempting to send FindByName request");
@@ -1365,15 +1395,18 @@ mod tests {
                             ));
                             Ok(((), Status::Done))
                         } else {
-                            panic!("Unexpected message received!");
+                            t.panic("Unexpected message received!");
+                            Ok(((), Status::Stop))
                         }
                     } else {
-                        panic!("Unexpected message received!");
+                        t.panic("Unexpected message received!");
+                        Ok(((), Status::Stop))
                     }
                 }
             })
             .unwrap();
 
         await_two_system_shutdown(system1, system2);
+        tracker.collect();
     }
 }
