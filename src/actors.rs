@@ -975,8 +975,8 @@ mod tests {
             .unwrap();
 
         match aid.send(Message::new(11)) {
-            Ok(_) => println!("OK Then!"),
-            Err(e) => println!("Ooops {:?}", e),
+            Ok(_) => info!("OK Then!"),
+            Err(e) => info!("Ooops {:?}", e),
         }
 
         system.await_shutdown(None);
