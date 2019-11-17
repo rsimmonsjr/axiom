@@ -11,7 +11,7 @@ use crate::system::*;
 use crate::Panic;
 use crate::*;
 use futures::{FutureExt, Stream};
-use log::{debug, error};
+use log::{debug, error, warn};
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -944,7 +944,10 @@ fn inner_poll(
 ) -> Poll<Result<Status, StdError>> {
     match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
         Ok(p) => p,
-        Err(e) => Poll::Ready(Err(Panic::from(e).into())),
+        Err(e) => {
+            warn!("Actor panicked! Catching as error");
+            Poll::Ready(Err(Panic::from(e).into()))
+        },
     }
 }
 

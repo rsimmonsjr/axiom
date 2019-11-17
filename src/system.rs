@@ -1224,9 +1224,11 @@ mod tests {
             .spawn()
             .with((), |_: (), _: Context, msg: Message| {
                 if let Some(_) = msg.content_as::<SystemMsg>() {
+                    debug!("Not panicking this time");
                     return future::ok(((), Status::Done));
                 }
 
+                debug!("About to panic");
                 panic!("I panicked")
             })
             .unwrap();
