@@ -1213,6 +1213,52 @@ mod tests {
         tracker.collect();
     }
 
+    #[test]
+    fn test_monitor_gets_panics_errors() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
+        let aid = system
+            .spawn()
+            .with((), |_: (), _: Context, msg: Message| {
+                if let Some(_) = msg.content_as::<SystemMsg>() {
+                    return future::ok(((), Status::Done));
+                }
+
+                panic!("I panicked")
+            })
+            .unwrap();
+        let monitor = system
+            .spawn()
+            .with(aid.clone(), move |state: Aid, _: Context, msg: Message| {
+                if let Some(msg) = msg.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Stopped { aid, error } => {
+                            t.assert(*aid == state, "Aid is not expected Aid");
+                            t.assert(error.is_some(), "Expected error");
+                            t.assert(
+                                error.as_ref().unwrap() == "I panicked",
+                                "Error message does not match",
+                            );
+                            future::ok((state, Status::Stop))
+                        }
+                        SystemMsg::Start => future::ok((state, Status::Done)),
+                        _ => t.panic("Unexpected message received!"),
+                    }
+                } else {
+                    t.panic("Unexpected message received!")
+                }
+            })
+            .unwrap();
+        system.monitor(&monitor, &aid);
+        aid.send_new(()).unwrap();
+        await_received(&monitor, 2, 1000).unwrap();
+        system.trigger_and_await_shutdown(Duration::from_millis(1000));
+        tracker.collect();
+    }
+
     /// This test verifies that the concept of named actors works properly. When a user wants
     /// to declare a named actor they cannot register the same name twice. When the actor using
     /// the name currently stops the name should be removed from the registered names and be
