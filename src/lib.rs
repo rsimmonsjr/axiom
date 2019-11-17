@@ -379,8 +379,8 @@ mod tests {
         while aid.received().unwrap() < count as usize {
             if Instant::elapsed(&start) > duration {
                 return Err(format!(
-                    "Timed out! count: {} timeout_ms: {}",
-                    count, timeout_ms
+                    "Timed out after {}ms! Messages received: {}; Messages expected: {}",
+                    timeout_ms, aid.received().unwrap(), count
                 ));
             }
         }
