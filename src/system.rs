@@ -1159,7 +1159,6 @@ mod tests {
         init_test_log();
 
         let tracker = AssertCollect::new();
-
         async fn monitor_handler(
             state: (Aid, AssertCollect),
             _: Context,
@@ -1175,14 +1174,10 @@ mod tests {
                         Ok((state, Status::Done))
                     }
                     SystemMsg::Start => Ok((state, Status::Done)),
-                    _ => {
-                        state.1.panic("Received some other message!");
-                        Ok((state, Status::Stop))
-                    }
+                    _ => state.1.panic("Received some other message!"),
                 }
             } else {
-                state.1.panic("Received some other message!");
-                Ok((state, Status::Stop))
+                state.1.panic("Received some other message!")
             }
         }
 
@@ -1287,8 +1282,7 @@ mod tests {
                     } else if let Some(_) = message.content_as::<SystemMsg>() {
                         Ok(((), Status::Done))
                     } else {
-                        t.panic("Unexpected message received!");
-                        Ok(((), Status::Stop))
+                        t.panic("Unexpected message received!")
                     }
                 }
             })
@@ -1319,8 +1313,7 @@ mod tests {
                         _ => future::ok(((), Status::Done)),
                     }
                 } else {
-                    t.panic("Unexpected message received!");
-                    future::ok(((), Status::Stop))
+                    t.panic("Unexpected message received!")
                 }
             })
             .unwrap();
@@ -1375,14 +1368,10 @@ mod tests {
                                     context.system.trigger_shutdown();
                                     Ok(((), Status::Done))
                                 } else {
-                                    t.panic("Didn't find AID.");
-                                    Ok(((), Status::Stop))
+                                    t.panic("Didn't find AID.")
                                 }
                             }
-                            _ => {
-                                t.panic("Unexpected message received!");
-                                Ok(((), Status::Stop))
-                            }
+                            _ => t.panic("Unexpected message received!"),
                         }
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         debug!("Actor started, attempting to send FindByName request");
@@ -1395,12 +1384,10 @@ mod tests {
                             ));
                             Ok(((), Status::Done))
                         } else {
-                            t.panic("Unexpected message received!");
-                            Ok(((), Status::Stop))
+                            t.panic("Unexpected message received!")
                         }
                     } else {
-                        t.panic("Unexpected message received!");
-                        Ok(((), Status::Stop))
+                        t.panic("Unexpected message received!")
                     }
                 }
             })

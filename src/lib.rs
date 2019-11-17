@@ -322,11 +322,18 @@ impl AssertCollect {
     }
 
     pub fn assert(&self, cond: bool, msg: impl Into<String>) {
-        self.tx.send((cond, msg.into())).unwrap()
+        let m = msg.into();
+        self.tx.send((cond, m.clone())).unwrap();
+
+        if !cond {
+            panic!("{}", m)
+        }
     }
 
-    pub fn panic(&self, msg: impl Into<String>) {
-        self.tx.send((false, msg.into())).unwrap()
+    pub fn panic(&self, msg: impl Into<String>) -> ! {
+        let m = msg.into();
+        self.tx.send((false, m.clone())).unwrap();
+        panic!("{}", m)
     }
 
     pub fn collect(&self) {
@@ -477,8 +484,7 @@ mod tests {
                     // want the most frequently received messages first.
                     Ok((state, Status::Done))
                 } else {
-                    t.panic("Failed to dispatch properly");
-                    Ok((state, Status::Stop))
+                    t.panic("Failed to dispatch properly")
                 }
             }
         };
@@ -546,8 +552,7 @@ mod tests {
                     // want the most frequently received messages first.
                     Ok((self, Status::Done))
                 } else {
-                    self.tracker.panic("Failed to dispatch properly");
-                    Ok((self, Status::Stop))
+                    self.tracker.panic("Failed to dispatch properly")
                 }
             }
         }

@@ -1189,14 +1189,10 @@ mod tests {
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
                             SystemMsg::Start => Ok((t, Status::Done)),
-                            m => {
-                                t.panic(format!("unexpected message: {:?}", m));
-                                Ok((t, Status::Stop))
-                            }
+                            m => t.panic(format!("unexpected message: {:?}", m)),
                         }
                     } else {
-                        t.panic("Unknown Message received");
-                        Ok((t, Status::Stop))
+                        t.panic("Unknown Message received")
                     }
                 }
             })
@@ -1240,14 +1236,10 @@ mod tests {
                         match &*msg {
                             SystemMsg::Start => Ok((t, Status::Done)),
                             SystemMsg::Stop => Ok((t, Status::Done)),
-                            m => {
-                                t.panic(format!("unexpected message: {:?}", m));
-                                Ok((t, Status::Stop))
-                            }
+                            m => t.panic(format!("unexpected message: {:?}", m)),
                         }
                     } else {
-                        t.panic("Unknown Message received");
-                        Ok((t, Status::Stop))
+                        t.panic("Unknown Message received")
                     }
                 }
             })
