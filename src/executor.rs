@@ -469,8 +469,8 @@ mod tests {
                 }
             })
             .unwrap();
-        sleep(1);
-        assert_eq!(
+        sleep(5);    // Apparently we can't count on SystemMsg::Start being processed and the Task
+        assert_eq!(  // returned to the executor in less than 1ms. Failed once in 1000 iterations.
             system.executor().sleeping.len(),
             2,
             "Either the SystemActor or test Actor are not sleeping"
