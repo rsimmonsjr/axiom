@@ -393,6 +393,41 @@ mod tests {
     use std::task::Poll;
     use std::thread;
     use std::time::Duration;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct PendingNTimes {
+        pending_count: u8,
+        sleep_for: u64,
+    }
+
+    impl PendingNTimes {
+        fn new(n: u8, sleep_for: u64) -> Self {
+            Self {
+                pending_count: n,
+                sleep_for,
+            }
+        }
+    }
+
+    impl Future for PendingNTimes {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+            match self.pending_count {
+                0 => Poll::Ready(()),
+                x => {
+                    self.pending_count -= 1;
+                    let waker = cx.waker().clone();
+                    thread::spawn(move || {
+                        sleep(self.sleep_for);
+                        waker.wake();
+                    });
+                    Poll::Pending
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_nested_futures_wakeup() {
@@ -403,26 +438,7 @@ mod tests {
             .spawn()
             .with((), |_: (), c: Context, _: Message| {
                 async {
-                    let mut has_pended = false;
-                    poll_fn(move |ctx: &mut std::task::Context| match has_pended {
-                        false => {
-                            let waker = ctx.waker().clone();
-                            has_pended = true;
-                            debug!("Actor polled first time");
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(50));
-                                debug!("Waking actor");
-                                waker.wake();
-                            });
-                            Poll::Pending
-                        }
-                        true => {
-                            debug!("Actor polled second time, shutting down");
-                            c.system.trigger_shutdown();
-                            Poll::Ready(Ok(((), Status::Done)))
-                        }
-                    })
-                    .await
+                    PendingNTimes::new(1, 50).await
                 }
             })
             .unwrap();
