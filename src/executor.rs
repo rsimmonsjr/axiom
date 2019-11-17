@@ -490,7 +490,7 @@ mod tests {
                 .len();
             assert_eq!(pending, 1, "Actor should be pending");
         }
-        sleep(25);
+        sleep(30);
         {
             let pending = system
                 .executor()
