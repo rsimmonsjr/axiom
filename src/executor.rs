@@ -451,4 +451,66 @@ mod tests {
             "Failed to trigger shutdown, actor was never woken"
         );
     }
+
+    #[test]
+    fn test_actor_awake_phases() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(1));
+        let aid = system
+            .spawn()
+            .with((), |_: (), _: Context, msg: Message| {
+                async move {
+                    if let Some(_) = msg.content_as::<SystemMsg>() {
+                        return Ok(((), Status::Done));
+                    }
+
+                    PendingNTimes::new(1, 25).await
+                }
+            })
+            .unwrap();
+        sleep(1);
+        assert_eq!(
+            system.executor().sleeping.len(),
+            2,
+            "Either the SystemActor or test Actor are not sleeping"
+        );
+        aid.send_new(()).unwrap();
+        sleep(5);
+        {
+            let pending = system
+                .executor()
+                .reactors
+                .iter()
+                .nth(0)
+                .unwrap()
+                .wait_queue
+                .read()
+                .unwrap()
+                .len();
+            assert_eq!(pending, 1, "Actor should be pending");
+        }
+        sleep(25);
+        {
+            let pending = system
+                .executor()
+                .reactors
+                .iter()
+                .nth(0)
+                .unwrap()
+                .wait_queue
+                .read()
+                .unwrap()
+                .len();
+            assert_eq!(
+                pending, 0,
+                "Actor should be returned to the Executor by now"
+            );
+        }
+        assert_eq!(
+            system.executor().sleeping.len(),
+            2,
+            "Actor was not returned to Executor"
+        );
+    }
 }

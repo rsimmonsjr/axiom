@@ -830,6 +830,11 @@ impl ActorSystem {
         data.push(entry);
         condvar.notify_all();
     }
+
+    #[cfg(test)]
+    pub(crate) fn executor(&self) -> &AxiomExecutor {
+        &self.data.executor
+    }
 }
 
 impl fmt::Debug for ActorSystem {
