@@ -388,13 +388,12 @@ mod tests {
     use crate::executor::ShutdownResult;
     use crate::tests::*;
     use crate::*;
-    use futures::future::poll_fn;
     use log::*;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::task::Poll;
     use std::thread;
     use std::time::Duration;
-    use std::future::Future;
-    use std::pin::Pin;
 
     struct PendingNTimes {
         pending_count: u8,
@@ -411,16 +410,18 @@ mod tests {
     }
 
     impl Future for PendingNTimes {
-        type Output = ();
+        type Output = ActorResult<()>;
 
-        fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-            match self.pending_count {
-                0 => Poll::Ready(()),
-                x => {
-                    self.pending_count -= 1;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+            match &mut self.pending_count {
+                0 => Poll::Ready(Ok(((), Status::Done))),
+                count => {
+                    *count -= 1;
+                    debug!("Pending, {} times left", count);
                     let waker = cx.waker().clone();
+                    let sleep_for = self.sleep_for;
                     thread::spawn(move || {
-                        sleep(self.sleep_for);
+                        sleep(sleep_for);
                         waker.wake();
                     });
                     Poll::Pending
@@ -437,8 +438,10 @@ mod tests {
         let _aid = system
             .spawn()
             .with((), |_: (), c: Context, _: Message| {
-                async {
-                    PendingNTimes::new(1, 50).await
+                async move {
+                    let r = PendingNTimes::new(1, 50).await;
+                    c.system.trigger_shutdown();
+                    r
                 }
             })
             .unwrap();
