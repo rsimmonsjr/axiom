@@ -743,7 +743,7 @@ pub(crate) struct ActorStream {
     /// ensure the Actor is synchronous in relation to itself.
     handler: Box<dyn Handler>,
     /// The pending result of the current handler invocation.
-    pending: Option<Pin<Box<ActorFuture>>>,
+    pending: Option<ActorFuture>,
     /// Set to true when the stream receives SystemMsg::Stop
     stopping: bool,
 }
@@ -815,9 +815,15 @@ impl Actor {
         let handler = Box::new(move |ctx: Context, msg: Message| {
             let state = SendSyncPointer(state_box.0.get());
             let s = unsafe { (*state.0).take() }.expect("State cell was empty");
-            let future = (processor)(s, ctx, msg);
+            let future = catch_unwind(AssertUnwindSafe(|| (processor)(s, ctx, msg)));
             async move {
-                let result = future.await;
+                let result = match future {
+                    Ok(f) => f.await,
+                    Err(err) => {
+                        warn!("Actor panicked! Catching as error");
+                        Err(Panic::from(err).into())
+                    }
+                };
                 result.map(|(s, status)| {
                     unsafe { ptr::write(state.0, Some(s)) };
                     status
@@ -903,7 +909,10 @@ impl Stream for ActorStream {
         // If we have a pending future, that's what we poll.
         if let Some(mut pending) = self.pending.take() {
             // Poll, ensure we respect stopping condition.
-            inner_poll(&mut pending, cx).map(|r| Some(self.overwrite_on_stop(r)))
+            pending
+                .as_mut()
+                .poll(cx)
+                .map(|r| Some(self.overwrite_on_stop(r)))
         } else {
             // Are we stopped? If so, we should not have been polled, panic. This is only acceptable
             // because it means a bug in the Executor or Reactor.
@@ -922,9 +931,9 @@ impl Stream for ActorStream {
 
                     // Get the next future
                     let ctx = self.context.clone();
-                    let mut future = Box::pin((&mut self.handler)(ctx, msg.clone()));
+                    let mut future = (&mut self.handler)(ctx, msg.clone());
                     // Just. give it a ~~wave~~ poll!!
-                    match inner_poll(&mut future, cx) {
+                    match future.as_mut().poll(cx) {
                         Poll::Ready(r) => Poll::Ready(Some(self.overwrite_on_stop(r))),
                         Poll::Pending => {
                             self.pending = Some(future);
@@ -934,19 +943,6 @@ impl Stream for ActorStream {
                 }
                 Err(_) => return Poll::Ready(None), // Ready(None) is standard for "Stream is done"
             }
-        }
-    }
-}
-
-fn inner_poll(
-    future: &mut Pin<Box<ActorFuture>>,
-    cx: &mut std::task::Context<'_>,
-) -> Poll<Result<Status, StdError>> {
-    match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Actor panicked! Catching as error");
-            Poll::Ready(Err(Panic::from(e).into()))
         }
     }
 }
