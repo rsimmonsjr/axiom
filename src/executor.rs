@@ -460,7 +460,7 @@ mod tests {
         let aid = system.spawn().with((), simple_handler).unwrap();
         // Sleep for a little longer than the condvar's default timeout
         sleep(125);
-        aid.send_new(11);
+        let _ = aid.send_new(11);
         await_received(&aid, 2, 1000).unwrap();
         system.trigger_and_await_shutdown(None);
     }
@@ -490,7 +490,7 @@ mod tests {
             2,
             "Either the SystemActor or test Actor are not sleeping"
         );
-        aid.send_new(()).unwrap();
+        let _ = aid.send_new(()).unwrap();
         sleep(5);
         {
             let pending = system
