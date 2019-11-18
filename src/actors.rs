@@ -6,10 +6,8 @@
 //! created by calling `system::spawn().with()` with any kind of function or closure that
 //! implements the `Processor` trait.
 
-use crate::message::*;
-use crate::system::*;
-use crate::Panic;
-use crate::*;
+use crate::message::ActorMessage;
+use crate::prelude::*;
 use futures::{FutureExt, Stream};
 use log::{debug, error, warn};
 use secc::*;
