@@ -158,8 +158,6 @@ pub(crate) struct AxiomReactor {
     thread_wait_time: Duration,
     /// How long to work on an Actor before moving on to the next Wakeup.
     time_slice: Duration,
-    /// The current Actor being processed by the Reactor.
-    current_actor: Arc<Mutex<Option<Aid>>>,
 }
 
 // A little hack to dictate a loop from inside a function call.
@@ -182,7 +180,6 @@ impl AxiomReactor {
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
             thread_wait_time: system.config().thread_wait_time,
             time_slice: system.config().time_slice,
-            current_actor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -277,9 +274,6 @@ impl AxiomReactor {
         if let Some(w) = self.get_woken() {
             if let Some(task) = self.remove_waiting(&w.id) {
                 trace!("Reactor-{} received Wakeup", self.name);
-                {
-                    *self.current_actor.lock().expect("Poisoned current_actor") = Some(w.id.clone())
-                }
                 LoopResult::Ok((w, task))
             } else {
                 trace!("Reactor-{} dropping futile WakeUp", self.name);
