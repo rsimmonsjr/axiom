@@ -453,6 +453,19 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_wakes_after_no_work() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(1));
+        let aid = system.spawn().with((), simple_handler).unwrap();
+        // Sleep for a little longer than the condvar's default timeout
+        sleep(125);
+        aid.send_new(11);
+        await_received(&aid, 2, 1000).unwrap();
+        system.trigger_and_await_shutdown(None);
+    }
+
+    #[test]
     fn test_actor_awake_phases() {
         init_test_log();
 
