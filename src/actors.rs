@@ -9,7 +9,7 @@
 use crate::message::ActorMessage;
 use crate::prelude::*;
 use futures::{FutureExt, Stream};
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;

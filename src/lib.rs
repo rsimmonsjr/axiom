@@ -204,9 +204,6 @@
 //! architected code.  
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
-use serde::{Deserialize, Serialize};
-
-use secc::{SeccReceiver, SeccSender};
 use std::any::Any;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -257,51 +254,49 @@ impl From<Box<dyn Any + Send + 'static>> for Panic {
 }
 
 #[cfg(test)]
-#[derive(Clone)]
-pub struct AssertCollect {
-    tx: SeccSender<(bool, String)>,
-    rx: SeccReceiver<(bool, String)>,
-}
-
-#[cfg(test)]
-impl AssertCollect {
-    pub fn new() -> Self {
-        use std::time::Duration;
-        let (tx, rx) = secc::create(256, Duration::from_millis(10));
-        Self { tx, rx }
-    }
-
-    pub fn assert(&self, cond: bool, msg: impl Into<String>) {
-        let m = msg.into();
-        self.tx.send((cond, m.clone())).unwrap();
-
-        if !cond {
-            panic!("{}", m)
-        }
-    }
-
-    pub fn panic(&self, msg: impl Into<String>) -> ! {
-        let m = msg.into();
-        self.tx.send((false, m.clone())).unwrap();
-        panic!("{}", m)
-    }
-
-    pub fn collect(&self) {
-        while let Ok((cond, s)) = self.rx.receive() {
-            assert!(cond, "{}", s);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
+    use std::thread;
     use std::time::Duration;
 
     use log::LevelFilter;
+    use secc::{SeccReceiver, SeccSender};
     use serde::{Deserialize, Serialize};
 
     use super::*;
-    use std::thread;
+
+    #[derive(Clone)]
+    pub struct AssertCollect {
+        tx: SeccSender<(bool, String)>,
+        rx: SeccReceiver<(bool, String)>,
+    }
+
+    impl AssertCollect {
+        pub fn new() -> Self {
+            let (tx, rx) = secc::create(256, Duration::from_millis(10));
+            Self { tx, rx }
+        }
+
+        pub fn assert(&self, cond: bool, msg: impl Into<String>) {
+            let m = msg.into();
+            self.tx.send((cond, m.clone())).unwrap();
+
+            if !cond {
+                panic!("{}", m)
+            }
+        }
+
+        pub fn panic(&self, msg: impl Into<String>) -> ! {
+            let m = msg.into();
+            self.tx.send((false, m.clone())).unwrap();
+            panic!("{}", m)
+        }
+
+        pub fn collect(&self) {
+            while let Ok((cond, s)) = self.rx.receive() {
+                assert!(cond, "{}", s);
+            }
+        }
+    }
 
     pub fn init_test_log() {
         let _ = env_logger::builder()

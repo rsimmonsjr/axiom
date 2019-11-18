@@ -6,7 +6,7 @@ use crate::prelude::*;
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
-use log::{debug, trace};
+use log::{debug, info, trace};
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -55,11 +55,13 @@ impl AxiomExecutor {
             self.reactors.insert(i, reactor.clone());
             self.actors_per_reactor.insert(i, 0);
             let sys = system.clone();
+            info!("Spawning Reactors");
             self.thread_pool
-                .spawn(format!("ActorReactor-{}", reactor.name), move || {
+                .spawn(format!("Reactor-{}", reactor.name), move || {
                     sys.init_current();
                     futures::executor::enter().expect("Executor nested in other executor");
                     loop {
+                        // `AxiomReactor::thread` returns true if it's set to be ran again.
                         if !reactor.thread() {
                             break;
                         }
@@ -80,10 +82,17 @@ impl AxiomExecutor {
     /// This wakes an Actor in the Executor which will cause its future to be polled. The Aid,
     /// through the ActorSystem, will call this on Message Send.
     pub(crate) fn wake(&self, id: Aid) {
+        trace!("Waking Actor `{}`", id.name_or_uuid());
         // Pull the Task
         let task = match self.sleeping.remove(&id) {
             Some((_, task)) => task,
-            None => return, // The Actor is already awake.
+            None => {
+                debug!(
+                    "Actor `{}` not in Executor - already woken or stopped",
+                    id.name_or_uuid()
+                );
+                return;
+            }
         };
         // Get the optimal Reactor
         let destination = self.get_reactor_with_least_actors();
@@ -95,6 +104,8 @@ impl AxiomExecutor {
 
     /// Iterates over the actors-per-reactor collection, and finds the Reactor with the least number
     /// of Actors.
+    ///
+    /// Note: while this is a little race-y, it's acceptable. It will produce adequate distribution.
     fn get_reactor_with_least_actors(&self) -> u16 {
         let mut iter_state = (0u16, u32::max_value());
         for i in self.actors_per_reactor.iter() {
@@ -107,17 +118,23 @@ impl AxiomExecutor {
 
     /// When a Reactor is done with an Actor, it will be sent here, and the Executor will decrement
     /// the Actor count for that Reactor.
-    fn return_task(&self, task: Task, reactor: u16) {
+    fn return_task(&self, task: Task, reactor: &AxiomReactor) {
+        trace!(
+            "Actor {} returned from Reactor {}",
+            task.id.name_or_uuid(),
+            reactor.name
+        );
         // Put the Task back.
         self.sleeping.insert(task.id.clone(), task);
         // Decrement the Reactor's Actor count.
-        *self.actors_per_reactor.get_mut(&reactor).unwrap() -= 1;
+        *self.actors_per_reactor.get_mut(&reactor.id).unwrap() -= 1;
     }
 
     /// Block until the threads have finished shutting down. This MUST be called AFTER shutdown is
     /// triggered.
     pub(crate) fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
         let start = Instant::now();
+        info!("Notifying Reactor threads, so they can end gracefully");
         for r in self.reactors.iter() {
             match r.thread_condvar.read() {
                 Ok(g) => g.1.notify_one(),
@@ -125,10 +142,12 @@ impl AxiomExecutor {
             }
         }
         let timeout = timeout.into().map(|t| t - (Instant::now() - start));
+        info!("Awaiting the threadpool's shutdown");
         self.thread_pool.await_shutdown(timeout)
     }
 }
 
+/// Result of awaiting shutdown.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ShutdownResult {
     Ok,
@@ -171,6 +190,7 @@ impl AxiomReactor {
     /// Creates a new Reactor
     fn new(executor: AxiomExecutor, system: &ActorSystem, id: u16) -> AxiomReactor {
         let name = format!("{:08x?}-{}", system.data.uuid.as_fields().0, id);
+        debug!("Creating Reactor {}", name);
 
         AxiomReactor {
             id,
@@ -228,7 +248,7 @@ impl AxiomReactor {
                 Poll::Ready(result) => {
                     // Ready(None) indicates an empty message queue. Time to sleep.
                     if let None = result {
-                        self.executor.return_task(task, self.id);
+                        self.executor.return_task(task, self);
                         break;
                     }
                     // The Actor should handle its own internal modifications in response to the
@@ -259,7 +279,6 @@ impl AxiomReactor {
                     break;
                 }
             }
-            trace!("Reactor-{} executed poll", self.name);
         }
         true
     }
@@ -277,7 +296,7 @@ impl AxiomReactor {
                 trace!("Reactor-{} received Wakeup", self.name);
                 LoopResult::Ok((w, task))
             } else {
-                trace!("Reactor-{} dropping futile WakeUp", self.name);
+                trace!("Reactor-{} dropping spurious WakeUp", self.name);
                 LoopResult::Continue
             }
         } else {
@@ -381,8 +400,8 @@ struct Wakeup {
 #[cfg(test)]
 mod tests {
     use crate::executor::ShutdownResult;
+    use crate::prelude::*;
     use crate::tests::*;
-    use crate::*;
     use log::*;
     use std::future::Future;
     use std::pin::Pin;
