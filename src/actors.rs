@@ -60,6 +60,51 @@ pub enum Status {
     Stop,
 }
 
+/// Errors returned by the Aid
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AidError {
+    /// This error is returned when a message cannot be converted to bincode. This will happen if
+    /// the message is not Serde serializable and the user has not implemented ActorMessage to
+    /// provide the correct implementation.
+    CantConvertToBincode,
+
+    /// This error is returned when a message cannot be converted from bincode. This will happen
+    /// ifg the message is not Serde serializable and the user has not implemented ActorMessage to
+    /// provide the correct implementation.
+    CantConvertFromBincode,
+
+    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
+    /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
+    /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
+    ActorAlreadyStopped,
+
+    /// Error returned when an Aid is not local and a user is trying to do operations that
+    /// only work on local Aid instances.
+    AidNotLocal,
+
+    /// Used when unable to send to an actor's message channel within the scheduled timeout
+    /// configured in the actor system. This could result from the actor's channel being too
+    /// small to accommodate the message flow, the lack of thread count to process messages fast
+    /// enough to keep up with the flow or something wrong with the actor itself that it is
+    /// taking too long to clear the messages.
+    SendTimedOut(Aid),
+
+    /// Used when unable to schedule the actor for work in the work channel. This could be a
+    /// result of having a work channel that is too small to accommodate the number of actors
+    /// being concurrently scheduled, not enough threads to process actors in the channel fast
+    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of
+    /// time or not finish at all.
+    UnableToSchedule,
+}
+
+impl std::fmt::Display for AidError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for AidError {}
+
 /// An enum that holds a sender for an actor.
 ///
 /// An [`Aid`] uses the sender to send messages to the destination actor. Messages that are
@@ -273,7 +318,6 @@ impl Aid {
                 } else {
                     match sender.send_await_timeout(message, system.config().send_timeout) {
                         Ok(_) => {
-                            // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
                             if sender.receivable() == 1 {
                                 system.schedule(self.clone());
                             };
@@ -425,14 +469,18 @@ impl Aid {
                 }
             }
             ActorSender::Remote { sender } => {
-                sender
-                    .send_await(WireMessage::DelayedActorMessage {
-                        duration,
-                        actor_uuid: self.data.uuid,
-                        system_uuid: self.data.system_uuid,
-                        message,
-                    })
-                    .unwrap(); // FIXME Get rid of this unwrap!
+                if let Err(err) = sender.send_await(WireMessage::DelayedActorMessage {
+                    duration,
+                    actor_uuid: self.data.uuid,
+                    system_uuid: self.data.system_uuid,
+                    message,
+                }) {
+                    // Right now, this is the full extent of errors, but if that should change, it
+                    // should create a compiler error.
+                    return match err {
+                        SeccErrors::Full(_) | SeccErrors::Empty => Ok(()),
+                    };
+                }
                 Ok(())
             }
         }
@@ -589,6 +637,7 @@ impl Aid {
     pub(crate) fn stop(&self) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local { stopped, .. } => {
+                trace!("Stopping local Actor");
                 stopped.fetch_or(true, Ordering::AcqRel);
                 Ok(())
             }
@@ -713,8 +762,8 @@ impl ActorBuilder {
         F: Processor<S, R> + 'static,
     {
         let (actor, stream) = Actor::new(self.system.clone(), &self, state, processor);
-        let result = self.system.register_actor(actor, stream)?;
-        Ok(result)
+        debug!("Actor created: {}", actor.context.aid.uuid());
+        self.system.register_actor(actor, stream)
     }
 
     /// Set the name of the actor to the given string.
@@ -860,9 +909,25 @@ impl ActorStream {
         let mut stopping = false;
 
         match result {
-            Ok(Status::Done) => self.receiver.pop().unwrap(),
-            Ok(Status::Skip) => self.receiver.skip().unwrap(),
+            Ok(Status::Done) => {
+                trace!(
+                    "Actor {} finished processing a message",
+                    self.context.aid.uuid()
+                );
+                self.receiver.pop().unwrap()
+            }
+            Ok(Status::Skip) => {
+                trace!(
+                    "Actor {} skipped processing a message",
+                    self.context.aid.uuid()
+                );
+                self.receiver.skip().unwrap()
+            }
             Ok(Status::Reset) => {
+                trace!(
+                    "Actor {} finished processing a message and reset the cursor",
+                    self.context.aid.uuid()
+                );
                 self.receiver.pop().unwrap();
                 self.receiver.reset_skip().unwrap();
             }
@@ -906,6 +971,7 @@ impl Stream for ActorStream {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        trace!("Actor {} is being polled", self.context.aid.name_or_uuid());
         // If we have a pending future, that's what we poll.
         if let Some(mut pending) = self.pending.take() {
             // Poll, ensure we respect stopping condition.
@@ -925,6 +991,7 @@ impl Stream for ActorStream {
                     // We're stopping after this future, mark as such
                     if let Some(m) = msg.content_as::<SystemMsg>() {
                         if let SystemMsg::Stop = *m {
+                            trace!("Actor {} received stop message", self.context.aid.uuid());
                             self.stopping = true;
                         }
                     }
@@ -936,12 +1003,21 @@ impl Stream for ActorStream {
                     match future.as_mut().poll(cx) {
                         Poll::Ready(r) => Poll::Ready(Some(self.overwrite_on_stop(r))),
                         Poll::Pending => {
+                            trace!("Actor {} is pending", self.context.aid.uuid());
                             self.pending = Some(future);
                             Poll::Pending
                         }
                     }
                 }
-                Err(_) => return Poll::Ready(None), // Ready(None) is standard for "Stream is done"
+                Err(err) => match err {
+                    // Ready(None) is standard for "Stream is depleted". The stream is effectively
+                    // monadic around the message queue, so if the channel is depleted, the stream
+                    // is as well. `Full` is non-contextual.
+                    //
+                    // While this is exhaustive, we're avoiding a catchall to in anticipation of
+                    // future Secc errors we would *want* to handle.
+                    SeccErrors::Empty | SeccErrors::Full(_) => Poll::Ready(None),
+                },
             }
         }
     }

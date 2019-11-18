@@ -223,51 +223,6 @@ pub mod system;
 
 pub mod prelude;
 
-/// Errors returned by the Aid
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AidError {
-    /// This error is returned when a message cannot be converted to bincode. This will happen if
-    /// the message is not Serde serializable and the user has not implemented ActorMessage to
-    /// provide the correct implementation.
-    CantConvertToBincode,
-
-    /// This error is returned when a message cannot be converted from bincode. This will happen
-    /// ifg the message is not Serde serializable and the user has not implemented ActorMessage to
-    /// provide the correct implementation.
-    CantConvertFromBincode,
-
-    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
-    /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
-    /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
-    ActorAlreadyStopped,
-
-    /// Error returned when an Aid is not local and a user is trying to do operations that
-    /// only work on local Aid instances.
-    AidNotLocal,
-
-    /// Used when unable to send to an actor's message channel within the scheduled timeout
-    /// configured in the actor system. This could result from the actor's channel being too
-    /// small to accommodate the message flow, the lack of thread count to process messages fast
-    /// enough to keep up with the flow or something wrong with the actor itself that it is
-    /// taking too long to clear the messages.
-    SendTimedOut(Aid),
-
-    /// Used when unable to schedule the actor for work in the work channel. This could be a
-    /// result of having a work channel that is too small to accommodate the number of actors
-    /// being concurrently scheduled, not enough threads to process actors in the channel fast
-    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of
-    /// time or not finish at all.
-    UnableToSchedule,
-}
-
-impl std::fmt::Display for AidError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for AidError {}
-
 /// A helper alias to ensure returned errors conform as needed.
 pub type StdError = Box<dyn Error + Send + Sync + 'static>;
 
