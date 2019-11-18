@@ -58,6 +58,7 @@ impl AxiomExecutor {
             self.thread_pool
                 .spawn(format!("ActorReactor-{}", reactor.name), move || {
                     sys.init_current();
+                    futures::executor::enter().expect("Executor nested in other executor");
                     loop {
                         if !reactor.thread() {
                             break;
