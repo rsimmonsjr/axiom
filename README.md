@@ -17,7 +17,6 @@ rather a new implementation deriving inspiration from the good parts of those pr
 * 2019-11-xx 0.2.0
   * Massive internal refactor in order to support async Actors. There are very few breaking changes,
   so porting to this version will be relatively simple.
-  * NOTE: Until Rust 1.39.0 hits Stable (November 7th), Axiom will require Beta Rust to compile.
   * BREAKING CHANGE: The signature for Processors has changed from references for `Context` and 
   `Message` to values. For closures-as-actors, wrap the body in an `async` block. `move |...| {...}`
   becomes `|...| async move { ... }`. For regular function syntax, simply add `async` in front of 
@@ -35,9 +34,16 @@ rather a new implementation deriving inspiration from the good parts of those pr
           R: Future<Output = AxiomResult<S>> + Send + 'static,
           F: (FnMut(S, Context, Message) -> R) + Send + Sync + 'static  {} 
   ```
-  * The user should take note that their actor will run now when it is POLLED and not immediately 
-  as this may have some effect on the actor. Although depending on timing in actor systems is 
-  chancy at best, please be aware of this. 
+  * The user should take be aware that, at runtime, Actors will follow the semantics of Rust Futures. This means that an
+  Actor awaiting a future will not process any messages nor will continue executing until that future is ready to be 
+  polled again. While async/await will provide ergonomic usage of async APIs, this can be a concern and can affect 
+  timing.
+  * A prelude has been introduced. Attempts will be made at keeping the prelude relatively the same even across major 
+  versions, and we recommend using it whenever possible.
+  * BREAKING: Actors are now panic-tolerant! This means `assert`s and `panic`s will be caught and converted, treated the
+  same as errors. Errors should already be considered fatal, as Actors should handle any errors in their own scope.
+  * BREAKING: Error types have been broken up to be more context-specific.
+  * More `log` points have been added across the codebase.
 
 [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 
