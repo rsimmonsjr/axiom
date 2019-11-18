@@ -61,7 +61,7 @@
 //! Axiom in only a few lines of code.
 //!
 //! ```rust
-//! use axiom::*;
+//! use axiom::prelude::*;
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
@@ -108,7 +108,7 @@
 //! handles a couple of different message types:
 //!
 //! ```rust
-//! use axiom::*;
+//! use axiom::prelude::*;
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
@@ -206,14 +206,6 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::actors::Aid;
-pub use crate::actors::Context;
-pub use crate::actors::Status;
-pub use crate::message::Message;
-pub use crate::system::ActorSystem;
-pub use crate::system::ActorSystemConfig;
-pub use crate::system::SystemMsg;
-pub use crate::system::WireMessage;
 use secc::{SeccReceiver, SeccSender};
 use std::any::Any;
 use std::error::Error;
@@ -221,12 +213,15 @@ use std::fmt::{Display, Formatter};
 
 // Re-export futures so the user doesn't need to import it.
 pub use futures;
+use prelude::*;
 
 pub mod actors;
 pub mod cluster;
 mod executor;
 pub mod message;
 pub mod system;
+
+pub mod prelude;
 
 /// Errors returned by the Aid
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,7 +375,9 @@ mod tests {
             if Instant::elapsed(&start) > duration {
                 return Err(format!(
                     "Timed out after {}ms! Messages received: {}; Messages expected: {}",
-                    timeout_ms, aid.received().unwrap(), count
+                    timeout_ms,
+                    aid.received().unwrap(),
+                    count
                 ));
             }
         }

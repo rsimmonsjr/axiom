@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::*;
+use crate::prelude::*;
 
 /// Encapsulates information on a connection to another actor system.
 struct ConnectionData {

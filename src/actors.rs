@@ -235,7 +235,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -302,7 +302,7 @@ impl Aid {
     /// The `Arc` sent will be transferred to the ownership of the `Aid`.
     ///
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -343,7 +343,7 @@ impl Aid {
     /// If the code wishes to resend a message it should just call just call `send(msg)`.
     ///
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -386,7 +386,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -445,7 +445,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -487,7 +487,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -947,7 +947,7 @@ fn inner_poll(
         Err(e) => {
             warn!("Actor panicked! Catching as error");
             Poll::Ready(Err(Panic::from(e).into()))
-        },
+        }
     }
 }
 

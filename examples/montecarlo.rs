@@ -8,7 +8,7 @@
 //! * Using monitors to allow a manager actor to know when each of its child actors have completed
 //!   their work.
 
-use axiom::*;
+use axiom::prelude::*;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

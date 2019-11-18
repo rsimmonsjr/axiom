@@ -659,7 +659,7 @@ impl ActorSystem {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
     ///
