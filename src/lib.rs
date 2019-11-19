@@ -13,49 +13,23 @@
 //! rather a new implementation deriving inspiration from the good parts of those projects.
 //!
 //! ### What's New
-//! * 2019-09-27 0.1.0
-//!   * A lot of breaking changes have been introduced in an effort to keep them all in one release
-//!   so that the API can stabilize. Please see examples and other sources for help in integrating
-//!   all of the changes listed below.
-//!   * BREAKING CHANGE: `ActorId` has been renamed to `Aid` to facilitate communication and lower
-//!   confusion between the `uuid` field in the `Aid` and the `Aid` itself.
-//!   * BREAKING CHANGE: `Status::Processed` has been renamed to `Status::Done`.
-//!   * BREAKING CHANGE: `Status::Skipped` has been renamed to `Status::Skip`.
-//!   * BREAKING CHANGE: `Status::ResetSkip` has been renamed to `Status::Reset`.
-//!   * BREAKING CHANGE: `ActorError` has been moved to top level and renamed to `AxiomError`.
-//!   * BREAKING CHANGE: `find_by_name` and `find_by_uuid` have been removed from `Aid` as the
-//!   mechanism for looking up actors doesn't make sense the way it was before.
-//!   * BREAKING CHANGE: `MessageContent` was unintentionally public and is now private.
-//!   * BREAKING CHANGE: Changed `Processor` to take a `&Context` rather than `Aid`.
-//!   * BREAKING CHANGE: The `send`, `send_new` and `send_after` methods now return a result type
-//!   that the user must manage.
-//!   * BREAKING CHANGE: All actor processors now should return `AxiomResult` which will allow them
-//!   to use the `?` syntax for all functions that return `AxiomError` and return their own errors.
-//!   * BREAKING CHANGE: Actors are now spawned with the builder pattern. This allows the
-//!   configuration of an actor and leaves the door open for future flexibility. See documentation
-//!   for more details.
-//!   * Created a `Context` type that holds references to the `Aid` and `ActorSystem`.
-//!   * `Processor` functions can get a reference to the `Aid` of the actor from `Context`.
-//!   * `Processor` functions can get a reference to the `ActorSystem` from `Context`.
-//!   * The methods `find_aid_by_uuid` and `find_aid_by_name` are added to the `ActorSystem`.
-//!   * Calling `system.init_current()` is unneeded unless deserializing `Aid`s outside a
-//!   `Processor`.
-//!   * Metrics methods like `received()` in `Aid` return `Result` instead of using `panic!`.
-//!   * Changed internal maps to use crate `dashmap` which expands dependencies but increases
-//!   performance.
-//!   * New methods `send_new` and `send_new_after` are available to shorten boilerplate.
-//!   * Added a named system actor, which is registered under the name `System`, that is started
-//!   as the 1st actor in an `ActorSystem`.
-//!   * Added a method `system_actor_aid` to easily look up the `System` actor.
-//!   * Added additional configuration options to `ActorSystemConfig`.
-//!   * System will warn if an actor takes longer than the configured `warn_threshold` to process a
-//!   message.
-//!   * Instead of processing one message per receive, the system will now process pending messages
-//!   up until the configured `time_slice`, allowing optimized processing for quick messages.
-//!   * The default `message_channel_size` for actors is now configurable for the actor system as
-//!   a whole.
-//!   * Instead of waiting forever on a send, the system will wait for the configured
-//!   `send_timeout` before returning a timeout error to the caller.
+//! * 2019-11-xx 0.2.0
+//!   * Massive internal refactor in order to support async Actors using Rust futures.
+//!   * BREAKING CHANGE: The signature for Processors has changed from references for `Context` and
+//!   `Message` to values. For closures-as-actors, wrap the body in an `async` block.
+//!   `move |...| {...}` becomes `|...| async move { ... }`. For regular function syntax, simply
+//!   add `async` in front of `fn`.
+//!   * BREAKING CHANGE: Due to the ongoing development around async closures, the user will have
+//!   to put an async block inside handlers that are closures. See the examples for more
+//!   information.
+//!   * BREAKING CHANGE: Due to the nature of futures, the actor's processor cannot be given a
+//!   mutable reference to the state of the actor. The state needs to live at least as long as
+//!   the future and our research could find no way to do this easily. So now when the actor
+//!   returns a status it will return the new state as well (Erlang style). See the examples for
+//!   more info.
+//!   * The user should take note that their actor will run now when it is POLLED and not
+//!   immediately as this may have some effect on the actor. Although depending on timing in actor
+//!   systems is chancy at best anyway, it's even more unreliable now.
 //!
 //! [Release Notes for All Versions](https://github.com/rsimmonsjr/axiom/blob/master/RELEASE_NOTES.md)
 //!
@@ -87,7 +61,7 @@
 //! Axiom in only a few lines of code.
 //!
 //! ```rust
-//! use axiom::*;
+//! use axiom::prelude::*;
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
@@ -97,7 +71,9 @@
 //!     .spawn()
 //!     .with(
 //!         0 as usize,
-//!         |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
+//!         |state: usize, _context: Context, _message: Message| async move {
+//!             Ok((state, Status::Done))
+//!         }
 //!     )
 //!     .unwrap();
 //!
@@ -119,14 +95,20 @@
 //! aid.send_new_after(7, Duration::from_millis(10)).unwrap();
 //! ```
 //! This code creates an actor system, fetches a builder for an actor via the `spawn()` method,
-//! spawns an actor and finally sends the actor a message. Creating an Axiom actor is literally
+//! spawns an actor and finally sends the actor a message. Once the actor is done processing a
+//! message it returns the new state of the actor and the status after handling this message. In
+//! this case we didnt change the state so we just return it. Creating an Axiom actor is literally
 //! that easy but there is a lot more functionality available as well.
+//!
+//! Keep in mind that if you are capturing variables from the environment you will have to wrap
+//! the `async move {}` block in another block and then move your variables into the first block.
+//! Please see the test cases for more examples of this.
 //!
 //! If you want to create an actor with a struct that is simple as well. Let's create one that
 //! handles a couple of different message types:
 //!
 //! ```rust
-//! use axiom::*;
+//! use axiom::prelude::*;
 //! use std::sync::Arc;
 //!
 //! let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
@@ -136,28 +118,27 @@
 //! }
 //!
 //! impl Data {
-//!     fn handle_bool(&mut self, message: &bool) -> AxiomResult {
-//!         if *message {
+//!     fn handle_bool(mut self, message: bool) -> ActorResult<Self> {
+//!         if message {
 //!             self.value += 1;
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Ok(Status::Done)
+//!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle_i32(&mut self, message: &i32) -> AxiomResult {
-//!         self.value += *message;
-//!         Ok(Status::Done)
+//!     fn handle_i32(mut self, message: i32) -> ActorResult<Self> {
+//!         self.value += message;
+//!         Ok((self, Status::Done))
 //!     }
 //!
-//!     fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
+//!     async fn handle(mut self, _context: Context, message: Message) -> ActorResult<Self> {
 //!         if let Some(msg) = message.content_as::<bool>() {
-//!             self.handle_bool(&*msg)
+//!             self.handle_bool(*msg)
 //!         } else if let Some(msg) = message.content_as::<i32>() {
-//!             self.handle_i32(&*msg)
+//!             self.handle_i32(*msg)
 //!         } else {
 //!             panic!("Failed to dispatch properly");
-//!             Ok(Status::Stop)
 //!         }
 //!     }
 //! }
@@ -223,106 +204,115 @@
 //! architected code.  
 //! 7. **A huge emphasis is put on crate user ergonomics.** Axiom should be easy to use.
 
+use std::any::Any;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
+// Re-export futures so the user doesn't need to import it.
+pub use futures;
+use prelude::*;
+
 pub mod actors;
 pub mod cluster;
+mod executor;
 pub mod message;
 pub mod system;
 
-pub use crate::actors::Aid;
-pub use crate::actors::Context;
-pub use crate::actors::Status;
-pub use crate::message::Message;
-pub use crate::system::ActorSystem;
-pub use crate::system::ActorSystemConfig;
-pub use crate::system::SystemMsg;
-pub use crate::system::WireMessage;
+pub mod prelude;
 
-use serde::{Deserialize, Serialize};
-
-/// Errors returned by various parts of Axiom.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AxiomError {
-    /// This error is returned when a message cannot be converted to bincode. This will happen if
-    /// the message is not Serde serializable and the user has not implemented ActorMessage to
-    /// provide the correct implementation.
-    CantConvertToBincode,
-
-    /// This error is returned when a message cannot be converted from bincode. This will happen
-    /// ifg the message is not Serde serailizable and the user has not implemented ActorMessage to
-    /// provide the correct implementation.
-    CantConvertFromBincode,
-
-    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
-    /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
-    /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
-    ActorAlreadyStopped,
-
-    /// An error returned when an actor is already using a local name at the time the user tries
-    /// to register that name for a new actor. The error contains the name that was attempted
-    /// to be registered.
-    NameAlreadyUsed(String),
-
-    /// Error returned when an Aid is not local and a user is trying to do operations that
-    /// only work on local Aid instances.
-    AidNotLocal,
-
-    /// Used when unable to send to an actor's message channel within the scheduled timeout
-    /// configured in the actor system. This could result from the actor's channel being too
-    /// small to accomodate the message flow, the lack of thread count to process messages fast
-    /// enough to keep up with the flow or something wrong with the actor itself that it is
-    /// taking too long to clear the messages.
-    SendTimedOut(Aid),
-
-    /// Used when unable to schedule the actor for work in the work channel. This could be a
-    /// result of having a work channel that is too small to accommodate the number of actors
-    /// being concurrently scheduled, not enough threads to process actors in the channel fast
-    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of
-    /// time or not finish at all.
-    UnableToSchedule,
-
-    /// Returned by actors when there is an error in the actor. The optional enclosed string
-    /// will be sent to monitoring actors and can tell the monitoring actors the nature of the
-    /// error that occurred.
-    ActorError(Option<String>),
-
-    /// Returned when calling `ActorSystem::await_shutdown_with_timeout` and the timeout expires
-    /// or some other error occurs while awaiting the shutdown.
-    ShutdownError(String),
-}
-
-impl std::fmt::Display for AxiomError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for AxiomError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
+/// A helper alias to ensure returned errors conform as needed.
+pub type StdError = Box<dyn Error + Send + Sync + 'static>;
 
 /// A type for a result from an actor's message processor.
-pub type AxiomResult = Result<Status, AxiomError>;
+/// A Result::Err is treated as a fatal error, and the Actor will be stopped.
+pub type ActorResult<State> = Result<(State, Status), StdError>;
+
+#[derive(Debug)]
+pub struct Panic {
+    panic_payload: String,
+}
+
+impl Display for Panic {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.panic_payload)
+    }
+}
+
+impl Error for Panic {}
+
+impl From<Box<dyn Any + Send + 'static>> for Panic {
+    fn from(val: Box<dyn Any + Send + 'static>) -> Self {
+        let panic_payload = match val.downcast::<&'static str>() {
+            Ok(s) => String::from(*s),
+            Err(val) => match val.downcast::<String>() {
+                Ok(s) => *s,
+                Err(_) => String::from("Panic payload unserializable"),
+            },
+        };
+        Self { panic_payload }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use log::LevelFilter;
-    use serde::{Deserialize, Serialize};
+    use std::thread;
     use std::time::Duration;
+
+    use log::LevelFilter;
+    use secc::{SeccReceiver, SeccSender};
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+
+    #[derive(Clone)]
+    pub struct AssertCollect {
+        tx: SeccSender<(bool, String)>,
+        rx: SeccReceiver<(bool, String)>,
+    }
+
+    impl AssertCollect {
+        pub fn new() -> Self {
+            let (tx, rx) = secc::create(256, Duration::from_millis(10));
+            Self { tx, rx }
+        }
+
+        pub fn assert(&self, cond: bool, msg: impl Into<String>) {
+            let m = msg.into();
+            self.tx.send((cond, m.clone())).unwrap();
+
+            if !cond {
+                panic!("{}", m)
+            }
+        }
+
+        pub fn panic(&self, msg: impl Into<String>) -> ! {
+            let m = msg.into();
+            self.tx.send((false, m.clone())).unwrap();
+            panic!("{}", m)
+        }
+
+        pub fn collect(&self) {
+            while let Ok((cond, s)) = self.rx.receive() {
+                assert!(cond, "{}", s);
+            }
+        }
+    }
 
     pub fn init_test_log() {
         let _ = env_logger::builder()
-            .filter_level(LevelFilter::Debug)
+            .filter_level(LevelFilter::Warn)
             .is_test(true)
             .try_init();
     }
 
+    pub fn sleep(millis: u64) {
+        thread::sleep(Duration::from_millis(millis))
+    }
+
     /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
-    pub fn simple_handler(_state: &mut usize, _: &Context, _: &Message) -> AxiomResult {
-        Ok(Status::Done)
+    pub async fn simple_handler(_: (), _: Context, _: Message) -> ActorResult<()> {
+        Ok(((), Status::Done))
     }
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and
@@ -334,12 +324,26 @@ mod tests {
         while aid.received().unwrap() < count as usize {
             if Instant::elapsed(&start) > duration {
                 return Err(format!(
-                    "Timed out! count: {} timeout_ms: {}",
-                    count, timeout_ms
+                    "Timed out after {}ms! Messages received: {}; Messages expected: {}",
+                    timeout_ms,
+                    aid.received().unwrap(),
+                    count
                 ));
             }
         }
         Ok(())
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_assert_receive() {
+        let tracker = AssertCollect::new();
+        let t2 = tracker.clone();
+
+        let join = thread::spawn(move || t2.panic("This is a panic"));
+        let _ = join.join();
+
+        tracker.collect();
     }
 
     /// This test shows how the simplest actor can be built and used. This actor uses a closure
@@ -355,18 +359,17 @@ mod tests {
         // but when that bug goes away this will be even simpler.
         let aid = system
             .spawn()
-            .with(
-                0 as usize,
-                |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
-            )
+            .with((), |_: (), _: Context, _: Message| {
+                async { Ok(((), Status::Done)) }
+            })
             .unwrap();
 
         // Send a message to the actor.
         aid.send_new(11).unwrap();
 
-        // Wait for the message to get there because test is asynchronous.
-        await_received(&aid, 1, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        // The actor will get two messages including the Start message.
+        await_received(&aid, 2, 1000).unwrap();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test shows how the simplest struct-based actor can be built and used. This actor
@@ -383,8 +386,8 @@ mod tests {
         struct Data {}
 
         impl Data {
-            fn handle(&mut self, _context: &Context, _message: &Message) -> AxiomResult {
-                Ok(Status::Done)
+            async fn handle(self, _: Context, _: Message) -> ActorResult<Self> {
+                Ok((self, Status::Done))
             }
         }
 
@@ -393,9 +396,8 @@ mod tests {
         // Send a message to the actor.
         aid.send_new(11).unwrap();
 
-        // Wait for the message to get there because test is asynchronous.
-        await_received(&aid, 1, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        await_received(&aid, 2, 1000).unwrap();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test shows how a closure based actor can be created to process different kinds of
@@ -405,27 +407,32 @@ mod tests {
     fn test_dispatching_with_closure() {
         init_test_log();
 
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let starting_state: usize = 0 as usize;
-        let closure = |state: &mut usize, context: &Context, message: &Message| {
-            // Expected messages in the expected order.
-            let expected: Vec<i32> = vec![11, 13, 17];
-            // Attempt to downcast to expected message.
-            if let Some(_msg) = message.content_as::<SystemMsg>() {
-                *state += 1;
-                Ok(Status::Done)
-            } else if let Some(msg) = message.content_as::<i32>() {
-                assert_eq!(expected[*state - 1], *msg);
-                assert_eq!(*state, context.aid.received().unwrap());
-                *state += 1;
-                Ok(Status::Done)
-            } else if let Some(_msg) = message.content_as::<SystemMsg>() {
-                // Note that we put this last because it only is ever received once, we
-                // want the most frequently received messages first.
-                Ok(Status::Done)
-            } else {
-                panic!("Failed to dispatch properly");
+        let closure = move |mut state: usize, context: Context, message: Message| {
+            let t = t.clone();
+            async move {
+                // Expected messages in the expected order.
+                let expected: Vec<i32> = vec![11, 13, 17];
+                // Attempt to downcast to expected message.
+                if let Some(_msg) = message.content_as::<SystemMsg>() {
+                    state += 1;
+                    Ok((state, Status::Done))
+                } else if let Some(msg) = message.content_as::<i32>() {
+                    t.assert(expected[state - 1] == *msg, "Unexpected message content");
+                    t.assert(state == context.aid.received().unwrap(), "Unexpected state");
+                    state += 1;
+                    Ok((state, Status::Done))
+                } else if let Some(_msg) = message.content_as::<SystemMsg>() {
+                    // Note that we put this last because it only is ever received once, we
+                    // want the most frequently received messages first.
+                    Ok((state, Status::Done))
+                } else {
+                    t.panic("Failed to dispatch properly")
+                }
             }
         };
 
@@ -444,9 +451,9 @@ mod tests {
         aid.send_new(17 as i32).unwrap();
         assert_eq!(4, aid.sent().unwrap());
 
-        // Wait for all of the messages to get there because test is asynchronous.
         await_received(&aid, 4, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// This test shows how a struct-based actor can be used and process different kinds of
@@ -456,6 +463,7 @@ mod tests {
     fn test_dispatching_with_struct() {
         init_test_log();
 
+        let tracker = AssertCollect::new();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         // We create a basic struct with a handler and use that handler to dispatch to other
@@ -463,39 +471,43 @@ mod tests {
         // and there is nothing forcing the handler to be an inherent method.
         struct Data {
             value: i32,
+            tracker: AssertCollect,
         }
 
         impl Data {
-            fn handle_bool(&mut self, message: &bool) -> AxiomResult {
-                if *message {
+            fn handle_bool(mut self, message: bool) -> ActorResult<Self> {
+                if message {
                     self.value += 1;
                 } else {
                     self.value -= 1;
                 }
-                Ok(Status::Done) // This assertion will fail but we still have to return.
+                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle_i32(&mut self, message: &i32) -> AxiomResult {
-                self.value += *message;
-                Ok(Status::Done) // This assertion will fail but we still have to return.
+            fn handle_i32(mut self, message: i32) -> ActorResult<Self> {
+                self.value += message;
+                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
             }
 
-            fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
+            async fn handle(self, _context: Context, message: Message) -> ActorResult<Self> {
                 if let Some(msg) = message.content_as::<bool>() {
-                    self.handle_bool(&*msg)
+                    self.handle_bool(*msg)
                 } else if let Some(msg) = message.content_as::<i32>() {
-                    self.handle_i32(&*msg)
+                    self.handle_i32(*msg)
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Ok(Status::Done)
+                    Ok((self, Status::Done))
                 } else {
-                    panic!("Failed to dispatch properly");
+                    self.tracker.panic("Failed to dispatch properly")
                 }
             }
         }
 
-        let data = Data { value: 0 };
+        let data = Data {
+            value: 0,
+            tracker: tracker.clone(),
+        };
 
         let aid = system.spawn().with(data, Data::handle).unwrap();
 
@@ -505,9 +517,36 @@ mod tests {
         aid.send_new(true).unwrap();
         aid.send_new(false).unwrap();
 
-        // Wait for all of the messages to get there because this test is asynchronous.
         await_received(&aid, 4, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
+        tracker.collect();
+    }
+
+    /// Tests and demonstrates the process to create a closure that captures the environment
+    /// outside the closure in a manner sufficient to be used in a future.
+    #[test]
+    fn test_closure_with_move() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let target_aid = system.spawn().with((), simple_handler).unwrap();
+
+        let aid_moved = target_aid.clone(); // clone for the closure
+        let aid = system
+            .spawn()
+            .with((), move |_: (), _: Context, _: Message| {
+                // Each future needs its own copy of the target aid.
+                let tgt = aid_moved.clone();
+                async move {
+                    tgt.send_new(11)?;
+                    Ok(((), Status::Done))
+                }
+            })
+            .unwrap();
+
+        aid.send_new(11).unwrap();
+        await_received(&target_aid, 2, 1000).unwrap();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests an example where one actor starts another actor, the actors exchange a simple
@@ -524,53 +563,47 @@ mod tests {
             Pong,
         }
 
-        fn ping(_state: &mut usize, context: &Context, message: &Message) -> AxiomResult {
+        async fn ping(_: (), context: Context, message: Message) -> ActorResult<()> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
-                        Ok(Status::Done)
+                        Ok(((), Status::Done))
                     }
-                    _ => Err(AxiomError::ActorError(Some(
-                        "Unexpected message".to_string(),
-                    ))),
+                    _ => Err("Unexpected message".to_string().into()),
                 }
             } else if let Some(msg) = message.content_as::<SystemMsg>() {
                 // Start messages happen only once so we keep them last.
                 match &*msg {
                     SystemMsg::Start => {
                         // Now we will spawn a new actor to handle our pong and send to it.
-                        let pong_aid = context.system.spawn().with(0, pong)?;
+                        let pong_aid = context.system.spawn().with((), pong)?;
                         pong_aid.send_new(PingPong::Ping(context.aid.clone()))?;
-                        Ok(Status::Done)
+                        Ok(((), Status::Done))
                     }
-                    _ => Ok(Status::Done),
+                    _ => Ok(((), Status::Done)),
                 }
             } else {
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             }
         }
 
-        fn pong(_state: &mut usize, _context: &Context, message: &Message) -> AxiomResult {
+        async fn pong(_: (), _: Context, message: Message) -> ActorResult<()> {
             if let Some(msg) = message.content_as::<PingPong>() {
                 match &*msg {
                     PingPong::Ping(from) => {
                         from.send_new(PingPong::Pong)?;
-                        Ok(Status::Done)
+                        Ok(((), Status::Done))
                     }
-                    _ => Err(AxiomError::ActorError(Some(
-                        "Unexpected message".to_string(),
-                    ))),
+                    _ => Err("Unexpected message".into()),
                 }
             } else {
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             }
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        system.spawn().with(0, ping).unwrap();
-        system.await_shutdown();
-
-        assert_eq!(2 + 2, 4);
+        system.spawn().with((), ping).unwrap();
+        system.await_shutdown(None);
     }
 }

@@ -8,7 +8,7 @@
 //! for a reference. It is designed to be the default way Axiom is clustered and thus it will be
 //! robust and well tested like the rest of Axiom.
 
-use crate::*;
+use crate::prelude::*;
 use log::{error, info};
 use secc::*;
 use std::collections::HashMap;
@@ -222,8 +222,9 @@ impl TcpClusterMgr {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::tests::*;
+
+    use super::*;
 
     #[test]
     fn test_tcp_remote_connect() {

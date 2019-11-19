@@ -8,15 +8,16 @@
 //!
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
-use crate::actors::*;
-use crate::message::*;
-use crate::*;
+use crate::actors::{Actor, ActorBuilder, ActorStream};
+use crate::executor::AxiomExecutor;
+use crate::prelude::*;
 use dashmap::DashMap;
-use log::{debug, error, warn};
+use log::{debug, error, info, trace, warn};
 use once_cell::sync::OnceCell;
-use secc::*;
+use secc::{SeccReceiver, SeccSender};
 use serde::{Deserialize, Serialize};
 use std::collections::{BinaryHeap, HashSet};
+use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -48,7 +49,7 @@ pub enum SystemMsg {
 
     /// A message sent to an actor when a monitored actor is stopped and thus not able to
     /// process additional messages. The value is the `aid` of the actor that stopped.
-    Stopped(Aid),
+    Stopped { aid: Aid, error: Option<String> },
 }
 
 /// A type used for sending messages to other actor systems.
@@ -84,7 +85,7 @@ pub enum WireMessage {
 /// Configuration structure for the Axiom actor system. Note that this configuration implements
 /// serde serialize and deserialize to allow users to read the config from any serde supported
 /// means.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActorSystemConfig {
     /// The default size for the channel that is created for each actor. This can be overridden on
     /// a per-actor basis during spawning as well. Making the default channel size bigger allows
@@ -100,7 +101,7 @@ pub struct ActorSystemConfig {
     /// be refactored to process messages faster.  The default value is 1 millisecond.
     pub send_timeout: Duration,
     /// The size of the thread pool which governs how many worker threads there are in the system.
-    /// The number of threads should be carefully considered to have sufficient concurrency but
+    /// The number of threads should be carefully considered to have sufficient parallelism but
     /// not over-schedule the CPU on the target hardware. The default value is 4 * the number of
     /// logical CPUs.
     pub thread_pool_size: u16,
@@ -203,6 +204,23 @@ impl Default for ActorSystemConfig {
     }
 }
 
+/// Errors produced by the ActorSystem
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum SystemError {
+    /// An error returned when an actor is already using a local name at the time the user tries
+    /// to register that name for a new actor. The error contains the name that was attempted
+    /// to be registered.
+    NameAlreadyUsed(String),
+}
+
+impl std::fmt::Display for SystemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Error for SystemError {}
+
 /// Information for communicating with a remote actor system.
 pub struct RemoteInfo {
     /// The UUID of the remote system.
@@ -252,26 +270,19 @@ impl std::cmp::Ord for DelayedMessage {
 }
 
 /// Contains the inner data used by the actor system.
-struct ActorSystemData {
+pub(crate) struct ActorSystemData {
     /// Unique version 4 UUID for this actor system.
-    uuid: Uuid,
+    pub(crate) uuid: Uuid,
     /// The config for the actor system which was passed to it when created.
-    config: ActorSystemConfig,
-    /// Sender side of the work channel. When an actor gets a message and its pending count
-    /// goes from 0 to 1 it will put itself in the work channel via the sender. The actor will be
-    /// resent to the channel by a thread after handling a time slice of messages if it has more
-    /// messages to process.
-    sender: SeccSender<Arc<Actor>>,
-    /// Receiver side of the work channel. All threads in the pool will be grabbing actors
-    /// from this receiver to process messages.
-    receiver: SeccReceiver<Arc<Actor>>,
+    pub(crate) config: ActorSystemConfig,
     /// Holds handles to the pool of threads processing the work channel.
     threads: Mutex<Vec<JoinHandle<()>>>,
-    /// A flag holding whether or not the system is currently shutting down.
-    shutdown_triggered: AtomicBool,
-    // Stores the number of running threads with a Condvar that will be used to notify anyone
-    // waiting on the condvar that all threads have exited.
-    running_thread_count: Arc<(Mutex<u16>, Condvar)>,
+    /// The Executor responsible for managing the runtime of the Actors
+    executor: AxiomExecutor,
+    /// A flag and condvar that can be used to send a signal when the system begins to shutdown.
+    shutdown_triggered: Arc<(Mutex<bool>, Condvar)>,
+    /// A flag holding whether or not the system has shutdown.
+    shutdown_completed: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
     actors_by_aid: Arc<DashMap<Aid, Arc<Actor>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
@@ -295,7 +306,7 @@ pub struct ActorSystem {
     /// This field means the user doesnt have to worry about declaring `Arc<ActorSystem>` all
     /// over the place but can just use `ActorSystem` instead. Wrapping the data also allows
     /// `&self` semantics on the methods which feels more ergonomic.
-    data: Arc<ActorSystemData>,
+    pub(crate) data: Arc<ActorSystemData>,
 }
 
 impl ActorSystem {
@@ -303,22 +314,21 @@ impl ActorSystem {
     /// are needed in the work channel, the number of threads they need in the system and and so
     /// on in order to satisfy the requirements of the software they are creating.
     pub fn create(config: ActorSystemConfig) -> ActorSystem {
-        let (sender, receiver) =
-            secc::create::<Arc<Actor>>(config.work_channel_size, config.thread_wait_time);
-
+        let uuid = Uuid::new_v4();
         let threads = Mutex::new(Vec::with_capacity(config.thread_pool_size as usize));
-        let running_thread_count = Arc::new((Mutex::new(config.thread_pool_size), Condvar::new()));
+        let shutdown_triggered = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let executor = AxiomExecutor::new(shutdown_triggered.clone());
 
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
-                uuid: Uuid::new_v4(),
-                config: config,
-                sender,
-                receiver,
+                uuid,
+                config,
                 threads,
-                shutdown_triggered: AtomicBool::new(false),
-                running_thread_count,
+                executor,
+                shutdown_triggered,
+                shutdown_completed: Arc::new(AtomicBool::new(false)),
                 actors_by_aid: Arc::new(DashMap::default()),
                 aids_by_uuid: Arc::new(DashMap::default()),
                 aids_by_name: Arc::new(DashMap::default()),
@@ -328,17 +338,14 @@ impl ActorSystem {
             }),
         };
 
+        info!("ActorSystem {} has spawned", uuid);
+        system.data.executor.init(&system);
+
         // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
         // system not being created yet but needed by the thread. We put this code in a block to
         // get around rust borrow constraints without unnecessarily copying things.
         {
             let mut guard = system.data.threads.lock().unwrap();
-
-            // Start the dispatcher threads.
-            for number in 0..system.data.config.thread_pool_size {
-                let thread = system.start_dispatcher_thread(number);
-                guard.push(thread);
-            }
 
             // Start the thread that reads from the `delayed_messages` queue.
             // FIXME Put in ability to confirm how many of these to start.
@@ -353,69 +360,31 @@ impl ActorSystem {
         system
             .spawn()
             .name("System")
-            .with(false, system_actor_processor)
+            .with((), system_actor_processor)
             .unwrap();
 
         system
     }
 
-    /// Starts a thread for the dispatcher that will process actor messages. The dispatcher
-    /// threads constantly grab at the work channel trying to get the next [`Aid`] off the
-    /// channel. When they get an [`Aid`] they will process messages using the processor
-    /// registered for that [`Aid`] for one time slice. After the time slice, the dispatcher
-    /// thread will then check to see if the actor has more receivable messages. If the actor has
-    /// more messages then the [`Aid`] for the actor will be re-sent to the work channel to
-    /// process the next message. This allows thousands of actors to run and not take up resources
-    /// if they have no messages to process but also prevents one super busy actor from starving
-    /// out other actors that get messages only occasionally.
-    fn start_dispatcher_thread(&self, number: u16) -> JoinHandle<()> {
-        // FIXME (Issue #32) Add metrics to log a warning if messages or actors are spending too
-        // long in the channel.
-        let system = self.clone();
-        let receiver = self.data.receiver.clone();
-        let thread_timeout = self.data.config.thread_wait_time;
-        let name = format!("DispatchThread{}", number);
-
-        thread::Builder::new()
-            .name(name)
-            .spawn(move || {
-                system.init_current();
-                while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
-                    if let Ok(actor) = receiver.receive_await_timeout(thread_timeout) {
-                        Actor::receive(actor);
-                    }
-                }
-
-                // FIXME Refactor this into a function so all threads can utilize it.
-                let (mutex, condvar) = &*system.data.running_thread_count;
-                let mut count = mutex.lock().unwrap();
-                *count = *count - 1;
-                // If this is the last thread exiting we will notify any waiters.
-                if *count == 0 {
-                    condvar.notify_all();
-                }
-            })
-            .unwrap()
-    }
-
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
     /// delays have elapsed.
-    /// FIXME Add a graceful shutdown to this thread and notifications.
+    // FIXME Add a graceful shutdown to this thread and notifications.
     fn start_send_after_thread(&self) -> JoinHandle<()> {
         let system = self.clone();
         let delayed_messages = self.data.delayed_messages.clone();
         thread::spawn(move || {
-            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+            while !*system.data.shutdown_triggered.0.lock().unwrap() {
                 let (ref mutex, ref condvar) = &*delayed_messages;
                 let mut data = mutex.lock().unwrap();
                 match data.peek() {
                     None => {
                         // wait to be notified something is added.
-                        let _result = condvar.wait(data).unwrap();
+                        let _ = condvar.wait(data).unwrap();
                     }
                     Some(msg) => {
                         let now = Instant::now();
                         if now >= msg.instant {
+                            trace!("Sending delayed message");
                             msg.destination
                                 .send(msg.message.clone())
                                 .unwrap_or_else(|error| {
@@ -481,7 +450,7 @@ impl ActorSystem {
             system.init_current();
             // FIXME (Issue #76) Add graceful shutdown for threads handling remotes including
             // informing remote that the system is exiting.
-            while !system.data.shutdown_triggered.load(Ordering::Relaxed) {
+            while !*system.data.shutdown_triggered.0.lock().unwrap() {
                 match receiver_clone.receive_await_timeout(thread_timeout) {
                     Err(_) => (), // not an error, just loop and try again.
                     Ok(wire_msg) => system.process_wire_message(&sys_uuid, &wire_msg),
@@ -504,8 +473,8 @@ impl ActorSystem {
     }
 
     /// Disconnects this actor system from the remote actor system with the given UUID.
-    /// FIXME Connectivity management needs a lot of work and testing.
-    pub fn disconnect(&self, system_uuid: Uuid) -> Result<(), AxiomError> {
+    // FIXME Connectivity management needs a lot of work and testing.
+    pub fn disconnect(&self, system_uuid: Uuid) -> Result<(), AidError> {
         self.data.remotes.remove(&system_uuid);
         Ok(())
     }
@@ -530,8 +499,7 @@ impl ActorSystem {
 
     /// A helper function to process a wire message from another actor system. The passed uuid
     /// is the uuid of the remote that sent the message.
-    ///
-    /// FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
+    // FIXME (Issue #74) Make error handling in ActorSystem::process_wire_message more robust.
     fn process_wire_message(&self, _uuid: &Uuid, wire_message: &WireMessage) {
         match wire_message {
             WireMessage::ActorMessage {
@@ -590,92 +558,100 @@ impl ActorSystem {
         self.data.uuid
     }
 
-    /// Triggers a shutdown but doesn't wait for threads to stop.
+    /// Triggers a shutdown but doesn't wait for the Reactors to stop.
     pub fn trigger_shutdown(&self) {
-        self.data.shutdown_triggered.store(true, Ordering::Relaxed);
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        *mutex.lock().unwrap() = true;
+        condvar.notify_all();
     }
 
-    /// Awaits for the actor system to be shutdown using a relatively CPU minimal `Condvar` as
-    /// a signaling mechanism. This function will block until all actor system threads have
-    /// stopped.
-    pub fn await_shutdown(&self) {
-        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
-        let guard = mutex.lock().unwrap();
-        let _condvar_guard = condvar.wait(guard).unwrap();
-    }
+    /// Awaits the Executor shutting down all Reactors. This is backed by a barrier that Reactors
+    /// will wait on after [`ActorSystem::trigger_shutdown`] is called, blocking until all Reactors
+    /// have stopped.
+    pub fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
+        info!("System awaiting shutdown");
 
-    /// Awaits for the actor system to be shutdown using a relatively CPU minimal Condvar as
-    /// a signaling mechanism. This function will block until all actor system threads have
-    /// stopped or the timeout has expired. The function returns an `Ok` with the Duration
-    /// that it waited or an `Err` if the system didn't shut down in time or something else went
-    /// wrong.
-    pub fn await_shutdown_with_timeout(&self, timeout: Duration) -> Result<Duration, AxiomError> {
-        let start = Instant::now();
-        let &(ref mutex, ref condvar) = &*self.data.running_thread_count;
-        let guard = mutex.lock().unwrap();
-        // Since it's possible the system is already shutdown, we check first.
-        if *guard == 0 {
-            Ok(Instant::elapsed(&start))
+        let result = match timeout.into() {
+            Some(dur) => self.await_shutdown_trigger_with_timeout(dur),
+            None => self.await_shutdown_trigger_without_timeout(),
+        };
+
+        if let Some(r) = result {
+            return r;
+        }
+
+        // Wait for the system to finish shutting down
+        if !self.data.shutdown_completed.load(Ordering::Relaxed) {
+            let r = self.data.executor.await_shutdown(None);
+            self.data.shutdown_completed.swap(true, Ordering::AcqRel);
+            r
         } else {
-            match condvar.wait_timeout(guard, timeout) {
-                Ok((_, result)) => {
-                    if result.timed_out() {
-                        Err(AxiomError::ShutdownError(format!(
-                            "Timed Out after: {:?}",
-                            timeout
-                        )))
-                    } else {
-                        Ok(Instant::elapsed(&start))
-                    }
-                }
-                Err(e) => Err(AxiomError::ShutdownError(format!(
-                    "Error occurred: {:?}",
-                    e
-                ))),
-            }
+            ShutdownResult::Ok
         }
     }
 
-    /// Triggers a shutdown of the system and returns only when all threads have joined.
-    pub fn trigger_and_await_shutdown(&self) {
+    fn await_shutdown_trigger_with_timeout(&self, mut dur: Duration) -> Option<ShutdownResult> {
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        let mut guard = mutex.lock().unwrap();
+        while !*guard {
+            let started = Instant::now();
+            let (new_guard, timeout) = match condvar.wait_timeout(guard, dur) {
+                Ok(ret) => ret,
+                Err(_) => return Some(ShutdownResult::Panicked),
+            };
+
+            if timeout.timed_out() {
+                return Some(ShutdownResult::TimedOut);
+            }
+
+            guard = new_guard;
+            dur -= started.elapsed();
+        }
+        None
+    }
+
+    fn await_shutdown_trigger_without_timeout(&self) -> Option<ShutdownResult> {
+        let (ref mutex, ref condvar) = &*self.data.shutdown_triggered;
+        let mut guard = mutex.lock().unwrap();
+        while !*guard {
+            guard = match condvar.wait(guard) {
+                Ok(ret) => ret,
+                Err(_) => return Some(ShutdownResult::Panicked),
+            };
+        }
+        None
+    }
+
+    /// Triggers a shutdown of the system and returns only when all Reactors have shutdown.
+    pub fn trigger_and_await_shutdown(
+        &self,
+        timeout: impl Into<Option<Duration>>,
+    ) -> ShutdownResult {
         self.trigger_shutdown();
-        self.await_shutdown();
-    }
-
-    /// Returns the total number of times actors have been sent to the work channel.
-    #[inline]
-    pub fn sent(&self) -> usize {
-        self.data.receiver.sent()
-    }
-
-    /// Returns the total number of times actors have been processed from the work channel.
-    #[inline]
-    pub fn received(&self) -> usize {
-        self.data.receiver.received()
-    }
-
-    /// Returns the total number of actors that are currently pending in the work channel.
-    #[inline]
-    pub fn pending(&self) -> usize {
-        self.data.receiver.pending()
+        self.await_shutdown(timeout)
     }
 
     // A internal helper to register an actor in the actor system.
-    pub(crate) fn register_actor(&self, actor: Arc<Actor>) -> Result<Aid, AxiomError> {
+    pub(crate) fn register_actor(
+        &self,
+        actor: Arc<Actor>,
+        stream: ActorStream,
+    ) -> Result<Aid, SystemError> {
+        let aids_by_name = &self.data.aids_by_name;
         let actors_by_aid = &self.data.actors_by_aid;
         let aids_by_uuid = &self.data.aids_by_uuid;
-        let aids_by_name = &self.data.aids_by_name;
         let aid = actor.context.aid.clone();
         if let Some(name_string) = &aid.name() {
             if aids_by_name.contains_key(name_string) {
-                return Err(AxiomError::NameAlreadyUsed(name_string.clone()));
+                return Err(SystemError::NameAlreadyUsed(name_string.clone()));
             } else {
                 aids_by_name.insert(name_string.clone(), aid.clone());
             }
         }
+        actors_by_aid.insert(aid.clone(), actor.clone());
         aids_by_uuid.insert(aid.uuid(), aid.clone());
-        actors_by_aid.insert(aid.clone(), actor);
-        aid.send(Message::new(SystemMsg::Start))?;
+        self.data.executor.register_actor(stream);
+        aid.send(Message::new(SystemMsg::Start)).unwrap(); // Actor was just made
         Ok(aid)
     }
 
@@ -684,13 +660,13 @@ impl ActorSystem {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     ///
     /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
     ///
-    /// fn handler(count: &mut usize, _: &Context, _: &Message) -> AxiomResult {
-    ///     *count += 1;
-    ///     Ok(Status::Done)    
+    /// async fn handler(mut count: usize, _: Context, _: Message) -> ActorResult<usize> {
+    ///     count += 1;
+    ///     Ok((count, Status::Done))
     /// }
     ///
     /// let state = 0 as usize;
@@ -709,39 +685,26 @@ impl ActorSystem {
 
     /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
     /// a time slice if the actor has more messages that are receivable.
-    pub(crate) fn reschedule(&self, actor: Arc<Actor>) {
-        self.data
-            .sender
-            .send_await_timeout(actor, self.data.config.work_channel_timeout)
-            .expect("Unable to Schedule actor: ")
-    }
 
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
     /// lookup table. This function gets called when an actor goes from 0 receivable messages to
     /// 1 receivable message. If the actor has more receivable messages then this will not be
     /// needed to be called because the dispatcher threads will handle the process of resending
     /// the actor to the work channel.
-    ///
-    /// TODO Put tests verifying the resend on multiple messages.
+    // TODO Put tests verifying the resend on multiple messages.
     pub(crate) fn schedule(&self, aid: Aid) {
         let actors_by_aid = &self.data.actors_by_aid;
-        match actors_by_aid.get(&aid) {
-            Some(actor) => self
-                .data
-                .sender
-                .send_await_timeout(actor.clone(), self.data.config.work_channel_timeout)
-                .expect("Unable to Schedule actor: "),
-            None => {
-                // The actor was removed from the map so ignore the problem and just log
-                // a warning.
-                warn!(
-                    "Attempted to schedule actor with aid {:?} on system with node_id {:?} but 
-                    the actor does not exist.",
-                    aid.clone(),
-                    self.data.uuid.to_string(),
-                );
-                ()
-            }
+        if actors_by_aid.contains_key(&aid) {
+            self.data.executor.wake(aid);
+        } else {
+            // The actor was removed from the map so ignore the problem and just log
+            // a warning.
+            warn!(
+                "Attempted to schedule actor with aid {:?} on system with node_id {:?} but
+                the actor does not exist.",
+                aid.clone(),
+                self.data.uuid.to_string(),
+            );
         }
     }
 
@@ -752,6 +715,12 @@ impl ActorSystem {
     /// This is something that should rarely be called from the outside as it is much better to
     /// send the actor a [`SystemMsg::Stop`] message and allow it to stop gracefully.
     pub fn stop_actor(&self, aid: &Aid) {
+        self.internal_stop_actor(aid, None);
+    }
+
+    /// Internal implementation of stop_actor, so we have the ability to send an error along with
+    /// the notification of stop.
+    pub(crate) fn internal_stop_actor(&self, aid: &Aid, error: impl Into<Option<StdError>>) {
         {
             let actors_by_aid = &self.data.actors_by_aid;
             let aids_by_uuid = &self.data.aids_by_uuid;
@@ -767,8 +736,12 @@ impl ActorSystem {
         // Notify all of the actors monitoring the actor that is stopped and remove the
         // actor from the map of monitors.
         if let Some((_, monitoring)) = self.data.monitoring_by_monitored.remove(&aid) {
+            let error = error.into().map(|e| format!("{}", e));
             for m_aid in monitoring {
-                let value = SystemMsg::Stopped(aid.clone());
+                let value = SystemMsg::Stopped {
+                    aid: aid.clone(),
+                    error: error.clone(),
+                };
                 m_aid.send(Message::new(value)).unwrap_or_else(|error| {
                     error!(
                         "Could not send 'Stopped' to monitoring actor {}: Error: {:?}",
@@ -829,9 +802,10 @@ impl ActorSystem {
     }
 
     /// Asynchronously send a message to the system actors on all connected actor systems.
-    /// FIXME (Issue #72) Add try_send ability.
+    // FIXME (Issue #72) Add try_send ability.
     pub fn send_to_system_actors(&self, message: Message) {
         let remotes = &*self.data.remotes;
+        trace!("Sending message to Remote System Actors");
         for remote in remotes.iter() {
             let aid = &remote.value().system_actor_aid;
             aid.send(message.clone()).unwrap_or_else(|error| {
@@ -856,6 +830,11 @@ impl ActorSystem {
         let mut data = mutex.lock().unwrap();
         data.push(entry);
         condvar.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn executor(&self) -> &AxiomExecutor {
+        &self.data.executor
     }
 }
 
@@ -888,12 +867,13 @@ enum SystemActorMessage {
 }
 
 /// A processor for the system actor.
-/// FIXME Issue #89: Refactor into a full struct based actor in another file.
-fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) -> AxiomResult {
+// FIXME Issue #89: Refactor into a full struct based actor in another file.
+async fn system_actor_processor(_: (), context: Context, message: Message) -> ActorResult<()> {
     if let Some(msg) = message.content_as::<SystemActorMessage>() {
         match &*msg {
             // Someone requested that this system actor find an actor by name.
             SystemActorMessage::FindByName { reply_to, name } => {
+                debug!("Attempting to locate Actor by name: {}", name);
                 let found = context.system.find_aid_by_name(&name);
                 let reply = Message::new(SystemActorMessage::FindByNameResult {
                     system_uuid: context.system.uuid(),
@@ -909,18 +889,18 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
                         reply_to, error
                     )
                 });
-                Ok(Status::Done)
+                Ok(((), Status::Done))
             }
-            _ => Ok(Status::Done),
+            _ => Ok(((), Status::Done)),
         }
     } else if let Some(msg) = message.content_as::<SystemMsg>() {
         match &*msg {
-            SystemMsg::Start => Ok(Status::Done),
-            _ => Ok(Status::Done),
+            SystemMsg::Start => Ok(((), Status::Done)),
+            _ => Ok(((), Status::Done)),
         }
     } else {
         error!("Unhandled message received.");
-        Ok(Status::Done)
+        Ok(((), Status::Done))
     }
 }
 
@@ -928,6 +908,7 @@ fn system_actor_processor(_: &mut bool, context: &Context, message: &Message) ->
 mod tests {
     use super::*;
     use crate::tests::*;
+    use futures::future;
     use std::thread;
 
     // A helper to start two actor systems and connect them.
@@ -941,14 +922,12 @@ mod tests {
     /// Helper to wait for 2 actor systems to shutdown or panic if they don't do so within
     /// 2000 milliseconds.
     fn await_two_system_shutdown(system1: ActorSystem, system2: ActorSystem) {
-        let timeout = Duration::from_millis(1000);
-
         let h1 = thread::spawn(move || {
-            assert!(system1.await_shutdown_with_timeout(timeout).is_ok(),);
+            system1.await_shutdown(None);
         });
 
         let h2 = thread::spawn(move || {
-            assert!(system2.await_shutdown_with_timeout(timeout).is_ok(),);
+            system2.await_shutdown(None);
         });
 
         h1.join().unwrap();
@@ -964,20 +943,31 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         system
             .spawn()
-            .with((), |_state: &mut (), context: &Context, _: &Message| {
-                thread::sleep(Duration::from_millis(5));
-                context.system.trigger_shutdown();
-                Ok(Status::Done)
+            .with((), |_state: (), context: Context, _: Message| {
+                async move {
+                    // Block for enough time so we can test timeout twice
+                    sleep(100);
+                    context.system.trigger_shutdown();
+                    Ok(((), Status::Done))
+                }
             })
             .unwrap();
-        assert!(system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .is_ok(),);
+
+        // Expecting to timeout
+        assert_eq!(
+            system.await_shutdown(Duration::from_millis(10)),
+            ShutdownResult::TimedOut
+        );
+
+        // Expecting to NOT timeout
+        assert_eq!(
+            system.await_shutdown(Duration::from_millis(200)),
+            ShutdownResult::Ok
+        );
 
         // Validate that if the system is already shutdown the method doesn't hang.
-        assert!(system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .is_ok(),);
+        // FIXME Design a means that this cannot ever hang the test.
+        system.await_shutdown(None);
     }
 
     /// This test verifies that an actor can be found by its uuid.
@@ -986,7 +976,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_uuid(&aid.uuid()).unwrap();
@@ -994,7 +984,7 @@ mod tests {
 
         assert_eq!(None, system.find_aid_by_uuid(&Uuid::new_v4()));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that an actor can be found by its name if it has one.
@@ -1003,7 +993,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
         let found = system.find_aid_by_name(&aid.name().unwrap()).unwrap();
@@ -1011,7 +1001,7 @@ mod tests {
 
         assert_eq!(None, system.find_aid_by_name("B"));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This tests the find_aid function that takes a system uuid and an actor uuid.
@@ -1020,7 +1010,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         let found = system.find_aid(&aid.system_uuid(), &aid.uuid()).unwrap();
         assert!(Aid::ptr_eq(&aid, &found));
@@ -1028,7 +1018,7 @@ mod tests {
         assert_eq!(None, system.find_aid(&aid.system_uuid(), &Uuid::new_v4()));
         assert_eq!(None, system.find_aid(&Uuid::new_v4(), &aid.uuid()));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that actors that are stopped are removed from all relevant lookup maps and
@@ -1038,7 +1028,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         aid.send_new(11).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
@@ -1055,26 +1045,30 @@ mod tests {
         assert_eq!(None, system.find_aid_by_name("A"));
         assert_eq!(None, system.find_aid_by_uuid(&aid.uuid()));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that the system can send a message after a particular delay.
-    /// FIXME need separate test for remotes.
+    // FIXME need separate test for remotes.
     #[test]
     fn test_send_after() {
         init_test_log();
 
+        info!("Preparing test");
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
+        info!("Test prepared, sending delayed message");
 
         system.send_after(Message::new(11), aid.clone(), Duration::from_millis(10));
-        thread::sleep(Duration::from_millis(5));
+        info!("Sleeping for initial check");
+        sleep(5);
         assert_eq!(1, aid.received().unwrap());
-        thread::sleep(Duration::from_millis(10));
+        info!("Sleeping till we're 100% sure we should have the message");
+        sleep(10);
         assert_eq!(2, aid.received().unwrap());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that if we execute two send_after calls, one for a longer duration than the
@@ -1085,35 +1079,32 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        thread::sleep(Duration::from_millis(10));
 
-        let aid1 = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid1 = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid1, 1, 1000).unwrap();
-        let aid2 = system.spawn().name("B").with(0, simple_handler).unwrap();
+        let aid2 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
-        aid1.send_after(Message::new(11), Duration::from_millis(200))
+        aid1.send_after(Message::new(11), Duration::from_millis(50))
             .unwrap();
-        thread::sleep(Duration::from_millis(5));
 
-        aid2.send_after(Message::new(11), Duration::from_millis(50))
+        aid2.send_after(Message::new(11), Duration::from_millis(10))
             .unwrap();
-        thread::sleep(Duration::from_millis(5));
 
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(1, aid2.received().unwrap());
 
         // We overshoot the timing on the asserts because when the tests are run the CPU is
         // busy and the timing can be tricky.
-        thread::sleep(Duration::from_millis(55));
+        sleep(15);
         assert_eq!(1, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
-        thread::sleep(Duration::from_millis(160));
+        sleep(50);
         assert_eq!(2, aid1.received().unwrap());
         assert_eq!(2, aid2.received().unwrap());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that the system does not panic if we schedule to an actor that does
@@ -1125,7 +1116,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap(); // Now it is started for sure.
 
         // We force remove the actor from the system without calling stop so now it cannot
@@ -1137,7 +1128,7 @@ mod tests {
         // Send a message to the actor which should not schedule it but write out a warning.
         aid.send_new(11).unwrap();
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests connection between two different actor systems using channels.
@@ -1168,31 +1159,39 @@ mod tests {
     fn test_monitors() {
         init_test_log();
 
-        fn monitor_handler(state: &mut Aid, _: &Context, message: &Message) -> AxiomResult {
+        let tracker = AssertCollect::new();
+        async fn monitor_handler(
+            state: (Aid, AssertCollect),
+            _: Context,
+            message: Message,
+        ) -> ActorResult<(Aid, AssertCollect)> {
             if let Some(msg) = message.content_as::<SystemMsg>() {
                 match &*msg {
-                    SystemMsg::Stopped(aid) => {
-                        assert!(Aid::ptr_eq(state, aid));
-                        Ok(Status::Done)
+                    SystemMsg::Stopped { aid, error } => {
+                        state
+                            .1
+                            .assert(Aid::ptr_eq(&state.0, aid), "Pointers are not equal!");
+                        state.1.assert(error.is_none(), "Actor was errored!");
+                        Ok((state, Status::Done))
                     }
-                    SystemMsg::Start => Ok(Status::Done),
-                    _ => panic!("Received some other message!"),
+                    SystemMsg::Start => Ok((state, Status::Done)),
+                    _ => state.1.panic("Received some other message!"),
                 }
             } else {
-                panic!("Received some other message!");
+                state.1.panic("Received some other message!")
             }
         }
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let monitored = system.spawn().with(0 as usize, simple_handler).unwrap();
-        let not_monitoring = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let monitored = system.spawn().with((), simple_handler).unwrap();
+        let not_monitoring = system.spawn().with((), simple_handler).unwrap();
         let monitoring1 = system
             .spawn()
-            .with(monitored.clone(), monitor_handler)
+            .with((monitored.clone(), tracker.clone()), monitor_handler)
             .unwrap();
         let monitoring2 = system
             .spawn()
-            .with(monitored.clone(), monitor_handler)
+            .with((monitored.clone(), tracker.clone()), monitor_handler)
             .unwrap();
         system.monitor(&monitoring1, &monitored);
         system.monitor(&monitoring2, &monitored);
@@ -1211,7 +1210,56 @@ mod tests {
         await_received(&monitoring2, 2, 1000).unwrap();
         await_received(&not_monitoring, 1, 1000).unwrap();
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
+        tracker.collect();
+    }
+
+    #[test]
+    fn test_monitor_gets_panics_errors() {
+        init_test_log();
+
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
+        let aid = system
+            .spawn()
+            .with((), |_: (), _: Context, msg: Message| {
+                if let Some(_) = msg.content_as::<SystemMsg>() {
+                    debug!("Not panicking this time");
+                    return future::ok(((), Status::Done));
+                }
+
+                debug!("About to panic");
+                panic!("I panicked")
+            })
+            .unwrap();
+        let monitor = system
+            .spawn()
+            .with(aid.clone(), move |state: Aid, _: Context, msg: Message| {
+                if let Some(msg) = msg.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Stopped { aid, error } => {
+                            t.assert(*aid == state, "Aid is not expected Aid");
+                            t.assert(error.is_some(), "Expected error");
+                            t.assert(
+                                error.as_ref().unwrap() == "I panicked",
+                                "Error message does not match",
+                            );
+                            future::ok((state, Status::Stop))
+                        }
+                        SystemMsg::Start => future::ok((state, Status::Done)),
+                        _ => t.panic("Unexpected message received!"),
+                    }
+                } else {
+                    t.panic("Unexpected message received!")
+                }
+            })
+            .unwrap();
+        system.monitor(&monitor, &aid);
+        aid.send_new(()).unwrap();
+        await_received(&monitor, 2, 1000).unwrap();
+        system.trigger_and_await_shutdown(Duration::from_millis(1000));
+        tracker.collect();
     }
 
     /// This test verifies that the concept of named actors works properly. When a user wants
@@ -1222,26 +1270,17 @@ mod tests {
     fn test_named_actor_restrictions() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let state = 0 as usize;
 
-        let aid1 = system
-            .spawn()
-            .name("A")
-            .with(state, simple_handler)
-            .unwrap();
+        let aid1 = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
-        let aid2 = system
-            .spawn()
-            .name("B")
-            .with(state, simple_handler)
-            .unwrap();
+        let aid2 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid2, 1, 1000).unwrap();
 
         // Spawn an actor that attempts to overwrite "A" in the names and make sure the
         // attempt returns an error to be handled.
-        let result = system.spawn().name("A").with(state, simple_handler);
-        assert_eq!(Err(AxiomError::NameAlreadyUsed("A".to_string())), result);
+        let result = system.spawn().name("A").with((), simple_handler);
+        assert_eq!(Err(SystemError::NameAlreadyUsed("A".to_string())), result);
 
         // Verify that the same actor has "A" name and is still up.
         let found1 = system.find_aid_by_name("A").unwrap();
@@ -1254,16 +1293,12 @@ mod tests {
         assert_eq!(None, system.find_aid_by_uuid(&aid2.uuid()));
 
         // Now we should be able to crate a new actor with the name "B".
-        let aid3 = system
-            .spawn()
-            .name("B")
-            .with(state, simple_handler)
-            .unwrap();
+        let aid3 = system.spawn().name("B").with((), simple_handler).unwrap();
         await_received(&aid3, 1, 1000).unwrap();
         let found2 = system.find_aid_by_name("B").unwrap();
         assert!(Aid::ptr_eq(&aid3, &found2));
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests that remote actors can send and receive messages between each other.
@@ -1279,55 +1314,61 @@ mod tests {
         struct Reply {}
 
         init_test_log();
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
         let (system1, system2) = start_and_connect_two_systems();
 
         system1.init_current();
         let aid = system1
             .spawn()
-            .with((), |_: &mut (), context: &Context, message: &Message| {
-                if let Some(msg) = message.content_as::<Request>() {
-                    msg.reply_to.send_new(Reply {}).unwrap();
-                    context.system.trigger_shutdown();
-                    Ok(Status::Stop)
-                } else if let Some(_) = message.content_as::<SystemMsg>() {
-                    Ok(Status::Done)
-                } else {
-                    panic!("Unexpected message received!");
+            .with((), move |_: (), context: Context, message: Message| {
+                let t = t.clone();
+                async move {
+                    if let Some(msg) = message.content_as::<Request>() {
+                        msg.reply_to.send_new(Reply {}).unwrap();
+                        context.system.trigger_shutdown();
+                        Ok(((), Status::Stop))
+                    } else if let Some(_) = message.content_as::<SystemMsg>() {
+                        Ok(((), Status::Done))
+                    } else {
+                        t.panic("Unexpected message received!")
+                    }
                 }
             })
             .unwrap();
         await_received(&aid, 1, 1000).unwrap();
 
+        let t = tracker.clone();
         let serialized = bincode::serialize(&aid).unwrap();
         system2
             .spawn()
-            .with(
-                (),
-                move |_: &mut (), context: &Context, message: &Message| {
-                    if let Some(_) = message.content_as::<Reply>() {
-                        context.system.trigger_shutdown();
-                        Ok(Status::Stop)
-                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                        match &*msg {
-                            SystemMsg::Start => {
-                                let target_aid: Aid = bincode::deserialize(&serialized).unwrap();
-                                target_aid
-                                    .send_new(Request {
-                                        reply_to: context.aid.clone(),
-                                    })
-                                    .unwrap();
-                                Ok(Status::Done)
-                            }
-                            _ => Ok(Status::Done),
+            .with((), move |_: (), context: Context, message: Message| {
+                if let Some(_) = message.content_as::<Reply>() {
+                    debug!("Received reply, shutting down");
+                    context.system.trigger_shutdown();
+                    future::ok(((), Status::Stop))
+                } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                    match &*msg {
+                        SystemMsg::Start => {
+                            debug!("Starting request actor");
+                            let target_aid: Aid = bincode::deserialize(&serialized).unwrap();
+                            target_aid
+                                .send_new(Request {
+                                    reply_to: context.aid.clone(),
+                                })
+                                .unwrap();
+                            future::ok(((), Status::Done))
                         }
-                    } else {
-                        panic!("Unexpected message received!");
+                        _ => future::ok(((), Status::Done)),
                     }
-                },
-            )
+                } else {
+                    t.panic("Unexpected message received!")
+                }
+            })
             .unwrap();
 
         await_two_system_shutdown(system1, system2);
+        tracker.collect();
     }
 
     /// Tests the ability to find an aid on a remote system by name using a `SystemActor`. This
@@ -1336,38 +1377,53 @@ mod tests {
     #[test]
     fn test_system_actor_find_by_name() {
         init_test_log();
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
         let (system1, system2) = start_and_connect_two_systems();
 
         let aid1 = system1
             .spawn()
             .name("A")
-            .with((), |_: &mut (), context: &Context, _: &Message| {
-                context.system.trigger_shutdown();
-                Ok(Status::Done)
+            .with((), |_: (), context: Context, message: Message| {
+                async move {
+                    if let Some(_) = message.content_as::<bool>() {
+                        context.system.trigger_shutdown();
+                        Ok(((), Status::Stop))
+                    } else {
+                        Ok(((), Status::Done))
+                    }
+                }
             })
             .unwrap();
         await_received(&aid1, 1, 1000).unwrap();
 
         system2
             .spawn()
-            .with(
-                (),
-                move |_: &mut (), context: &Context, message: &Message| {
+            .with((), move |_: (), context: Context, message: Message| {
+                // We have to do this so each async block future gets its own copy.
+                let aid1 = aid1.clone();
+                let t = t.clone();
+                async move {
                     if let Some(msg) = message.content_as::<SystemActorMessage>() {
                         match &*msg {
                             SystemActorMessage::FindByNameResult { aid: found, .. } => {
+                                debug!("FindByNameResult received");
                                 if let Some(target) = found {
-                                    assert_eq!(target.uuid(), aid1.uuid());
+                                    t.assert(
+                                        target.uuid() == aid1.uuid(),
+                                        "Target is not expected Actor",
+                                    );
                                     target.send_new(true).unwrap();
                                     context.system.trigger_shutdown();
-                                    Ok(Status::Done)
+                                    Ok(((), Status::Done))
                                 } else {
-                                    panic!("Didn't find AID.");
+                                    t.panic("Didn't find AID.")
                                 }
                             }
-                            _ => panic!("Unexpected message received!"),
+                            _ => t.panic("Unexpected message received!"),
                         }
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        debug!("Actor started, attempting to send FindByName request");
                         if let SystemMsg::Start = &*msg {
                             context.system.send_to_system_actors(Message::new(
                                 SystemActorMessage::FindByName {
@@ -1375,17 +1431,18 @@ mod tests {
                                     name: "A".to_string(),
                                 },
                             ));
-                            Ok(Status::Done)
+                            Ok(((), Status::Done))
                         } else {
-                            panic!("Unexpected message received!");
+                            t.panic("Unexpected message received!")
                         }
                     } else {
-                        panic!("Unexpected message received!");
+                        t.panic("Unexpected message received!")
                     }
-                },
-            )
+                }
+            })
             .unwrap();
 
         await_two_system_shutdown(system1, system2);
+        tracker.collect();
     }
 }

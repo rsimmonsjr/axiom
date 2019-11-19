@@ -9,23 +9,23 @@
 //! * Triggering an actor system shutdown within the actor.
 //! * Awaiting the actor system to shut down.
 
-use axiom::*;
+use axiom::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// The messages we will be sending to our actor. All messages must be serializeable and
-/// deserializeable with serde.
+/// The messages we will be sending to our actor. All messages must be serializable and
+/// deserializable with serde.
 #[derive(Serialize, Deserialize)]
 enum HelloMessages {
     Greet,
 }
 
 /// This is the handler that will be used by the actor.
-fn hello(_state: &mut bool, context: &Context, message: &Message) -> AxiomResult {
+async fn hello(_: (), context: Context, message: Message) -> ActorResult<()> {
     if let Some(_msg) = message.content_as::<HelloMessages>() {
         println!("Hello World from Actor: {:?}", context.aid);
-        ActorSystem::current().trigger_shutdown();
+        context.system.trigger_shutdown();
     }
-    Ok(Status::Done)
+    Ok(((), Status::Done))
 }
 
 pub fn main() {
@@ -34,9 +34,9 @@ pub fn main() {
     let system = ActorSystem::create(config);
 
     // Spawn the actor and send the message.
-    let aid = system.spawn().with(true, hello).unwrap();
+    let aid = system.spawn().with((), hello).unwrap();
     aid.send(Message::new(HelloMessages::Greet)).unwrap();
 
     // The actor will trigger shutdown, we just wait for it.
-    system.await_shutdown();
+    system.await_shutdown(None);
 }

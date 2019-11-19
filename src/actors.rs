@@ -3,22 +3,29 @@
 //! These are the core components that make up the features of Axiom. The actor model is designed
 //! to allow the user maximum flexibility. The actors can skip messages if they choose, enabling
 //! them to work as a *finite state machine* without having to move messages around. Actors are
-//! created by calling `system::spawn().with()` with any kind of fuction or closure that
+//! created by calling `system::spawn().with()` with any kind of function or closure that
 //! implements the `Processor` trait.
 
-use crate::message::*;
-use crate::system::*;
-use crate::*;
-use log::{error, warn};
+use crate::message::ActorMessage;
+use crate::prelude::*;
+use futures::{FutureExt, Stream};
+use log::{debug, error, trace, warn};
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+use std::cell::UnsafeCell;
+use std::fmt::Debug;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::{Send, Sync};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::Pin;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
@@ -50,6 +57,51 @@ pub enum Status {
     /// advised to do any cleanup needed before returning [`Status::Stop`].
     Stop,
 }
+
+/// Errors returned by the Aid
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AidError {
+    /// This error is returned when a message cannot be converted to bincode. This will happen if
+    /// the message is not Serde serializable and the user has not implemented ActorMessage to
+    /// provide the correct implementation.
+    CantConvertToBincode,
+
+    /// This error is returned when a message cannot be converted from bincode. This will happen
+    /// ifg the message is not Serde serializable and the user has not implemented ActorMessage to
+    /// provide the correct implementation.
+    CantConvertFromBincode,
+
+    /// Error sent when attempting to send to an actor that has already been stopped. A stopped
+    /// actor cannot accept any more messages and is shut down. The holder of an [`Aid`] to
+    /// a stopped actor should throw the [`Aid`] away as the actor can never be started again.
+    ActorAlreadyStopped,
+
+    /// Error returned when an Aid is not local and a user is trying to do operations that
+    /// only work on local Aid instances.
+    AidNotLocal,
+
+    /// Used when unable to send to an actor's message channel within the scheduled timeout
+    /// configured in the actor system. This could result from the actor's channel being too
+    /// small to accommodate the message flow, the lack of thread count to process messages fast
+    /// enough to keep up with the flow or something wrong with the actor itself that it is
+    /// taking too long to clear the messages.
+    SendTimedOut(Aid),
+
+    /// Used when unable to schedule the actor for work in the work channel. This could be a
+    /// result of having a work channel that is too small to accommodate the number of actors
+    /// being concurrently scheduled, not enough threads to process actors in the channel fast
+    /// enough or simply an actor that misbehaves, causing dispatcher threads to take a lot of
+    /// time or not finish at all.
+    UnableToSchedule,
+}
+
+impl std::fmt::Display for AidError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for AidError {}
 
 /// An enum that holds a sender for an actor.
 ///
@@ -90,7 +142,7 @@ impl std::fmt::Debug for ActorSender {
 ///
 /// This is kept separate to make serialization possible without duplicating all of the data
 /// associated with the [`Aid`]. It also makes it easier when cloning and referring to an
-/// `aid` as the user doesnt have to put `Arc<Aid>` all over thier code.
+/// `aid` as the user doesnt have to put `Arc<Aid>` all over their code.
 struct AidData {
     /// See [`Aid::uuid()`]
     uuid: Uuid,
@@ -226,7 +278,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -236,11 +288,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -250,11 +302,9 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown(None);
     /// ```
-    pub fn send(&self, message: Message) -> Result<(), AxiomError> {
+    pub fn send(&self, message: Message) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local {
                 stopped,
@@ -262,17 +312,16 @@ impl Aid {
                 system,
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    Err(AxiomError::ActorAlreadyStopped)
+                    Err(AidError::ActorAlreadyStopped)
                 } else {
                     match sender.send_await_timeout(message, system.config().send_timeout) {
                         Ok(_) => {
-                            // FIXME (Issue #68) Investigate if this could race the dispatcher threads.
                             if sender.receivable() == 1 {
                                 system.schedule(self.clone());
                             };
                             Ok(())
                         }
-                        Err(_) => Err(AxiomError::SendTimedOut(self.clone())),
+                        Err(_) => Err(AidError::SendTimedOut(self.clone())),
                     }
                 }
             }
@@ -294,7 +343,8 @@ impl Aid {
     /// more efficient than `send_new` if you want to send an `Arc` that you already have.
     /// The `Arc` sent will be transferred to the ownership of the `Aid`.
     ///
-    /// use axiom::*;
+    /// ```
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -304,26 +354,24 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
     ///
-    /// let arc = Arc::new(11);
+    /// let arc = Arc::new(11 as i32);
     /// match aid.send_arc(arc.clone()) {
     ///     Ok(_) => println!("OK Then!"),
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown(None);
     /// ```
-    pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AxiomError>
+    pub fn send_arc<T>(&self, value: Arc<T>) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -336,7 +384,8 @@ impl Aid {
     /// same result as if the the code called `aid.send(Message::new(Message::new(value)))`.
     /// If the code wishes to resend a message it should just call just call `send(msg)`.
     ///
-    /// use axiom::*;
+    /// ```
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -346,11 +395,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -360,11 +409,9 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown(None);
     /// ```
-    pub fn send_new<T>(&self, value: T) -> Result<(), AxiomError>
+    pub fn send_new<T>(&self, value: T) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -381,7 +428,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -391,11 +438,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -405,31 +452,33 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown(None);
     /// ```
-    pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AxiomError> {
+    pub fn send_after(&self, message: Message, duration: Duration) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local {
                 stopped, system, ..
             } => {
                 if stopped.load(Ordering::Relaxed) {
-                    Err(AxiomError::ActorAlreadyStopped)
+                    Err(AidError::ActorAlreadyStopped)
                 } else {
                     system.send_after(message, self.clone(), duration);
                     Ok(())
                 }
             }
             ActorSender::Remote { sender } => {
-                sender
-                    .send_await(WireMessage::DelayedActorMessage {
-                        duration: duration,
-                        actor_uuid: self.data.uuid,
-                        system_uuid: self.data.system_uuid,
-                        message,
-                    })
-                    .unwrap(); // FIXME Get rid of this unwrap!
+                if let Err(err) = sender.send_await(WireMessage::DelayedActorMessage {
+                    duration,
+                    actor_uuid: self.data.uuid,
+                    system_uuid: self.data.system_uuid,
+                    message,
+                }) {
+                    // Right now, this is the full extent of errors, but if that should change, it
+                    // should create a compiler error.
+                    return match err {
+                        SeccErrors::Full(_) | SeccErrors::Empty => Ok(()),
+                    };
+                }
                 Ok(())
             }
         }
@@ -442,7 +491,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -452,11 +501,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -467,11 +516,9 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown(None);
     /// ```
-    pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AxiomError>
+    pub fn send_arc_after<T>(&self, value: Arc<T>, duration: Duration) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -486,7 +533,7 @@ impl Aid {
     ///
     /// # Examples
     /// ```
-    /// use axiom::*;
+    /// use axiom::prelude::*;
     /// use std::sync::Arc;
     /// use std::time::Duration;
     ///
@@ -496,11 +543,11 @@ impl Aid {
     ///     .spawn()
     ///     .with(
     ///         0 as usize,
-    ///         move |_state: &mut usize, context: &Context, message: &Message| {
+    ///         |state: usize, context: Context, message: Message| async move {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok(Status::Done)
+    ///             Ok((state, Status::Done))
     ///        },
     ///     )
     ///     .unwrap();
@@ -510,11 +557,9 @@ impl Aid {
     ///     Err(e) => println!("Ooops {:?}", e),
     /// }
     ///
-    /// system
-    ///     .await_shutdown_with_timeout(Duration::from_millis(1000))
-    ///     .unwrap();
+    /// system.await_shutdown(None);
     /// ```
-    pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AxiomError>
+    pub fn send_new_after<T>(&self, value: T, duration: Duration) -> Result<(), AidError>
     where
         T: 'static + ActorMessage,
     {
@@ -567,19 +612,19 @@ impl Aid {
 
     /// Determines how many messages the actor with the aid has been sent. This method works only
     /// for local `aid`s, remote `aid`s will return an error if this is called.
-    pub fn sent(&self) -> Result<usize, AxiomError> {
+    pub fn sent(&self) -> Result<usize, AidError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.sent()),
-            _ => Err(AxiomError::AidNotLocal),
+            _ => Err(AidError::AidNotLocal),
         }
     }
 
     /// Determines how many messages the actor with the `aid` has received. This method works only
     /// for local `aid`s, remote `aid`s will return an error if this is called.    
-    pub fn received(&self) -> Result<usize, AxiomError> {
+    pub fn received(&self) -> Result<usize, AidError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.received()),
-            _ => Err(AxiomError::AidNotLocal),
+            _ => Err(AidError::AidNotLocal),
         }
     }
 
@@ -587,13 +632,14 @@ impl Aid {
     /// cause no more messages to be sent to the actor. Note that once stopped, an [`Aid`] can
     /// never be started again. Note that this is `pub(crate)` because the user should be sending
     /// `SystemMsg::Stop` to actors or, at worst, calling `ActorSystem::stop()` to stop an actor.
-    pub(crate) fn stop(&self) -> Result<(), AxiomError> {
+    pub(crate) fn stop(&self) -> Result<(), AidError> {
         match &self.data.sender {
             ActorSender::Local { stopped, .. } => {
+                trace!("Stopping local Actor");
                 stopped.fetch_or(true, Ordering::AcqRel);
                 Ok(())
             }
-            _ => Err(AxiomError::AidNotLocal),
+            _ => Err(AidError::AidNotLocal),
         }
     }
 
@@ -634,7 +680,7 @@ impl Hash for Aid {
 
 /// A context that is passed to the processor to give immutable access to elements of the
 /// actor system to the implementor of an actor's processor.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Context {
     pub aid: Aid,
     pub system: ActorSystem,
@@ -657,28 +703,36 @@ impl std::fmt::Display for Context {
 /// the actor based on the messages passed to the actor. The result of a processor is used to
 /// determine the status of an actor. If the actor returns an `AxiomError` then it will be stopped
 /// as if the actor had returned `Stop`. The processor takes three arguments:
-/// * `state`   - A mutable reference to the current state of the actor.
-/// * `aid`     - The reference to the [`Aid`] for this actor.
-/// * `message` - The reference to the current message to process.
-pub trait Processor<State: Send + Sync>:
-    (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync
+/// * `state`   - The current state of the actor.
+/// * `context` - The immutable context for this actor and its system.
+/// * `message` - The current message to process.
+/// The actor must return the state on success as a `(State, Status)` tuple.
+pub trait Processor<S: Send + Sync, R: Future<Output = ActorResult<S>> + Send + 'static>:
+    (FnMut(S, Context, Message) -> R) + Send + Sync
 {
 }
 
 // Allows any static function or closure, to be used as a Processor.
-impl<F, State> Processor<State> for F
+impl<F, S, R> Processor<S, R> for F
 where
-    State: Send + Sync + 'static,
-    F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
+    S: Send + Sync,
+    R: Future<Output = ActorResult<S>> + Send + 'static,
+    F: (FnMut(S, Context, Message) -> R) + Send + Sync + 'static,
 {
 }
 
+pub(crate) type ActorFuture =
+    Pin<Box<dyn Future<Output = Result<Status, StdError>> + Send + 'static>>;
+
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
-trait Handler: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
+pub(crate) trait Handler:
+    (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static
+{
+}
 
 // Allows any static function or closure, to be used as a Handler.
-impl<F> Handler for F where F: (FnMut(&Context, &Message) -> AxiomResult) + Send + Sync + 'static {}
+impl<F> Handler for F where F: (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static {}
 
 /// A builder that can be used to create and spawn an actor. To get a builder, the user would ask
 /// the actor system to create one using `system.spawn()` and then to spawn the actor by means of
@@ -698,20 +752,21 @@ impl ActorBuilder {
     /// consuming the builder in the process and using the provided state and handler. See
     /// `ActorSystem::spawn` for more information and examples.
     ///
-    /// FIXME Consider implementing `using` to spawn a stateless actor.
-    pub fn with<F, State>(self, state: State, processor: F) -> Result<Aid, AxiomError>
+    // FIXME Consider implementing `using` to spawn a stateless actor.
+    pub fn with<F, S, R>(self, state: S, processor: F) -> Result<Aid, SystemError>
     where
-        State: Send + Sync + 'static,
-        F: (FnMut(&mut State, &Context, &Message) -> AxiomResult) + Send + Sync + 'static,
+        S: Send + Sync + 'static,
+        R: Future<Output = ActorResult<S>> + Send + 'static,
+        F: Processor<S, R> + 'static,
     {
-        let actor = Actor::new(self.system.clone(), &self, state, processor);
-        let result = self.system.register_actor(actor)?;
-        Ok(result)
+        let (actor, stream) = Actor::new(self.system.clone(), &self, state, processor);
+        debug!("Actor created: {}", actor.context.aid.uuid());
+        self.system.register_actor(actor, stream)
     }
 
     /// Set the name of the actor to the given string.
-    pub fn name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_string());
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -725,33 +780,57 @@ impl ActorBuilder {
     }
 }
 
-/// The implementation of the actor in the system. Please see overview and library documentation
-/// for more detail.
-pub(crate) struct Actor {
-    /// The context data for the actor containg the `aid` as well as other immutable data.
+pub(crate) struct ActorStream {
+    /// The context data for the actor containing the `aid` as well as other immutable data.
     pub context: Context,
     /// Receiver for the actor's message channel.
     receiver: SeccReceiver<Message>,
-    /// The function that processes messages that are sent to the actor wrapped in a closure to
-    /// erase the state type that the actor is managing. Note that this is in a mutex because the
-    /// handler itself is `FnMut` and we also don't want there to be any possibility of two
-    /// threads calling the handler concurrently as that would break the actor model rules.
-    handler: Mutex<Box<dyn Handler>>,
+    /// An async function processing a message sent to the actor, wrapped in a closure to
+    /// erase the state type that the actor is managing. The inner state is Arc<Mutex>'d to
+    /// ensure the Actor is synchronous in relation to itself.
+    handler: Box<dyn Handler>,
+    /// The pending result of the current handler invocation.
+    pending: Option<ActorFuture>,
+    /// Set to true when the stream receives SystemMsg::Stop
+    stopping: bool,
 }
+
+/// The implementation of the actor in the system. Please see overview and library documentation
+/// for more detail.
+pub(crate) struct Actor {
+    /// The context data for the actor containing the `aid` as well as other immutable data.
+    pub context: Context,
+}
+
+/// This is exclusively used in contexts we can be more than confident are safe.
+/// This is required for holding onto the Actor State.
+#[repr(transparent)]
+struct SendSyncPointer<T>(*mut T);
+
+/// This is exclusively used in contexts we can be more than confident are safe.
+/// This is required for holding onto the Actor State.
+#[repr(transparent)]
+struct SendSyncUnsafeCell<T>(UnsafeCell<T>);
+
+unsafe impl<T> Send for SendSyncPointer<T> {}
+unsafe impl<T> Sync for SendSyncPointer<T> {}
+unsafe impl<T> Send for SendSyncUnsafeCell<T> {}
+unsafe impl<T> Sync for SendSyncUnsafeCell<T> {}
 
 impl Actor {
     /// Creates a new actor on the given actor system with the given processor function. The user
     /// will pass the initial state of the actor as well as the processor that will be used to
     /// process messages sent to the actor.
-    pub(crate) fn new<F, State>(
+    pub(crate) fn new<F, S, R>(
         system: ActorSystem,
         builder: &ActorBuilder,
-        mut state: State,
+        state: S,
         mut processor: F,
-    ) -> Arc<Actor>
+    ) -> (Arc<Actor>, ActorStream)
     where
-        State: Send + Sync + 'static,
-        F: Processor<State> + 'static,
+        S: Send + Sync + 'static,
+        R: Future<Output = ActorResult<S>> + Send + 'static,
+        F: Processor<S, R> + 'static,
     {
         let (sender, receiver) = secc::create::<Message>(
             builder
@@ -773,10 +852,31 @@ impl Actor {
                 },
             }),
         };
+        // Here we wrap the state in an UnsafeCell so we can do more performant retention of state.
+        // While it might normally be prudent to have the unsafe block encompass the code that keeps
+        // the safe guarantees, that isn't possible here as the guarantees are the same that keep
+        // the Actor Model sound, and are stretched across multiple parts of the infrastructure. If
+        // the unsoundness of this were to leak, there would be problems beyond this one UnsafeCell.
+        let state_box = SendSyncUnsafeCell(UnsafeCell::new(Some(state)));
 
-        // This handler will manage the state for the actor.
-        let handler = Box::new({
-            move |context: &Context, message: &Message| processor(&mut state, context, message)
+        let handler = Box::new(move |ctx: Context, msg: Message| {
+            let state = SendSyncPointer(state_box.0.get());
+            let s = unsafe { (*state.0).take() }.expect("State cell was empty");
+            let future = catch_unwind(AssertUnwindSafe(|| (processor)(s, ctx, msg)));
+            async move {
+                let result = match future {
+                    Ok(f) => f.await,
+                    Err(err) => {
+                        warn!("Actor panicked! Catching as error");
+                        Err(Panic::from(err).into())
+                    }
+                };
+                result.map(|(s, status)| {
+                    unsafe { ptr::write(state.0, Some(s)) };
+                    status
+                })
+            }
+                .boxed()
         });
 
         // This is the receiving side of the actor which holds the processor wrapped in the
@@ -784,84 +884,139 @@ impl Actor {
         let context = Context { aid, system };
 
         let actor = Actor {
-            context,
-            receiver,
-            handler: Mutex::new(handler),
+            context: context.clone(),
         };
 
-        Arc::new(actor)
+        let stream = ActorStream {
+            context,
+            receiver,
+            handler,
+            pending: None,
+            stopping: false,
+        };
+
+        (Arc::new(actor), stream)
     }
+}
 
-    /// Receive a message from the channel and process it with the actor. This function is the
-    /// core of the processing pipeline. The function will process messages up until the actor has
-    /// no more pending messages or the given time slice has expired. The time slice is
-    /// configurable and should be tuned to allow the most possible messages to be processed
-    /// without locking out other actors.
-    pub(crate) fn receive(actor: Arc<Actor>) {
-        let mut guard = actor.handler.lock().unwrap();
-        let system = actor.context.system.clone();
-        let start = Instant::now();
-        // FIXME The time sliced batching of messages needs testing.
-        while Instant::elapsed(&start) < system.config().time_slice {
-            // If there isn't a message, another dispatcher thread beat us to it, no big deal.
-            if let Ok(message) = actor.receiver.peek() {
-                // In this case there is a message in the channel that we have to process. We
-                // will time the result and log a warning if it took too long.
-                let start_process = Instant::now();
-                let mut result = (&mut *guard)(&actor.context, &message);
-                let elapsed = Instant::elapsed(&start_process);
-                if elapsed > system.config().warn_threshold {
-                    warn!(
-                        "[{}] Actor took {:?} to process a message, threshold is {:?}!",
-                        actor.context.aid,
-                        elapsed,
-                        system.config().warn_threshold
-                    );
-                }
+impl ActorStream {
+    /// This takes the result and executes the subsequent steps in respect to the result. Namely,
+    /// handling the Actor's message channel and informing the ActorSystem of errors. Returns
+    /// whether the Actor is stopping or not.
+    pub(crate) fn handle_result(&self, result: Result<Status, StdError>) -> bool {
+        let mut stopping = false;
 
-                // If the message was a system stop message then we override the actor returned
-                // result with a 'Status::Stop'. The override means actors that don't do anything
-                // special can essentially ignore processing stop.
-                if let Some(m) = message.content_as::<SystemMsg>() {
-                    if let SystemMsg::Stop = *m {
-                        result = Ok(Status::Stop)
-                    }
-                };
-
-                // Handle the result of the processing.
-                match result {
-                    Ok(Status::Done) => actor.receiver.pop().unwrap(),
-                    Ok(Status::Skip) => actor.receiver.skip().unwrap(),
-                    Ok(Status::Reset) => {
-                        actor.receiver.pop().unwrap();
-                        actor.receiver.reset_skip().unwrap();
-                    }
-                    Ok(Status::Stop) => {
-                        actor.receiver.pop().unwrap();
-                        actor.context.system.stop_actor(&actor.context.aid);
-                        // Actor stopping, dont process more messages.
-                        break;
-                    }
-                    Err(e) => {
-                        actor.receiver.pop().unwrap();
-                        actor.context.system.stop_actor(&actor.context.aid);
-                        error!(
-                            "[{}] Returned an error when processing: {:?}",
-                            actor.context.aid, e
-                        );
-                        // Actor stopping, don't process more messages.
-                        break;
-                    }
-                };
-            } else {
-                // No more messages so we just break out of the loop.
-                break;
+        match result {
+            Ok(Status::Done) => {
+                trace!(
+                    "Actor {} finished processing a message",
+                    self.context.aid.uuid()
+                );
+                self.receiver.pop().unwrap()
+            }
+            Ok(Status::Skip) => {
+                trace!(
+                    "Actor {} skipped processing a message",
+                    self.context.aid.uuid()
+                );
+                self.receiver.skip().unwrap()
+            }
+            Ok(Status::Reset) => {
+                trace!(
+                    "Actor {} finished processing a message and reset the cursor",
+                    self.context.aid.uuid()
+                );
+                self.receiver.pop().unwrap();
+                self.receiver.reset_skip().unwrap();
+            }
+            Ok(Status::Stop) => {
+                debug!("Actor \"{}\" stopping", self.context.aid.name_or_uuid());
+                self.receiver.pop().unwrap();
+                self.context
+                    .system
+                    .internal_stop_actor(&self.context.aid, None);
+                stopping = true;
+            }
+            Err(e) => {
+                self.receiver.pop().unwrap();
+                error!(
+                    "[{}] returned an error when processing: {}",
+                    self.context.aid, &e
+                );
+                self.context
+                    .system
+                    .internal_stop_actor(&self.context.aid, e);
+                stopping = true;
             }
         }
 
-        // Reschedule the actor if it is still alive and has more messages.
-        if system.is_actor_alive(&actor.context.aid) && actor.receiver.receivable() > 0 {
-            actor.context.system.reschedule(actor.clone());
+        stopping
+    }
+
+    fn overwrite_on_stop(&self, result: Result<Status, StdError>) -> Result<Status, StdError> {
+        match self.stopping {
+            true => result.map(|_| Status::Stop),
+            false => result,
+        }
+    }
+}
+
+/// The meat of the Actor's handling
+impl Stream for ActorStream {
+    type Item = Result<Status, StdError>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        trace!("Actor {} is being polled", self.context.aid.name_or_uuid());
+        // If we have a pending future, that's what we poll.
+        if let Some(mut pending) = self.pending.take() {
+            // Poll, ensure we respect stopping condition.
+            pending
+                .as_mut()
+                .poll(cx)
+                .map(|r| Some(self.overwrite_on_stop(r)))
+        } else {
+            // Are we stopped? If so, we should not have been polled, panic. This is only acceptable
+            // because it means a bug in the Executor or Reactor.
+            if self.stopping {
+                panic!("Stopped ActorStream was polled after stopping. Please open a bug report.")
+            }
+            // Else, we go for another.
+            match self.receiver.peek() {
+                Ok(msg) => {
+                    // We're stopping after this future, mark as such
+                    if let Some(m) = msg.content_as::<SystemMsg>() {
+                        if let SystemMsg::Stop = *m {
+                            trace!("Actor {} received stop message", self.context.aid.uuid());
+                            self.stopping = true;
+                        }
+                    }
+
+                    // Get the next future
+                    let ctx = self.context.clone();
+                    let mut future = (&mut self.handler)(ctx, msg.clone());
+                    // Just. give it a ~~wave~~ poll!!
+                    match future.as_mut().poll(cx) {
+                        Poll::Ready(r) => Poll::Ready(Some(self.overwrite_on_stop(r))),
+                        Poll::Pending => {
+                            trace!("Actor {} is pending", self.context.aid.uuid());
+                            self.pending = Some(future);
+                            Poll::Pending
+                        }
+                    }
+                }
+                Err(err) => match err {
+                    // Ready(None) is standard for "Stream is depleted". The stream is effectively
+                    // monadic around the message queue, so if the channel is depleted, the stream
+                    // is as well. `Full` is non-contextual.
+                    //
+                    // While this is exhaustive, we're avoiding a catchall to in anticipation of
+                    // future Secc errors we would *want* to handle.
+                    SeccErrors::Empty | SeccErrors::Full(_) => Poll::Ready(None),
+                },
+            }
         }
     }
 }
@@ -870,35 +1025,34 @@ impl Actor {
 mod tests {
     use super::*;
     use crate::tests::*;
+    use log::*;
     use std::thread;
+    use std::time::Instant;
 
+    /// This is identical to the documentation but here so that its formatted by rust and we can
+    /// copy paste this into the docs. It's also easier to debug here.
     #[test]
     fn test_send_examples() {
-        use std::time::Duration;
-
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
 
         let aid = system
             .spawn()
-            .with(
-                0 as usize,
-                move |_state: &mut usize, context: &Context, message: &Message| {
+            .with((), |_: (), context: Context, message: Message| {
+                async move {
                     if let Some(_) = message.content_as::<i32>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok(Status::Done)
-                },
-            )
+                    Ok(((), Status::Done))
+                }
+            })
             .unwrap();
 
         match aid.send(Message::new(11)) {
-            Ok(_) => println!("OK Then!"),
-            Err(e) => println!("Ooops {:?}", e),
+            Ok(_) => info!("OK Then!"),
+            Err(e) => info!("Ooops {:?}", e),
         }
 
-        system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .unwrap();
+        system.await_shutdown(None);
     }
 
     /// Tests that unserializable messages can be sent locally.
@@ -919,23 +1073,20 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with(
-                0 as usize,
-                move |_state: &mut usize, context: &Context, message: &Message| {
+            .with((), move |_state: (), context: Context, message: Message| {
+                async move {
                     if let Some(_) = message.content_as::<Foo>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok(Status::Done)
-                },
-            )
+                    Ok(((), Status::Done))
+                }
+            })
             .unwrap();
 
         aid.send(Message::new(Foo {})).unwrap();
         await_received(&aid, 2, 1000).unwrap();
 
-        system
-            .await_shutdown_with_timeout(Duration::from_millis(1000))
-            .unwrap();
+        system.await_shutdown(Duration::from_millis(1000));
     }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
@@ -945,7 +1096,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -953,7 +1104,7 @@ mod tests {
         assert_eq!(None, aid.data.name);
         assert_eq!(aid.data.name, aid.name());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// This test verifies that an actor's functions that retrieve basic info are working for
@@ -963,7 +1114,7 @@ mod tests {
         init_test_log();
 
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().name("A").with(0, simple_handler).unwrap();
+        let aid = system.spawn().name("A").with((), simple_handler).unwrap();
         await_received(&aid, 1, 1000).unwrap();
         assert_eq!(system.uuid(), aid.data.system_uuid);
         assert_eq!(aid.data.system_uuid, aid.system_uuid());
@@ -971,7 +1122,7 @@ mod tests {
         assert_eq!(Some("A".to_string()), aid.data.name);
         assert_eq!(aid.data.name, aid.name());
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
     }
 
     /// Tests serialization and deserialization of `Aid`s. This verifies that deserialized
@@ -983,7 +1134,7 @@ mod tests {
     #[test]
     fn test_aid_serialization() {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid1 = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid1 = system.spawn().with((), simple_handler).unwrap();
         system.init_current(); // Required by Aid serialization.
 
         // This check forces the test to break here if someone changes the default.
@@ -1001,7 +1152,7 @@ mod tests {
 
         // Spawn an actor and serialize the value but then stop the actor and try and deserialize
         // and we should get an error.
-        let aid2 = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid2 = system.spawn().with((), simple_handler).unwrap();
         let aid2_serialized = bincode::serialize(&aid2).unwrap();
         system.stop_actor(&aid2);
         let aid2_deserialized = bincode::deserialize::<Aid>(&aid2_serialized);
@@ -1042,6 +1193,8 @@ mod tests {
     fn test_aid_as_message() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
 
         #[derive(Serialize, Deserialize)]
         enum Op {
@@ -1050,19 +1203,20 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with(
-                0,
-                |_state: &mut i32, context: &Context, message: &Message| {
+            .with(t, |t: AssertCollect, context: Context, message: Message| {
+                async move {
                     if let Some(msg) = message.content_as::<Aid>() {
-                        assert!(Aid::ptr_eq(&context.aid, &msg));
+                        t.assert(Aid::ptr_eq(&context.aid, &msg), "Aid mutated in transit");
                     } else if let Some(msg) = message.content_as::<Op>() {
                         match &*msg {
-                            Op::Aid(a) => assert!(Aid::ptr_eq(&context.aid, &a)),
+                            Op::Aid(a) => {
+                                t.assert(Aid::ptr_eq(&context.aid, &a), "Aid mutated in transit")
+                            }
                         }
                     }
-                    Ok(Status::Done)
-                },
-            )
+                    Ok((t, Status::Done))
+                }
+            })
             .unwrap();
 
         // Send a message to the actor.
@@ -1071,20 +1225,21 @@ mod tests {
 
         // Wait for the Start and our message to get there because test is asynchronous.
         await_received(&aid, 2, 1000).unwrap();
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// Tests that messages cannot be sent to an `aid` for an actor that has been stopped.
     #[test]
     fn test_cant_send_to_stopped() {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
-        let aid = system.spawn().with(0 as usize, simple_handler).unwrap();
+        let aid = system.spawn().with((), simple_handler).unwrap();
         system.stop_actor(&aid);
         assert_eq!(false, system.is_actor_alive(&aid));
 
         // Make sure that the actor is actually stopped and can't get more messages.
         match aid.send(Message::new(42 as i32)) {
-            Err(AxiomError::ActorAlreadyStopped) => assert!(true), // all OK!
+            Err(AidError::ActorAlreadyStopped) => assert!(true), // all OK!
             Ok(_) => panic!("Expected the actor to be shut down!"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -1095,19 +1250,23 @@ mod tests {
     fn test_actor_returns_stop() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
 
         let aid = system
             .spawn()
-            .with((), |_: &mut (), _: &Context, message: &Message| {
-                if let Some(_msg) = message.content_as::<i32>() {
-                    Ok(Status::Stop)
-                } else if let Some(msg) = message.content_as::<SystemMsg>() {
-                    match &*msg {
-                        SystemMsg::Start => Ok(Status::Done),
-                        m => panic!("unexpected message: {:?}", m),
+            .with(t, |t: AssertCollect, _: Context, message: Message| {
+                async move {
+                    if let Some(_msg) = message.content_as::<i32>() {
+                        Ok((t, Status::Stop))
+                    } else if let Some(msg) = message.content_as::<SystemMsg>() {
+                        match &*msg {
+                            SystemMsg::Start => Ok((t, Status::Done)),
+                            m => t.panic(format!("unexpected message: {:?}", m)),
+                        }
+                    } else {
+                        t.panic("Unknown Message received")
                     }
-                } else {
-                    panic!("Unknown Message received");
                 }
             })
             .unwrap();
@@ -1125,10 +1284,11 @@ mod tests {
             } else if max < Instant::elapsed(&start) {
                 panic!("Timed out waiting for actor to stop!");
             }
-            thread::sleep(Duration::from_millis(1));
+            sleep(1);
         }
 
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 
     /// Tests that an actor cannot override the processing of a `Stop` message by returning a
@@ -1137,19 +1297,23 @@ mod tests {
     fn test_actor_cannot_override_stop() {
         init_test_log();
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+        let tracker = AssertCollect::new();
+        let t = tracker.clone();
 
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
             .spawn()
-            .with((), |_: &mut (), _: &Context, message: &Message| {
-                if let Some(msg) = message.content_as::<SystemMsg>() {
-                    match &*msg {
-                        SystemMsg::Start => Ok(Status::Done),
-                        SystemMsg::Stop => Ok(Status::Done),
-                        m => panic!("unexpected message: {:?}", m),
+            .with(t, |t: AssertCollect, _: Context, message: Message| {
+                async move {
+                    if let Some(msg) = message.content_as::<SystemMsg>() {
+                        match &*msg {
+                            SystemMsg::Start => Ok((t, Status::Done)),
+                            SystemMsg::Stop => Ok((t, Status::Done)),
+                            m => t.panic(format!("unexpected message: {:?}", m)),
+                        }
+                    } else {
+                        t.panic("Unknown Message received")
                     }
-                } else {
-                    panic!("Unknown Message received");
                 }
             })
             .unwrap();
@@ -1167,9 +1331,9 @@ mod tests {
             } else if max < Instant::elapsed(&start) {
                 panic!("Timed out waiting for actor to stop!");
             }
-            thread::sleep(Duration::from_millis(1));
+            sleep(1);
         }
-
-        system.trigger_and_await_shutdown();
+        system.trigger_and_await_shutdown(None);
+        tracker.collect();
     }
 }

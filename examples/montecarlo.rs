@@ -8,7 +8,7 @@
 //! * Using monitors to allow a manager actor to know when each of its child actors have completed
 //!   their work.
 
-use axiom::*;
+use axiom::prelude::*;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ impl Game {
     }
 
     /// This is the Processor function for the game actors.
-    fn play(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
+    async fn play(mut self, ctx: Context, msg: Message) -> ActorResult<Self> {
         // A game instance starts when the `GameManager` actor sends a message containing its `Aid`.
         // This allows this actor to send its results back to the manager once the game is complete.
         if let Some(results_aid) = msg.content_as::<Aid>() {
@@ -64,9 +64,9 @@ impl Game {
                 .unwrap();
             // Because the `GameManager` is monitoring this actor, sending the `Stop` status
             // will inform the manager that this game is now completed.
-            return Ok(Status::Stop);
+            return Ok((self, Status::Stop));
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 }
 
@@ -95,7 +95,7 @@ struct GameMsg {
 impl GameMsg {
     fn new(aid: Aid, vec: Vec<i64>) -> Self {
         Self {
-            aid: aid,
+            aid,
             results_vec: vec,
         }
     }
@@ -117,7 +117,7 @@ impl GameManager {
     fn new(total_games: u32) -> Self {
         Self {
             games_finished: 0,
-            total_games: total_games,
+            total_games,
             results: HashMap::new(),
         }
     }
@@ -125,7 +125,7 @@ impl GameManager {
 
 impl GameManager {
     // This is the Processor function for the manager actor.
-    fn gather_results(&mut self, ctx: &Context, msg: &Message) -> AxiomResult {
+    async fn gather_results(mut self, ctx: Context, msg: Message) -> ActorResult<Self> {
         // Receive messages from the Game actors and aggregate their results in a `HashMap`.
         if let Some(game_msg) = msg.content_as::<GameMsg>() {
             self.results
@@ -161,7 +161,7 @@ impl GameManager {
                 // This code runs each time a monitored `Game` actor stops. Once all the actors are
                 // finished, the average final results of each game will be printed and then the
                 // actor system will be shut down.
-                SystemMsg::Stopped(_) => {
+                SystemMsg::Stopped { .. } => {
                     self.games_finished += 1;
                     if self.games_finished == self.total_games {
                         // Each vec of results contains the entire history of a game for every time that
@@ -183,7 +183,7 @@ impl GameManager {
                 _ => {}
             }
         }
-        Ok(Status::Done)
+        Ok((self, Status::Done))
     }
 }
 
@@ -205,5 +205,5 @@ fn main() {
         .unwrap();
 
     // Wait for the actor system to shut down.
-    system.await_shutdown();
+    system.await_shutdown(None);
 }

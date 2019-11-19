@@ -1,6 +1,6 @@
 //! Defines the types associated with messages sent to actors.
 
-use crate::AxiomError;
+use crate::AidError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::{Any, TypeId};
@@ -14,14 +14,14 @@ pub trait ActorMessage: Send + Sync + Any {
     /// Gets a bincode serialized version of the message and returns it in a result or an error
     /// indicating what went wrong.
     fn to_bincode(&self) -> Result<Vec<u8>, Box<dyn Error>> {
-        Err(Box::new(AxiomError::CantConvertToBincode))
+        Err(Box::new(AidError::CantConvertToBincode))
     }
 
     fn from_bincode(_data: &Vec<u8>) -> Result<Self, Box<dyn Error>>
     where
         Self: Sized,
     {
-        Err(Box::new(AxiomError::CantConvertFromBincode))
+        Err(Box::new(AidError::CantConvertFromBincode))
     }
 }
 

@@ -30,7 +30,7 @@ matrix:
         - cargo fmt -- --check
         - cargo test
         - cargo build
-        - cargo doc
+        - cargo doc --no-deps
         - cargo package
       deploy:
         provider: cargo
