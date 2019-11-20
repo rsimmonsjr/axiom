@@ -1,6 +1,7 @@
 use crate::prelude::*;
-use crate::system::SystemActorMessage;
 use log::{debug, error};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// The system actor is a unique actor on the system registered with the name "System".
 /// This actor provides core functionality that other actors will utilize.
@@ -40,4 +41,21 @@ impl SystemActor {
             Ok((self, Status::Done))
         }
     }
+}
+
+/// Messages that are sent to and received from the System Actor.Aid
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) enum SystemActorMessage {
+    /// Finds an actor by name.
+    FindByName { reply_to: Aid, name: String },
+
+    /// A message sent as a reply to a [`SystemActorMessage::FindByName`] request.
+    FindByNameResult {
+        /// The UUID of the system that is responding.
+        system_uuid: Uuid,
+        /// The name that was searched for.
+        name: String,
+        /// The Aid in a [`Some`] if found or [`None`] if not.
+        aid: Option<Aid>,
+    },
 }

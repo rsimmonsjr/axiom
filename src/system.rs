@@ -851,26 +851,10 @@ impl fmt::Debug for ActorSystem {
     }
 }
 
-/// Messages that are sent to and received from the System Actor.Aid
-#[derive(Serialize, Deserialize, Debug)]
-enum SystemActorMessage {
-    /// Finds an actor by name.
-    FindByName { reply_to: Aid, name: String },
-
-    /// A message sent as a reply to a [`SystemActorMessage::FindByName`] request.
-    FindByNameResult {
-        /// The UUID of the system that is responding.
-        system_uuid: Uuid,
-        /// The name that was searched for.
-        name: String,
-        /// The Aid in a [`Some`] if found or [`None`] if not.
-        aid: Option<Aid>,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system::system_actor::SystemActorMessage;
     use crate::tests::*;
     use futures::future;
     use std::thread;
