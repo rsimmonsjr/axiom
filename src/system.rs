@@ -11,6 +11,7 @@
 use crate::actors::{Actor, ActorBuilder, ActorStream};
 use crate::executor::AxiomExecutor;
 use crate::prelude::*;
+use crate::system::system_actor::SystemActor;
 use dashmap::DashMap;
 use log::{debug, error, info, trace, warn};
 use once_cell::sync::OnceCell;
@@ -25,6 +26,8 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+mod system_actor;
 
 // Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
 // other types can obtain a clone if needed at any time. This will be automatically set for all
@@ -355,12 +358,11 @@ impl ActorSystem {
             }
         }
 
-        // The system actor is a unique actor on the system registered with the name "System".
-        // This actor provides core functionality that other actors will utilize.
+        // Launch the SystemActor and give it the name "System"
         system
             .spawn()
             .name("System")
-            .with((), system_actor_processor)
+            .with(SystemActor, SystemActor::processor)
             .unwrap();
 
         system
@@ -849,64 +851,10 @@ impl fmt::Debug for ActorSystem {
     }
 }
 
-/// Messages that are sent to and received from the System Actor.Aid
-#[derive(Serialize, Deserialize, Debug)]
-enum SystemActorMessage {
-    /// Finds an actor by name.
-    FindByName { reply_to: Aid, name: String },
-
-    /// A message sent as a reply to a [`SystemActorMessage::FindByName`] request.
-    FindByNameResult {
-        /// The UUID of the system that is responding.
-        system_uuid: Uuid,
-        /// The name that was searched for.
-        name: String,
-        /// The Aid in a [`Some`] if found or [`None`] if not.
-        aid: Option<Aid>,
-    },
-}
-
-/// A processor for the system actor.
-// FIXME Issue #89: Refactor into a full struct based actor in another file.
-async fn system_actor_processor(_: (), context: Context, message: Message) -> ActorResult<()> {
-    if let Some(msg) = message.content_as::<SystemActorMessage>() {
-        match &*msg {
-            // Someone requested that this system actor find an actor by name.
-            SystemActorMessage::FindByName { reply_to, name } => {
-                debug!("Attempting to locate Actor by name: {}", name);
-                let found = context.system.find_aid_by_name(&name);
-                let reply = Message::new(SystemActorMessage::FindByNameResult {
-                    system_uuid: context.system.uuid(),
-                    name: name.clone(),
-                    aid: found,
-                });
-                // Note that you can't just unwrap or you could panic the dispatcher thread if
-                // there is a problem sending the reply. In this case, the error is logged but the
-                // actor moves on.
-                reply_to.send(reply).unwrap_or_else(|error| {
-                    error!(
-                        "Could not send reply to FindByName to actor {}. Error: {:?}",
-                        reply_to, error
-                    )
-                });
-                Ok(((), Status::Done))
-            }
-            _ => Ok(((), Status::Done)),
-        }
-    } else if let Some(msg) = message.content_as::<SystemMsg>() {
-        match &*msg {
-            SystemMsg::Start => Ok(((), Status::Done)),
-            _ => Ok(((), Status::Done)),
-        }
-    } else {
-        error!("Unhandled message received.");
-        Ok(((), Status::Done))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system::system_actor::SystemActorMessage;
     use crate::tests::*;
     use futures::future;
     use std::thread;
