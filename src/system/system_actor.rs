@@ -31,14 +31,14 @@ impl SystemActor {
                     )
                 });
             }
-            Ok((self, Status::Done))
+            Ok(Status::done(self))
         // Do nothing special if we get a SystemMsg.
         } else if let Some(_) = message.content_as::<SystemMsg>() {
-            Ok((self, Status::Done))
+            Ok(Status::done(self))
         // Log an error if we get an unexpected message kind, but continue processing as normal.
         } else {
             error!("Unhandled message received.");
-            Ok((self, Status::Done))
+            Ok(Status::done(self))
         }
     }
 }
