@@ -72,7 +72,7 @@
 //!     .with(
 //!         0 as usize,
 //!         |state: usize, _context: Context, _message: Message| async move {
-//!             Ok((state, Status::Done))
+//!             Ok(Status::done(state))
 //!         }
 //!     )
 //!     .unwrap();
@@ -124,12 +124,12 @@
 //!         } else {
 //!             self.value -= 1;
 //!         }
-//!         Ok((self, Status::Done))
+//!         Ok(Status::done(self))
 //!     }
 //!
 //!     fn handle_i32(mut self, message: i32) -> ActorResult<Self> {
 //!         self.value += message;
-//!         Ok((self, Status::Done))
+//!         Ok(Status::done(self))
 //!     }
 //!
 //!     async fn handle(mut self, _context: Context, message: Message) -> ActorResult<Self> {
@@ -312,7 +312,7 @@ mod tests {
     /// A function that just returns `Ok(Status::Done)` which can be used as a handler for
     /// a simple dummy actor.
     pub async fn simple_handler(_: (), _: Context, _: Message) -> ActorResult<()> {
-        Ok(((), Status::Done))
+        Ok(Status::done(()))
     }
 
     /// A utility that waits for a certain number of messages to arrive in a certain time and
@@ -360,7 +360,7 @@ mod tests {
         let aid = system
             .spawn()
             .with((), |_: (), _: Context, _: Message| {
-                async { Ok(((), Status::Done)) }
+                async { Ok(Status::done(())) }
             })
             .unwrap();
 
@@ -420,16 +420,16 @@ mod tests {
                 // Attempt to downcast to expected message.
                 if let Some(_msg) = message.content_as::<SystemMsg>() {
                     state += 1;
-                    Ok((state, Status::Done))
+                    Ok(Status::done(state))
                 } else if let Some(msg) = message.content_as::<i32>() {
                     t.assert(expected[state - 1] == *msg, "Unexpected message content");
                     t.assert(state == context.aid.received().unwrap(), "Unexpected state");
                     state += 1;
-                    Ok((state, Status::Done))
+                    Ok(Status::done(state))
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Ok((state, Status::Done))
+                    Ok(Status::done(state))
                 } else {
                     t.panic("Failed to dispatch properly")
                 }
@@ -539,7 +539,7 @@ mod tests {
                 let tgt = aid_moved.clone();
                 async move {
                     tgt.send_new(11)?;
-                    Ok(((), Status::Done))
+                    Ok(Status::done(()))
                 }
             })
             .unwrap();
@@ -568,7 +568,7 @@ mod tests {
                 match &*msg {
                     PingPong::Pong => {
                         context.system.trigger_shutdown();
-                        Ok(((), Status::Done))
+                        Ok(Status::done(()))
                     }
                     _ => Err("Unexpected message".to_string().into()),
                 }
@@ -579,12 +579,12 @@ mod tests {
                         // Now we will spawn a new actor to handle our pong and send to it.
                         let pong_aid = context.system.spawn().with((), pong)?;
                         pong_aid.send_new(PingPong::Ping(context.aid.clone()))?;
-                        Ok(((), Status::Done))
+                        Ok(Status::done(()))
                     }
-                    _ => Ok(((), Status::Done)),
+                    _ => Ok(Status::done(())),
                 }
             } else {
-                Ok(((), Status::Done))
+                Ok(Status::done(()))
             }
         }
 
@@ -593,12 +593,12 @@ mod tests {
                 match &*msg {
                     PingPong::Ping(from) => {
                         from.send_new(PingPong::Pong)?;
-                        Ok(((), Status::Done))
+                        Ok(Status::done(()))
                     }
                     _ => Err("Unexpected message".into()),
                 }
             } else {
-                Ok(((), Status::Done))
+                Ok(Status::done(()))
             }
         }
 

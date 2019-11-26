@@ -428,7 +428,7 @@ mod tests {
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
             match &mut self.pending_count {
-                0 => Poll::Ready(Ok(((), Status::Done))),
+                0 => Poll::Ready(Ok(Status::done(()))),
                 count => {
                     *count -= 1;
                     debug!("Pending, {} times left", count);
@@ -489,7 +489,7 @@ mod tests {
             .with((), |_: (), _: Context, msg: Message| {
                 async move {
                     if let Some(_) = msg.content_as::<SystemMsg>() {
-                        return Ok(((), Status::Done));
+                        return Ok(Status::done(()));
                     }
 
                     PendingNTimes::new(1, 25).await
