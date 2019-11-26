@@ -58,6 +58,28 @@ pub enum Status {
     Stop,
 }
 
+impl Status {
+    /// Ergonomic shortcut for writing `(state, Status::Done)`
+    pub fn done<T>(state: T) -> (T, Status) {
+        (state, Status::Done)
+    }
+
+    /// Ergonomic shortcut for writing `(state, Status::Skip)`
+    pub fn skip<T>(state: T) -> (T, Status) {
+        (state, Status::Skip)
+    }
+
+    /// Ergonomic shortcut for writing `(state, Status::Reset)`
+    pub fn reset<T>(state: T) -> (T, Status) {
+        (state, Status::Reset)
+    }
+
+    /// Ergonomic shortcut for writing `(state, Status::Stop)`
+    pub fn stop<T>(state: T) -> (T, Status) {
+        (state, Status::Stop)
+    }
+}
+
 /// Errors returned by the Aid
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AidError {
@@ -292,7 +314,7 @@ impl Aid {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok((state, Status::Done))
+    ///             Ok(Status::done(state))
     ///        },
     ///     )
     ///     .unwrap();
@@ -358,7 +380,7 @@ impl Aid {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok((state, Status::Done))
+    ///             Ok(Status::done(state))
     ///        },
     ///     )
     ///     .unwrap();
@@ -399,7 +421,7 @@ impl Aid {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok((state, Status::Done))
+    ///             Ok(Status::done(state))
     ///        },
     ///     )
     ///     .unwrap();
@@ -442,7 +464,7 @@ impl Aid {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok((state, Status::Done))
+    ///             Ok(Status::done(state))
     ///        },
     ///     )
     ///     .unwrap();
@@ -505,7 +527,7 @@ impl Aid {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok((state, Status::Done))
+    ///             Ok(Status::done(state))
     ///        },
     ///     )
     ///     .unwrap();
@@ -547,7 +569,7 @@ impl Aid {
     ///             if let Some(_) = message.content_as::<i32>() {
     ///                 context.system.trigger_shutdown();
     ///             }
-    ///             Ok((state, Status::Done))
+    ///             Ok(Status::done(state))
     ///        },
     ///     )
     ///     .unwrap();
@@ -1042,7 +1064,7 @@ mod tests {
                     if let Some(_) = message.content_as::<i32>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok(((), Status::Done))
+                    Ok(Status::done(()))
                 }
             })
             .unwrap();
@@ -1078,7 +1100,7 @@ mod tests {
                     if let Some(_) = message.content_as::<Foo>() {
                         context.system.trigger_shutdown();
                     }
-                    Ok(((), Status::Done))
+                    Ok(Status::done(()))
                 }
             })
             .unwrap();
@@ -1214,7 +1236,7 @@ mod tests {
                             }
                         }
                     }
-                    Ok((t, Status::Done))
+                    Ok(Status::done(t))
                 }
             })
             .unwrap();
@@ -1261,7 +1283,7 @@ mod tests {
                         Ok((t, Status::Stop))
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
-                            SystemMsg::Start => Ok((t, Status::Done)),
+                            SystemMsg::Start => Ok(Status::done(t)),
                             m => t.panic(format!("unexpected message: {:?}", m)),
                         }
                     } else {
@@ -1307,8 +1329,8 @@ mod tests {
                 async move {
                     if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
-                            SystemMsg::Start => Ok((t, Status::Done)),
-                            SystemMsg::Stop => Ok((t, Status::Done)),
+                            SystemMsg::Start => Ok(Status::done(t)),
+                            SystemMsg::Stop => Ok(Status::done(t)),
                             m => t.panic(format!("unexpected message: {:?}", m)),
                         }
                     } else {

@@ -668,7 +668,7 @@ impl ActorSystem {
     ///
     /// async fn handler(mut count: usize, _: Context, _: Message) -> ActorResult<usize> {
     ///     count += 1;
-    ///     Ok((count, Status::Done))
+    ///     Ok(Status::done(count))
     /// }
     ///
     /// let state = 0 as usize;
@@ -896,7 +896,7 @@ mod tests {
                     // Block for enough time so we can test timeout twice
                     sleep(100);
                     context.system.trigger_shutdown();
-                    Ok(((), Status::Done))
+                    Ok(Status::done(()))
                 }
             })
             .unwrap();
@@ -1120,9 +1120,9 @@ mod tests {
                             .1
                             .assert(Aid::ptr_eq(&state.0, aid), "Pointers are not equal!");
                         state.1.assert(error.is_none(), "Actor was errored!");
-                        Ok((state, Status::Done))
+                        Ok(Status::done(state))
                     }
-                    SystemMsg::Start => Ok((state, Status::Done)),
+                    SystemMsg::Start => Ok(Status::done(state)),
                     _ => state.1.panic("Received some other message!"),
                 }
             } else {
@@ -1174,7 +1174,7 @@ mod tests {
             .with((), |_: (), _: Context, msg: Message| {
                 if let Some(_) = msg.content_as::<SystemMsg>() {
                     debug!("Not panicking this time");
-                    return future::ok(((), Status::Done));
+                    return future::ok(Status::done(()));
                 }
 
                 debug!("About to panic");
@@ -1193,9 +1193,9 @@ mod tests {
                                 error.as_ref().unwrap() == "I panicked",
                                 "Error message does not match",
                             );
-                            future::ok((state, Status::Stop))
+                            future::ok(Status::stop(state))
                         }
-                        SystemMsg::Start => future::ok((state, Status::Done)),
+                        SystemMsg::Start => future::ok(Status::done(state)),
                         _ => t.panic("Unexpected message received!"),
                     }
                 } else {
@@ -1275,9 +1275,9 @@ mod tests {
                     if let Some(msg) = message.content_as::<Request>() {
                         msg.reply_to.send_new(Reply {}).unwrap();
                         context.system.trigger_shutdown();
-                        Ok(((), Status::Stop))
+                        Ok(Status::stop(()))
                     } else if let Some(_) = message.content_as::<SystemMsg>() {
-                        Ok(((), Status::Done))
+                        Ok(Status::done(()))
                     } else {
                         t.panic("Unexpected message received!")
                     }
@@ -1294,7 +1294,7 @@ mod tests {
                 if let Some(_) = message.content_as::<Reply>() {
                     debug!("Received reply, shutting down");
                     context.system.trigger_shutdown();
-                    future::ok(((), Status::Stop))
+                    future::ok(Status::stop(()))
                 } else if let Some(msg) = message.content_as::<SystemMsg>() {
                     match &*msg {
                         SystemMsg::Start => {
@@ -1305,9 +1305,9 @@ mod tests {
                                     reply_to: context.aid.clone(),
                                 })
                                 .unwrap();
-                            future::ok(((), Status::Done))
+                            future::ok(Status::done(()))
                         }
-                        _ => future::ok(((), Status::Done)),
+                        _ => future::ok(Status::done(())),
                     }
                 } else {
                     t.panic("Unexpected message received!")
@@ -1336,9 +1336,9 @@ mod tests {
                 async move {
                     if let Some(_) = message.content_as::<bool>() {
                         context.system.trigger_shutdown();
-                        Ok(((), Status::Stop))
+                        Ok(Status::stop(()))
                     } else {
-                        Ok(((), Status::Done))
+                        Ok(Status::done(()))
                     }
                 }
             })
@@ -1363,7 +1363,7 @@ mod tests {
                                     );
                                     target.send_new(true).unwrap();
                                     context.system.trigger_shutdown();
-                                    Ok(((), Status::Done))
+                                    Ok(Status::done(()))
                                 } else {
                                     t.panic("Didn't find AID.")
                                 }
@@ -1379,7 +1379,7 @@ mod tests {
                                     name: "A".to_string(),
                                 },
                             ));
-                            Ok(((), Status::Done))
+                            Ok(Status::done(()))
                         } else {
                             t.panic("Unexpected message received!")
                         }
