@@ -387,7 +387,7 @@ mod tests {
 
         impl Data {
             async fn handle(self, _: Context, _: Message) -> ActorResult<Self> {
-                Ok((self, Status::Done))
+                Ok(Status::done(self))
             }
         }
 
@@ -481,12 +481,12 @@ mod tests {
                 } else {
                     self.value -= 1;
                 }
-                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
+                Ok(Status::done(self)) // This assertion will fail but we still have to return.
             }
 
             fn handle_i32(mut self, message: i32) -> ActorResult<Self> {
                 self.value += message;
-                Ok((self, Status::Done)) // This assertion will fail but we still have to return.
+                Ok(Status::done(self)) // This assertion will fail but we still have to return.
             }
 
             async fn handle(self, _context: Context, message: Message) -> ActorResult<Self> {
@@ -497,7 +497,7 @@ mod tests {
                 } else if let Some(_msg) = message.content_as::<SystemMsg>() {
                     // Note that we put this last because it only is ever received once, we
                     // want the most frequently received messages first.
-                    Ok((self, Status::Done))
+                    Ok(Status::done(self))
                 } else {
                     self.tracker.panic("Failed to dispatch properly")
                 }
