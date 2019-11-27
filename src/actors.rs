@@ -1280,7 +1280,7 @@ mod tests {
             .with(t, |t: AssertCollect, _: Context, message: Message| {
                 async move {
                     if let Some(_msg) = message.content_as::<i32>() {
-                        Ok((t, Status::Stop))
+                        Ok(Status::stop(t))
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
                             SystemMsg::Start => Ok(Status::done(t)),

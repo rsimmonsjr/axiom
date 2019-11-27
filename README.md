@@ -85,7 +85,7 @@ let aid = system
     .spawn()
     .with(
         0 as usize,
-        |_state: &mut usize, _context: &Context, _message: &Message| Ok(Status::Done),
+        |state: usize, _context: Context, _message: Message| async move { Ok(Status::done(state)) },
     )
     .unwrap();
 
@@ -124,28 +124,27 @@ struct Data {
 }
 
 impl Data {
-    fn handle_bool(&mut self, message: &bool) -> AxiomResult {
+    fn handle_bool(mut self, message: bool) -> AxiomResult<Self> {
         if *message {
             self.value += 1;
         } else {
             self.value -= 1;
         }
-        Ok(Status::Done)
+        Ok(Status::done(self))
     }
 
-    fn handle_i32(&mut self, message: &i32) -> AxiomResult {
+    fn handle_i32(mut self, message: i32) -> AxiomResult<Self> {
         self.value += *message;
-        Ok(Status::Done)
+        Ok(Status::done(self))
     }
 
-    fn handle(&mut self, _context: &Context, message: &Message) -> AxiomResult {
+    fn handle(self, _context: &Context, message: &Message) -> AxiomResult {
         if let Some(msg) = message.content_as::<bool>() {
-            self.handle_bool(&*msg)
+            self.handle_bool(*msg)
         } else if let Some(msg) = message.content_as::<i32>() {
-            self.handle_i32(&*msg)
+            self.handle_i32(*msg)
         } else {
             panic!("Failed to dispatch properly");
-            Ok(Status::Stop)
         }
     }
 }

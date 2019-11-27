@@ -25,7 +25,7 @@ async fn hello(_: (), context: Context, message: Message) -> ActorResult<()> {
         println!("Hello World from Actor: {:?}", context.aid);
         context.system.trigger_shutdown();
     }
-    Ok(((), Status::Done))
+    Ok(Status::done(()))
 }
 
 pub fn main() {

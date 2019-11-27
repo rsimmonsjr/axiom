@@ -64,9 +64,9 @@ impl Game {
                 .unwrap();
             // Because the `GameManager` is monitoring this actor, sending the `Stop` status
             // will inform the manager that this game is now completed.
-            return Ok((self, Status::Stop));
+            return Ok(Status::stop(self));
         }
-        Ok((self, Status::Done))
+        Ok(Status::done(self))
     }
 }
 
@@ -183,7 +183,7 @@ impl GameManager {
                 _ => {}
             }
         }
-        Ok((self, Status::Done))
+        Ok(Status::done(self))
     }
 }
 
