@@ -6,7 +6,7 @@ use crate::prelude::*;
 use dashmap::DashMap;
 use futures::task::ArcWake;
 use futures::Stream;
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -178,6 +178,8 @@ pub(crate) struct AxiomReactor {
     thread_wait_time: Duration,
     /// How long to work on an Actor before moving on to the next Wakeup.
     time_slice: Duration,
+    /// If an `ActorStream::poll_next` takes longer than this, it will log a warning.
+    warn_threshold: Duration,
 }
 
 // A little hack to dictate a loop from inside a function call.
@@ -201,6 +203,7 @@ impl AxiomReactor {
             thread_condvar: Arc::new(RwLock::new((Mutex::new(()), Condvar::new()))),
             thread_wait_time: system.config().thread_wait_time,
             time_slice: system.config().time_slice,
+            warn_threshold: system.config().warn_threshold,
         }
     }
 
@@ -240,9 +243,11 @@ impl AxiomReactor {
             LoopResult::Ok(v) => v,
             LoopResult::Continue => return true,
         };
+        let aid = w.id.clone();
 
         let end = Instant::now() + self.time_slice;
         loop {
+            let start = Instant::now();
             // This polls the Actor as a Stream.
             match task.poll(&w.waker) {
                 Poll::Ready(result) => {
@@ -278,6 +283,12 @@ impl AxiomReactor {
                     self.wait(task);
                     break;
                 }
+            }
+            if Instant::now().duration_since(start) >= self.warn_threshold {
+                warn!(
+                    "Actor {} took longer than configured warning threshold",
+                    aid.name_or_uuid()
+                );
             }
         }
         true
