@@ -1,10 +1,11 @@
 //! Implements the [`ActorSystem`] and related types of Axiom.
 //!
-//! When the actor system starts up, a number of dispatcher threads will be spawned that will
-//! constantly try to pull work from the work channel and process messages with the actor. When
-//! the time slice expires The actor will then be re-sent to the work channel if there are more
-//! messages for that actor to process. This continues constantly until the actor system is
-//! shutdown and all actors are stopped.
+//! When the [`ActorSystem`] starts up, a number of Reactors will be spawned that will iterate over
+//! Actor's inbound messages, processing them asynchronously. Actors will be ran as many times as
+//! they can over a given time slice until they are pending or have no more messages. If the Actor
+//! is Pending, it will be re-queued when the pending future wakes it. If the Actor has no more
+//! messages, it will be returned to the Executor until it has messages again. This process cycles
+//! until the [`ActorSystem`] is shutdown.
 //!
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
@@ -29,9 +30,9 @@ use uuid::Uuid;
 
 mod system_actor;
 
-// Holds an [`ActorSystem`] in a [`std::thread_local`] so that the [`Aid`] deserializer and
-// other types can obtain a clone if needed at any time. This will be automatically set for all
-// dispatcher threads that are processing messages with the actors.
+// Holds an ActorSystem in a std::thread_local so that the Aid deserializer and other types can
+// obtain a clone if needed at any time. This needs to be set by each Reactor that is processing
+// messages with the actors.
 std::thread_local! {
     static ACTOR_SYSTEM: OnceCell<ActorSystem> = OnceCell::new();
 }
@@ -94,19 +95,19 @@ pub struct ActorSystemConfig {
     /// a per-actor basis during spawning as well. Making the default channel size bigger allows
     /// for more bandwidth in sending messages to actors but also takes more memory. Also the
     /// user should consider if their actor needs a large channel then it might need to be
-    /// refactored or the threads size should be increased because messages arent being processed
+    /// refactored or the threads size should be increased because messages aren't being processed
     /// fast enough. The default value for this is 32.
     pub message_channel_size: u16,
     /// Max duration to wait between attempts to send to an actor's message channel. This is used
     /// to poll a busy channel that is at its capacity limit. The larger this value is, the longer
     /// `send` will wait for capacity in the channel but the user should be aware that if the
     /// system is often waiting on capacity that channel may be too small or the actor may need to
-    /// be refactored to process messages faster.  The default value is 1 millisecond.
+    /// be refactored to process messages faster. The default value is 1 millisecond.
     pub send_timeout: Duration,
     /// The size of the thread pool which governs how many worker threads there are in the system.
-    /// The number of threads should be carefully considered to have sufficient parallelism but
-    /// not over-schedule the CPU on the target hardware. The default value is 4 * the number of
-    /// logical CPUs.
+    /// The number of threads should be carefully considered to have sufficient parallelism but not
+    /// over-schedule the CPU on the target hardware. The default value is 4 * the number of logical
+    /// CPUs.
     pub thread_pool_size: u16,
     /// The threshold at which the dispatcher thread will warn the user that the message took too
     /// long to process. If this warning is being logged then the user probably should reconsider
@@ -119,25 +120,10 @@ pub struct ActorSystemConfig {
     /// that actors themselves can exceed this in processing a single message and if so, only one
     /// message will be processed before yielding. The default value is 1 millisecond.
     pub time_slice: Duration,
-    /// The number of slots to allocate for the work channel. This is the channel that the worker
-    /// threads use to schedule work on actors. The more traffic the actor system takes and the
-    /// longer the messages take to process, the bigger this should be. Ideally the actor will be
-    /// in the work channel a maximum of 1 time no matter how many messages it has pending.
-    /// However, this can vary depending upon processing dynamics that might rarely have an actor
-    /// in the channel twice. The default value is 100.
-    pub work_channel_size: u16,
-    /// The maximum amount of time to wait to be able to schedule an actor for work before
-    /// reporting an error to the user. If this is timing out then the user should increase
-    /// the work channel size to accommodate the flow. The default is 1 millisecond.
-    pub work_channel_timeout: Duration,
-    /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
-    /// this value is the longer threads will wait for polling and the kinder it will be to the
-    /// CPU. However, larger values will impact performance and may lead to some threads never
-    /// getting enough work to justify their existence. Note that the actual system uses `Condvar`
-    /// mechanics of the `secc` crate so usually polling is not a big concern. However there are
-    /// circumstances where `Condvar` notifications can be missed so the polling is in place to
-    /// compensate for this. See `secc::SeccReceiver::receive_await_timeout` for more information.
-    /// The default value is 10 milliseconds.
+    /// While Reactors will constantly attempt to get more work, they may run out. At that point,
+    /// they will idle for this duration, or until they get a wakeup notification. Said
+    /// notifications can be missed, so it's best to not set this too high. The default value is 10
+    /// milliseconds. This implementation is backed by a [`Condvar`].
     pub thread_wait_time: Duration,
 }
 
@@ -172,18 +158,6 @@ impl ActorSystemConfig {
         self
     }
 
-    /// Return a new config with the changed `work_channel_size`.
-    pub fn work_channel_size(mut self, value: u16) -> Self {
-        self.work_channel_size = value;
-        self
-    }
-
-    /// Return a new config with the changed `work_channel_timeout`.
-    pub fn work_channel_timeout(mut self, value: Duration) -> Self {
-        self.work_channel_timeout = value;
-        self
-    }
-
     /// Return a new config with the changed `thread_wait_time`.
     pub fn thread_wait_time(mut self, value: Duration) -> Self {
         self.thread_wait_time = value;
@@ -198,8 +172,6 @@ impl Default for ActorSystemConfig {
             thread_pool_size: (num_cpus::get() * 4) as u16,
             warn_threshold: Duration::from_millis(1),
             time_slice: Duration::from_millis(1),
-            work_channel_size: 100,
-            work_channel_timeout: Duration::from_millis(1),
             thread_wait_time: Duration::from_millis(100),
             message_channel_size: 32,
             send_timeout: Duration::from_millis(1),
@@ -235,7 +207,7 @@ pub struct RemoteInfo {
     /// The AID to the system actor for the remote system.
     pub system_actor_aid: Aid,
     /// The handle returned by the thread processing remote messages.
-    /// FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
+    // FIXME (Issue #76) Add graceful shutdown for threads handling remotes.
     _handle: JoinHandle<()>,
 }
 
@@ -532,9 +504,10 @@ impl ActorSystem {
     }
 
     /// Initializes this actor system to use for the current thread which is necessary if the
-    /// user wishes to serialize and deserialize [`Aid`]s. Note that this can be called only
-    /// once per thread; on the second call it will panic. This is automatically called for all
-    /// dispatcher threads that process actor messages.
+    /// user wishes to serialize and deserialize [`Aid`]s.
+    ///
+    /// ## Contract
+    /// You must run this exactly once per thread where needed.
     pub fn init_current(&self) {
         ACTOR_SYSTEM.with(|actor_system| {
             actor_system
@@ -633,7 +606,7 @@ impl ActorSystem {
         self.await_shutdown(timeout)
     }
 
-    // A internal helper to register an actor in the actor system.
+    // An internal helper to register an actor in the actor system.
     pub(crate) fn register_actor(
         &self,
         actor: Arc<Actor>,
@@ -684,9 +657,6 @@ impl ActorSystem {
             channel_size: None,
         }
     }
-
-    /// Reschedules an actor on the actor system. This is called by a dispatcher thread after
-    /// a time slice if the actor has more messages that are receivable.
 
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
     /// lookup table. This function gets called when an actor goes from 0 receivable messages to
@@ -761,14 +731,14 @@ impl ActorSystem {
     }
 
     /// Look up an [`Aid`] by the unique UUID of the actor and either returns the located
-    /// `aid` in a [`Option::Some`] or [`Option::None`] if not found.
+    /// [`Aid`] in a [`Option::Some`] or [`Option::None`] if not found.
     pub fn find_aid_by_uuid(&self, uuid: &Uuid) -> Option<Aid> {
         let aids_by_uuid = &self.data.aids_by_uuid;
         aids_by_uuid.get(uuid).map(|aid| aid.clone())
     }
 
     /// Look up an [`Aid`] by the user assigned name of the actor and either returns the
-    /// located `aid` in a [`Option::Some`] or [`Option::None`] if not found.
+    /// located [`Aid`] in a [`Option::Some`] or [`Option::None`] if not found.
     pub fn find_aid_by_name(&self, name: &str) -> Option<Aid> {
         let aids_by_name = &self.data.aids_by_name;
         aids_by_name.get(&name.to_string()).map(|aid| aid.clone())

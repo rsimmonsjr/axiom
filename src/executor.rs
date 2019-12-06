@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 mod thread_pool;
 
 /// The Executor is responsible for the high-level scheduling of Actors. When an Actor is
-/// registered, it is wrapped in a Task and added to the sleep queue. When the Actor is
-/// woken by a sent message, the Executor will check its scheduling data and queue it in the
-/// appropriate Reactor.
+/// registered, it is wrapped in a Task and added to the sleep queue. When the Actor is woken by a
+/// sent message, the Executor will check load balancing data and queue it in the Reactor with the
+/// least load.
 #[derive(Clone)]
 pub(crate) struct AxiomExecutor {
     /// The system's "is shutting down" flag.
@@ -70,8 +70,8 @@ impl AxiomExecutor {
         }
     }
 
-    /// This gives the Actor to the Executor to manage. This must be ran before any messages are
-    /// sent to the Actor, else it will fail to be woken until after its registered.
+    /// This gives the ActorStream to the Executor to manage. This must be ran before any messages
+    /// are sent to the Actor, else it will fail to be woken until after its registered.
     pub(crate) fn register_actor(&self, actor: ActorStream) {
         let id = actor.context.aid.clone();
         let actor = Mutex::new(Box::pin(actor));
@@ -79,7 +79,7 @@ impl AxiomExecutor {
         self.sleeping.insert(id.clone(), Task { id, actor });
     }
 
-    /// This wakes an Actor in the Executor which will cause its future to be polled. The Aid,
+    /// This wakes an ActorStream in the Executor which will cause its future to be polled. The Aid,
     /// through the ActorSystem, will call this on Message Send.
     pub(crate) fn wake(&self, id: Aid) {
         trace!("Waking Actor `{}`", id.name_or_uuid());
@@ -116,7 +116,7 @@ impl AxiomExecutor {
         iter_state.0
     }
 
-    /// When a Reactor is done with an Actor, it will be sent here, and the Executor will decrement
+    /// When a Reactor is done with an task, it will be sent here, and the Executor will decrement
     /// the Actor count for that Reactor.
     fn return_task(&self, task: Task, reactor: &AxiomReactor) {
         trace!(
@@ -223,7 +223,7 @@ impl AxiomReactor {
     }
 
     /// This is the core unit of work that drives the Reactor. The Executor should run this on an
-    /// endless loop.
+    /// endless loop. Returns `false` when it should no longer be ran.
     pub(crate) fn thread(&self) -> bool {
         // If we're shutting down, quit.
         {
