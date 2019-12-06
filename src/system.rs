@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BinaryHeap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -124,6 +125,9 @@ pub struct ActorSystemConfig {
     /// notifications can be missed, so it's best to not set this too high. The default value is 10
     /// milliseconds. This implementation is backed by a [`Condvar`].
     pub thread_wait_time: Duration,
+    /// Determines whether the actor system will immediately start when it is created. The default
+    /// value is true.
+    pub start_on_launch: bool,
 }
 
 impl ActorSystemConfig {
@@ -174,6 +178,7 @@ impl Default for ActorSystemConfig {
             thread_wait_time: Duration::from_millis(100),
             message_channel_size: 32,
             send_timeout: Duration::from_millis(1),
+            start_on_launch: true,
         }
     }
 }
@@ -253,6 +258,8 @@ pub(crate) struct ActorSystemData {
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The Executor responsible for managing the runtime of the Actors
     executor: AxiomExecutor,
+    /// Whether the ActorSystem has started or not.
+    started: AtomicBool,
     /// A flag and condvar that can be used to send a signal when the system begins to shutdown.
     shutdown_triggered: Arc<(Mutex<bool>, Condvar)>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
@@ -292,6 +299,8 @@ impl ActorSystem {
 
         let executor = AxiomExecutor::new(shutdown_triggered.clone());
 
+        let start_on_launch = config.start_on_launch;
+
         // Creates the actor system with the thread pools and actor map initialized.
         let system = ActorSystem {
             data: Arc::new(ActorSystemData {
@@ -299,6 +308,7 @@ impl ActorSystem {
                 config,
                 threads,
                 executor,
+                started: AtomicBool::new(false),
                 shutdown_triggered,
                 actors_by_aid: Arc::new(DashMap::default()),
                 aids_by_uuid: Arc::new(DashMap::default()),
@@ -309,31 +319,44 @@ impl ActorSystem {
             }),
         };
 
-        info!("ActorSystem {} has spawned", uuid);
-        system.data.executor.init(&system);
-
-        // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
-        // system not being created yet but needed by the thread. We put this code in a block to
-        // get around rust borrow constraints without unnecessarily copying things.
-        {
-            let mut guard = system.data.threads.lock().unwrap();
-
-            // Start the thread that reads from the `delayed_messages` queue.
-            // FIXME Put in ability to confirm how many of these to start.
-            for _ in 0..1 {
-                let thread = system.start_send_after_thread();
-                guard.push(thread);
-            }
+        // Starts the actor system if configured to do so
+        if start_on_launch {
+            system.start();
         }
 
-        // Launch the SystemActor and give it the name "System"
         system
-            .spawn()
-            .name("System")
-            .with(SystemActor, SystemActor::processor)
-            .unwrap();
+    }
 
-        system
+    /// Starts an unstarted ActorSystem. The function will do nothing if the ActorSystem has already been started.
+    pub fn start(&self) {
+        if !self
+            .data
+            .started
+            .compare_and_swap(false, true, Ordering::Relaxed)
+        {
+            info!("ActorSystem {} has spawned", self.data.uuid);
+            self.data.executor.init(self);
+
+            // We have the thread pool in a mutex to avoid a chicken & egg situation with the actor
+            // system not being created yet but needed by the thread. We put this code in a block to
+            // get around rust borrow constraints without unnecessarily copying things.
+            {
+                let mut guard = self.data.threads.lock().unwrap();
+
+                // Start the thread that reads from the `delayed_messages` queue.
+                // FIXME Put in ability to confirm how many of these to start.
+                for _ in 0..1 {
+                    let thread = self.start_send_after_thread();
+                    guard.push(thread);
+                }
+            }
+
+            // Launch the SystemActor and give it the name "System"
+            self.spawn()
+                .name("System")
+                .with(SystemActor, SystemActor::processor)
+                .unwrap();
+        }
     }
 
     /// Starts a thread that monitors the delayed_messages and sends the messages when their
