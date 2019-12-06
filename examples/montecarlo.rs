@@ -192,7 +192,6 @@ const NUM_GAMES: u32 = 100;
 fn main() {
     // Initialize the actor system.
     let config = ActorSystemConfig::default()
-        .work_channel_size(110)
         .message_channel_size(210);
 
     let system = ActorSystem::create(config);

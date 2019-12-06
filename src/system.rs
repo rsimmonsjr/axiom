@@ -119,17 +119,6 @@ pub struct ActorSystemConfig {
     /// that actors themselves can exceed this in processing a single message and if so, only one
     /// message will be processed before yielding. The default value is 1 millisecond.
     pub time_slice: Duration,
-    /// The number of slots to allocate for the work channel. This is the channel that the worker
-    /// threads use to schedule work on actors. The more traffic the actor system takes and the
-    /// longer the messages take to process, the bigger this should be. Ideally the actor will be
-    /// in the work channel a maximum of 1 time no matter how many messages it has pending.
-    /// However, this can vary depending upon processing dynamics that might rarely have an actor
-    /// in the channel twice. The default value is 100.
-    pub work_channel_size: u16,
-    /// The maximum amount of time to wait to be able to schedule an actor for work before
-    /// reporting an error to the user. If this is timing out then the user should increase
-    /// the work channel size to accommodate the flow. The default is 1 millisecond.
-    pub work_channel_timeout: Duration,
     /// Amount of time to wait in milliseconds between polling an empty work channel. The higher
     /// this value is the longer threads will wait for polling and the kinder it will be to the
     /// CPU. However, larger values will impact performance and may lead to some threads never
@@ -172,18 +161,6 @@ impl ActorSystemConfig {
         self
     }
 
-    /// Return a new config with the changed `work_channel_size`.
-    pub fn work_channel_size(mut self, value: u16) -> Self {
-        self.work_channel_size = value;
-        self
-    }
-
-    /// Return a new config with the changed `work_channel_timeout`.
-    pub fn work_channel_timeout(mut self, value: Duration) -> Self {
-        self.work_channel_timeout = value;
-        self
-    }
-
     /// Return a new config with the changed `thread_wait_time`.
     pub fn thread_wait_time(mut self, value: Duration) -> Self {
         self.thread_wait_time = value;
@@ -198,8 +175,6 @@ impl Default for ActorSystemConfig {
             thread_pool_size: (num_cpus::get() * 4) as u16,
             warn_threshold: Duration::from_millis(1),
             time_slice: Duration::from_millis(1),
-            work_channel_size: 100,
-            work_channel_timeout: Duration::from_millis(1),
             thread_wait_time: Duration::from_millis(100),
             message_channel_size: 32,
             send_timeout: Duration::from_millis(1),
