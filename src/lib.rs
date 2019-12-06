@@ -36,6 +36,9 @@
 //!   and converted, treated the same as errors. Errors should already be considered fatal, as
 //!   Actors should handle any errors in their own scope.
 //!   * BREAKING: Error types have been broken up to be more context-specific.
+//!   * BREAKING: A `start_on_launch` flag has been added to the `ActorSystemConfig` struct. This
+//!   allows for an ActorSystem to be created without immediately starting it. See `ActorSystem::start`
+//!   for how to start an unstarted `ActorSystem`.
 //!   * Helper methods have been added to `Status` to help with the return points in Actors. Each
 //!   variant has a corresponding function that takes the Actor's state. `Ok(Status::Done)` is
 //!   instead `Ok(Status::done(state))`.
