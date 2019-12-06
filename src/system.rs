@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BinaryHeap, HashSet};
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -256,8 +255,6 @@ pub(crate) struct ActorSystemData {
     executor: AxiomExecutor,
     /// A flag and condvar that can be used to send a signal when the system begins to shutdown.
     shutdown_triggered: Arc<(Mutex<bool>, Condvar)>,
-    /// A flag holding whether or not the system has shutdown.
-    shutdown_completed: Arc<AtomicBool>,
     /// Holds the [`Actor`] objects keyed by the [`Aid`].
     actors_by_aid: Arc<DashMap<Aid, Arc<Actor>>>,
     /// Holds a map of the actor ids by the UUID in the actor id. UUIDs of actor ids are assigned
@@ -303,7 +300,6 @@ impl ActorSystem {
                 threads,
                 executor,
                 shutdown_triggered,
-                shutdown_completed: Arc::new(AtomicBool::new(false)),
                 actors_by_aid: Arc::new(DashMap::default()),
                 aids_by_uuid: Arc::new(DashMap::default()),
                 aids_by_name: Arc::new(DashMap::default()),
@@ -546,7 +542,10 @@ impl ActorSystem {
     pub fn await_shutdown(&self, timeout: impl Into<Option<Duration>>) -> ShutdownResult {
         info!("System awaiting shutdown");
 
-        let result = match timeout.into() {
+        let start = Instant::now();
+        let timeout = timeout.into();
+
+        let result = match timeout {
             Some(dur) => self.await_shutdown_trigger_with_timeout(dur),
             None => self.await_shutdown_trigger_without_timeout(),
         };
@@ -555,14 +554,22 @@ impl ActorSystem {
             return r;
         }
 
-        // Wait for the system to finish shutting down
-        if !self.data.shutdown_completed.load(Ordering::Relaxed) {
-            let r = self.data.executor.await_shutdown(None);
-            self.data.shutdown_completed.swap(true, Ordering::AcqRel);
-            r
-        } else {
-            ShutdownResult::Ok
-        }
+        let timeout = {
+            match timeout {
+                Some(timeout) => {
+                    let elapsed = Instant::now().duration_since(start);
+                    if let Some(t) = timeout.checked_sub(elapsed) {
+                        Some(t)
+                    } else {
+                        return ShutdownResult::TimedOut;
+                    }
+                }
+                None => None,
+            }
+        };
+
+        // Wait for the executor to finish shutting down
+        self.data.executor.await_shutdown(timeout)
     }
 
     fn await_shutdown_trigger_with_timeout(&self, mut dur: Duration) -> Option<ShutdownResult> {
