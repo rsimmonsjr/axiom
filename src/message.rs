@@ -10,6 +10,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::{Arc, RwLock};
 
+/// This defines any value safe to send across threads as an ActorMessage.
 pub trait ActorMessage: Send + Sync + Any {
     /// Gets a bincode serialized version of the message and returns it in a result or an error
     /// indicating what went wrong.

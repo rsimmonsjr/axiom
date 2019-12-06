@@ -89,7 +89,7 @@ pub enum AidError {
     CantConvertToBincode,
 
     /// This error is returned when a message cannot be converted from bincode. This will happen
-    /// ifg the message is not Serde serializable and the user has not implemented ActorMessage to
+    /// if the message is not Serde serializable and the user has not implemented ActorMessage to
     /// provide the correct implementation.
     CantConvertFromBincode,
 
@@ -632,8 +632,8 @@ impl Aid {
         }
     }
 
-    /// Determines how many messages the actor with the aid has been sent. This method works only
-    /// for local `aid`s, remote `aid`s will return an error if this is called.
+    /// Determines how many messages the actor with the [`Aid`] has been sent. This method works only
+    /// for local [`Aid`]s, remote [`Aid`]s will return an error if this is called.
     pub fn sent(&self) -> Result<usize, AidError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.sent()),
@@ -641,8 +641,8 @@ impl Aid {
         }
     }
 
-    /// Determines how many messages the actor with the `aid` has received. This method works only
-    /// for local `aid`s, remote `aid`s will return an error if this is called.    
+    /// Determines how many messages the actor with the [`Aid`] has received. This method works only
+    /// for local [`Aid`]s, remote [`Aid`]s will return an error if this is called.
     pub fn received(&self) -> Result<usize, AidError> {
         match &self.data.sender {
             ActorSender::Local { sender, .. } => Ok(sender.received()),
@@ -700,8 +700,8 @@ impl Hash for Aid {
     }
 }
 
-/// A context that is passed to the processor to give immutable access to elements of the
-/// actor system to the implementor of an actor's processor.
+/// A context that is passed to the processor to give immutable access to elements of the actor
+/// system to the implementor of an actor's processor.
 #[derive(Clone, Debug)]
 pub struct Context {
     pub aid: Aid,
@@ -722,13 +722,14 @@ impl std::fmt::Display for Context {
 /// A type for a function that processes messages for an actor.
 ///
 /// This will be passed to a spawn function to specify the function used for managing the state of
-/// the actor based on the messages passed to the actor. The result of a processor is used to
-/// determine the status of an actor. If the actor returns an `AxiomError` then it will be stopped
-/// as if the actor had returned `Stop`. The processor takes three arguments:
+/// the actor based on the messages passed to the actor. The processor should return the status of
+/// the actor, as well as the potentially modified state. If the actor returns `Err` then it will be
+/// stopped as if the actor had returned `Stop`. The processor takes three arguments:
 /// * `state`   - The current state of the actor.
 /// * `context` - The immutable context for this actor and its system.
 /// * `message` - The current message to process.
-/// The actor must return the state on success as a `(State, Status)` tuple.
+/// The actor must return the state on success as a `(State, Status)` tuple. See [`Status`] for
+/// helper methods for returns.
 pub trait Processor<S: Send + Sync, R: Future<Output = ActorResult<S>> + Send + 'static>:
     (FnMut(S, Context, Message) -> R) + Send + Sync
 {
@@ -743,18 +744,18 @@ where
 {
 }
 
-pub(crate) type ActorFuture =
+pub(crate) type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Status, StdError>> + Send + 'static>>;
 
 /// This is the internal type for the handler that will manage the state for the actor using the
 /// user-provided message processor.
 pub(crate) trait Handler:
-    (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static
+    (FnMut(Context, Message) -> HandlerFuture) + Send + Sync + 'static
 {
 }
 
 // Allows any static function or closure, to be used as a Handler.
-impl<F> Handler for F where F: (FnMut(Context, Message) -> ActorFuture) + Send + Sync + 'static {}
+impl<F> Handler for F where F: (FnMut(Context, Message) -> HandlerFuture) + Send + Sync + 'static {}
 
 /// A builder that can be used to create and spawn an actor. To get a builder, the user would ask
 /// the actor system to create one using `system.spawn()` and then to spawn the actor by means of
@@ -803,7 +804,7 @@ impl ActorBuilder {
 }
 
 pub(crate) struct ActorStream {
-    /// The context data for the actor containing the `aid` as well as other immutable data.
+    /// The context data for the actor containing the [`Aid`] as well as other immutable data.
     pub context: Context,
     /// Receiver for the actor's message channel.
     receiver: SeccReceiver<Message>,
@@ -812,7 +813,7 @@ pub(crate) struct ActorStream {
     /// ensure the Actor is synchronous in relation to itself.
     handler: Box<dyn Handler>,
     /// The pending result of the current handler invocation.
-    pending: Option<ActorFuture>,
+    pending: Option<HandlerFuture>,
     /// Set to true when the stream receives SystemMsg::Stop
     stopping: bool,
 }
