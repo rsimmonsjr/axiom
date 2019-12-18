@@ -304,7 +304,11 @@ impl AxiomReactor {
     fn get_work(&self) -> LoopResult<(Wakeup, Task)> {
         if let Some(w) = self.get_woken() {
             if let Some(task) = self.remove_waiting(&w.id) {
-                trace!("Reactor-{} received Wakeup", self.name);
+                trace!(
+                    "Reactor-{} received Wakeup for Actor `{}`",
+                    self.name,
+                    task.id.name_or_uuid()
+                );
                 LoopResult::Ok((w, task))
             } else {
                 trace!("Reactor-{} dropping spurious WakeUp", self.name);
@@ -507,14 +511,7 @@ mod tests {
                 }
             })
             .unwrap();
-        // Apparently we can't count on SystemMsg::Start being processed and the Task returned to
-        // the executor in less than 1ms. Set as such, it failed once in 1000 iterations.
-        sleep(5);
-        assert_eq!(
-            system.executor().sleeping.len(),
-            2,
-            "Either the SystemActor or test Actor are not sleeping"
-        );
+        await_received(&aid, 1, 5).expect("Actor took too long to process Start");
         let _ = aid.send_new(()).unwrap();
         sleep(5);
         {
@@ -530,7 +527,8 @@ mod tests {
                 .len();
             assert_eq!(pending, 1, "Actor should be pending");
         }
-        sleep(30);
+        await_received(&aid, 2, 30).expect("Actor failed to process message");
+        sleep(20);
         {
             let pending = system
                 .executor()
@@ -546,6 +544,19 @@ mod tests {
                 pending, 0,
                 "Actor should be returned to the Executor by now"
             );
+        }
+        {
+            let running = system
+                .executor()
+                .reactors
+                .iter()
+                .nth(0)
+                .unwrap()
+                .run_queue
+                .read()
+                .unwrap()
+                .len();
+            assert_eq!(running, 0, "Actor should not be running again");
         }
         assert_eq!(
             system.executor().sleeping.len(),
