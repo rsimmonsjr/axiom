@@ -40,8 +40,8 @@ impl AxiomExecutor {
         Self {
             shutdown_triggered,
             thread_pool: Default::default(),
-            sleeping: Default::default(),
-            reactors: Default::default(),
+            sleeping: Arc::new(DashMap::new()),
+            reactors: Arc::new(DashMap::new()),
             actors_per_reactor: Default::default(),
         }
     }

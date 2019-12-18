@@ -310,11 +310,11 @@ impl ActorSystem {
                 executor,
                 started: AtomicBool::new(false),
                 shutdown_triggered,
-                actors_by_aid: Arc::new(DashMap::default()),
-                aids_by_uuid: Arc::new(DashMap::default()),
-                aids_by_name: Arc::new(DashMap::default()),
-                monitoring_by_monitored: Arc::new(DashMap::default()),
-                remotes: Arc::new(DashMap::default()),
+                actors_by_aid: Arc::new(DashMap::new()),
+                aids_by_uuid: Arc::new(DashMap::new()),
+                aids_by_name: Arc::new(DashMap::new()),
+                monitoring_by_monitored: Arc::new(DashMap::new()),
+                remotes: Arc::new(DashMap::new()),
                 delayed_messages: Arc::new((Mutex::new(BinaryHeap::new()), Condvar::new())),
             }),
         };
@@ -793,14 +793,19 @@ impl ActorSystem {
 
     /// Adds a monitor so that `monitoring` will be informed if `monitored` stops.
     pub fn monitor(&self, monitoring: &Aid, monitored: &Aid) {
-        let mut monitoring_by_monitored = self
-            .data
-            .monitoring_by_monitored
-            .get_raw_mut_from_key(&monitored);
-        let monitoring_vec = monitoring_by_monitored
-            .entry(monitored.clone())
-            .or_insert(HashSet::new());
-        monitoring_vec.insert(monitoring.clone());
+        match self.data.monitoring_by_monitored.get_mut(&monitored) {
+            Some(val) => val,
+            None => {
+                self.data
+                    .monitoring_by_monitored
+                    .insert(monitored.clone(), Default::default());
+                self.data
+                    .monitoring_by_monitored
+                    .get_mut(&monitored)
+                    .unwrap()
+            }
+        }
+        .insert(monitoring.clone());
     }
 
     /// Asynchronously send a message to the system actors on all connected actor systems.
