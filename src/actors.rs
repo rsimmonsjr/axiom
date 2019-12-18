@@ -18,7 +18,7 @@ use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::marker::{Send, Sync, PhantomData};
+use std::marker::{Send, Sync};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::ptr;
@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 use uuid::Uuid;
-use std::ops::DerefMut;
 
 /// Status of the message and potentially the actor as a resulting from processing a message
 /// with the actor.
@@ -888,20 +887,20 @@ impl Actor {
             let s = unsafe { (*state.0).take() }.expect("State cell was empty");
             let future = catch_unwind(AssertUnwindSafe(|| (processor)(s, ctx, msg)));
             async move {
-                let result = match future {
-                    Ok(future) => {
-                        let pending = PanicSafeFuture {
-                            future: Box::pin(future),
-                            __state_phantom_data: PhantomData::<S>::default(),
-                        };
-                        pending.await
+                match future {
+                    Ok(future) => match AssertUnwindSafe(future).catch_unwind().await {
+                        Ok(x) => x,
+                        Err(panic) => {
+                            warn!("Actor panicked! Catching as error");
+                            Err(Panic::from(panic).into())
+                        }
                     },
                     Err(err) => {
                         warn!("Actor panicked! Catching as error");
                         Err(Panic::from(err).into())
                     }
-                };
-                result.map(|(s, status)| {
+                }
+                .map(|(s, status)| {
                     unsafe { ptr::write(state.0, Some(s)) };
                     status
                 })
@@ -926,26 +925,6 @@ impl Actor {
         };
 
         (Arc::new(actor), stream)
-    }
-}
-
-struct PanicSafeFuture<S, F>
-where
-    F: Future<Output=ActorResult<S>>,
-{
-    future: Pin<Box<F>>,
-    __state_phantom_data: PhantomData<S>,
-}
-
-impl<S, F: Future<Output=ActorResult<S>>> Future for PanicSafeFuture<S, F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
-        let x = self.future.as_mut();
-        match catch_unwind(AssertUnwindSafe(|| x.poll(cx))) {
-            Ok(result) => result,
-            Err(p) => Poll::Ready(Err(Panic::from(p).into())),
-        }
     }
 }
 
