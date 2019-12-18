@@ -887,14 +887,20 @@ impl Actor {
             let s = unsafe { (*state.0).take() }.expect("State cell was empty");
             let future = catch_unwind(AssertUnwindSafe(|| (processor)(s, ctx, msg)));
             async move {
-                let result = match future {
-                    Ok(f) => f.await,
+                match future {
+                    Ok(future) => match AssertUnwindSafe(future).catch_unwind().await {
+                        Ok(x) => x,
+                        Err(panic) => {
+                            warn!("Actor panicked! Catching as error");
+                            Err(Panic::from(panic).into())
+                        }
+                    },
                     Err(err) => {
                         warn!("Actor panicked! Catching as error");
                         Err(Panic::from(err).into())
                     }
-                };
-                result.map(|(s, status)| {
+                }
+                .map(|(s, status)| {
                     unsafe { ptr::write(state.0, Some(s)) };
                     status
                 })
@@ -994,12 +1000,20 @@ impl Stream for ActorStream {
     ) -> Poll<Option<Self::Item>> {
         trace!("Actor {} is being polled", self.context.aid.name_or_uuid());
         // If we have a pending future, that's what we poll.
-        if let Some(mut pending) = self.pending.take() {
+        if let Some(pending) = self.pending.as_mut() {
             // Poll, ensure we respect stopping condition.
-            pending
+            let poll = pending
                 .as_mut()
                 .poll(cx)
-                .map(|r| Some(self.overwrite_on_stop(r)))
+                .map(|r| Some(self.overwrite_on_stop(r)));
+
+            if let &Poll::Pending = &poll {
+                trace!("Actor {} is pending", self.context.aid.uuid());
+            } else {
+                drop(self.pending.take());
+            }
+
+            poll
         } else {
             // Are we stopped? If so, we should not have been polled, panic. This is only acceptable
             // because it means a bug in the Executor or Reactor.
@@ -1037,7 +1051,13 @@ impl Stream for ActorStream {
                     //
                     // While this is exhaustive, we're avoiding a catchall to in anticipation of
                     // future Secc errors we would *want* to handle.
-                    SeccErrors::Empty | SeccErrors::Full(_) => Poll::Ready(None),
+                    SeccErrors::Empty | SeccErrors::Full(_) => {
+                        trace!(
+                            "Actor `{}` has no more messages, return to sleep",
+                            self.context.aid.name_or_uuid()
+                        );
+                        Poll::Ready(None)
+                    }
                 },
             }
         }
