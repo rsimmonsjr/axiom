@@ -4,6 +4,7 @@ Implementation of a highly-scalable and ergonomic actor model for Rust
 [![Build Status](https://api.travis-ci.org/rsimmonsjr/axiom.svg?branch=master)](https://travis-ci.org/rsimmonsjr/axiom)
 [![Average time to resolve an issue](https://isitmaintained.com/badge/resolution/rsimmonsjr/axiom.svg)](https://isitmaintained.com/project/rsimmonsjr/axiom)
 [![License](https://img.shields.io/crates/l/axiom.svg)](https://github.com/rsimmonsjr/axiom#license)
+[![Discord](https://img.shields.io/discord/632273530020429855?color=7289DA&label=Discord&logo=Discord)](https://discord.gg/8MHVCzr)
 
 # Axiom
 
@@ -12,6 +13,9 @@ learned over years of Actor model implementations in Akka and Erlang. Axiom is, 
 direct re-implementation of either of the two aforementioned actor models but rather a new
 implementation deriving inspiration from the good parts of those projects.
 
+* 2019-12-19 0.2.1
+  * Fixed a critical issue where pending Actor Handles were dropped early.
+  * Fixed a critical issue where panics weren't caught on poll of Actor Handles.
 * 2019-12-06 0.2.0
   * Massive internal refactor in order to support async Actors. There are only a few breaking
   changes, so porting to this version will be relatively simple.
