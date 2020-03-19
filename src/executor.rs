@@ -252,7 +252,7 @@ impl AxiomReactor {
             match task.poll(&w.waker) {
                 Poll::Ready(result) => {
                     // Ready(None) indicates an empty message queue. Time to sleep.
-                    if let None = result {
+                    if result.is_none() {
                         self.executor.return_task(task, self);
                         break;
                     }

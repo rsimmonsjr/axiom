@@ -438,7 +438,7 @@ impl ActorSystem {
         let system = self.clone();
         let receiver_clone = receiver.clone();
         let thread_timeout = self.data.config.thread_wait_time;
-        let sys_uuid = system_actor_aid.system_uuid().clone();
+        let sys_uuid = system_actor_aid.system_uuid();
         let handle = thread::spawn(move || {
             system.init_current();
             // FIXME (Issue #76) Add graceful shutdown for threads handling remotes including
@@ -453,14 +453,14 @@ impl ActorSystem {
 
         // Save the info and thread to the remotes map.
         let info = RemoteInfo {
-            system_uuid: system_actor_aid.system_uuid().clone(),
+            system_uuid: system_actor_aid.system_uuid(),
             sender: sender.clone(),
             receiver: receiver.clone(),
             _handle: handle,
             system_actor_aid,
         };
 
-        let uuid = info.system_uuid.clone();
+        let uuid = info.system_uuid;
         self.data.remotes.insert(uuid.clone(), info);
         uuid
     }
@@ -500,11 +500,11 @@ impl ActorSystem {
                 system_uuid,
                 message,
             } => {
-                self.find_aid(&system_uuid, &actor_uuid).map(|aid| {
+                if let Some(aid) = self.find_aid(&system_uuid, &actor_uuid) {
                     aid.send(message.clone()).unwrap_or_else(|error| {
                         warn!("Could not send wire message to {}. Error: {}", aid, error);
                     })
-                });
+                }
             }
             WireMessage::DelayedActorMessage {
                 duration,
@@ -513,7 +513,7 @@ impl ActorSystem {
                 message,
             } => {
                 self.find_aid(&system_uuid, &actor_uuid)
-                    .map(|aid| self.send_after(message.clone(), aid.clone(), *duration))
+                    .map(|aid| self.send_after(message.clone(), aid, *duration))
                     .expect("Error not handled yet");
             }
             WireMessage::Hello { system_actor_aid } => {
@@ -653,7 +653,7 @@ impl ActorSystem {
                 aids_by_name.insert(name_string.clone(), aid.clone());
             }
         }
-        actors_by_aid.insert(aid.clone(), actor.clone());
+        actors_by_aid.insert(aid.clone(), actor);
         aids_by_uuid.insert(aid.uuid(), aid.clone());
         self.data.executor.register_actor(stream);
         aid.send(Message::new(SystemMsg::Start)).unwrap(); // Actor was just made
@@ -704,7 +704,7 @@ impl ActorSystem {
             warn!(
                 "Attempted to schedule actor with aid {:?} on system with node_id {:?} but
                 the actor does not exist.",
-                aid.clone(),
+                aid,
                 self.data.uuid.to_string(),
             );
         }
