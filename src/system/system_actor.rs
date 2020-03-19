@@ -33,7 +33,7 @@ impl SystemActor {
             }
             Ok(Status::done(self))
         // Do nothing special if we get a SystemMsg.
-        } else if let Some(_) = message.content_as::<SystemMsg>() {
+        } else if message.content_as::<SystemMsg>().is_some() {
             Ok(Status::done(self))
         // Log an error if we get an unexpected message kind, but continue processing as normal.
         } else {

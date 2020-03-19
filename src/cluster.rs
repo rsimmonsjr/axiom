@@ -96,7 +96,7 @@ impl TcpClusterMgr {
     // and then creates a remote channel thread with the other actor system.
     fn start_tcp_listener(&self, pair: Arc<(Mutex<bool>, Condvar)>) -> JoinHandle<()> {
         let system = self.data.system.clone();
-        let address = self.data.listen_address.clone();
+        let address = self.data.listen_address;
         let manager = self.clone();
         thread::spawn(move || {
             system.init_current();
@@ -134,7 +134,8 @@ impl TcpClusterMgr {
     pub fn connect(&self, address: SocketAddr, timeout: Duration) -> std::io::Result<()> {
         // FIXME Error handling needs to be improved.
         let stream = TcpStream::connect_timeout(&address, timeout)?;
-        Ok(self.start_tcp_threads(stream, address))
+        self.start_tcp_threads(stream, address);
+        Ok(())
     }
 
     /// Connects this actor system to a remote actor system using the given string which contains
@@ -148,7 +149,7 @@ impl TcpClusterMgr {
 
         // Create the threads that manage the connections between the two systems.
         let tx_handle = self.start_tx_thread(arc_stream.clone(), receiver.clone());
-        let rx_handle = self.start_rx_thread(arc_stream.clone(), sender.clone());
+        let rx_handle = self.start_rx_thread(arc_stream, sender.clone());
 
         let data = ConnectionData {
             system_uuid,

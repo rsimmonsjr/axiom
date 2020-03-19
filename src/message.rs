@@ -150,7 +150,7 @@ impl Message {
         Message {
             data: Arc::new(MessageData {
                 type_id_hash: Message::hash_type_id::<T>(),
-                content: RwLock::new(MessageContent::Local(value.clone())),
+                content: RwLock::new(MessageContent::Local(value)),
             }),
         }
     }
@@ -213,7 +213,7 @@ impl Message {
                                     let new_value: Arc<T> = Arc::new(concrete);
                                     *write_guard = MessageContent::Local(new_value.clone());
                                     drop(write_guard);
-                                    Some(new_value.clone())
+                                    Some(new_value)
                                 }
                                 Err(err) => {
                                     // The only reason this should happen is if the type id hash

@@ -224,7 +224,7 @@ impl<'de> Deserialize<'de> for Aid {
         // We will look up the aid in the actor system and return a clone to the caller if found;
         // otherwise the Aid must be a on a remote actor system.
         match system.find_aid_by_uuid(&serialized_form.uuid) {
-            Some(aid) => Ok(aid.clone()),
+            Some(aid) => Ok(aid),
             None => {
                 if serialized_form.system_uuid == system.uuid() {
                     // This could happen if you get an Aid to an actor that has already been
@@ -241,7 +241,7 @@ impl<'de> Deserialize<'de> for Aid {
                             uuid: serialized_form.uuid,
                             system_uuid: serialized_form.system_uuid,
                             name: serialized_form.name,
-                            sender: ActorSender::Remote { sender: sender },
+                            sender: ActorSender::Remote { sender },
                         }),
                     })
                 } else {
@@ -592,14 +592,14 @@ impl Aid {
     /// is generated with a v4 random UUID so the chances of collision are not worth considering.
     #[inline]
     pub fn uuid(&self) -> Uuid {
-        self.data.uuid.clone()
+        self.data.uuid
     }
 
     /// The unique UUID for the actor system that this actor lives on. As with `uuid` this value
     /// is a v4 UUID and so the chances of two systems having the same uuid is inconsequential.
     #[inline]
     pub fn system_uuid(&self) -> Uuid {
-        self.data.system_uuid.clone()
+        self.data.system_uuid
     }
 
     /// The name of the actor as assigned by the user at spawn time if any. Note that this name
@@ -905,7 +905,7 @@ impl Actor {
                     status
                 })
             }
-                .boxed()
+            .boxed()
         });
 
         // This is the receiving side of the actor which holds the processor wrapped in the
@@ -983,9 +983,10 @@ impl ActorStream {
     }
 
     fn overwrite_on_stop(&self, result: Result<Status, StdError>) -> Result<Status, StdError> {
-        match self.stopping {
-            true => result.map(|_| Status::Stop),
-            false => result,
+        if self.stopping {
+            result.map(|_| Status::Stop)
+        } else {
+            result
         }
     }
 }
@@ -1007,7 +1008,7 @@ impl Stream for ActorStream {
                 .poll(cx)
                 .map(|r| Some(self.overwrite_on_stop(r)));
 
-            if let &Poll::Pending = &poll {
+            if let Poll::Pending = &poll {
                 trace!("Actor {} is pending", self.context.aid.uuid());
             } else {
                 drop(self.pending.take());
@@ -1033,7 +1034,7 @@ impl Stream for ActorStream {
 
                     // Get the next future
                     let ctx = self.context.clone();
-                    let mut future = (&mut self.handler)(ctx, msg.clone());
+                    let mut future = (&mut self.handler)(ctx, msg);
                     // Just. give it a ~~wave~~ poll!!
                     match future.as_mut().poll(cx) {
                         Poll::Ready(r) => Poll::Ready(Some(self.overwrite_on_stop(r))),
@@ -1080,13 +1081,11 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with((), |_: (), context: Context, message: Message| {
-                async move {
-                    if let Some(_) = message.content_as::<i32>() {
-                        context.system.trigger_shutdown();
-                    }
-                    Ok(Status::done(()))
+            .with((), |_: (), context: Context, message: Message| async move {
+                if let Some(_) = message.content_as::<i32>() {
+                    context.system.trigger_shutdown();
                 }
+                Ok(Status::done(()))
             })
             .unwrap();
 
@@ -1116,14 +1115,15 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with((), move |_state: (), context: Context, message: Message| {
-                async move {
+            .with(
+                (),
+                move |_state: (), context: Context, message: Message| async move {
                     if let Some(_) = message.content_as::<Foo>() {
                         context.system.trigger_shutdown();
                     }
                     Ok(Status::done(()))
-                }
-            })
+                },
+            )
             .unwrap();
 
         aid.send(Message::new(Foo {})).unwrap();
@@ -1246,8 +1246,9 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with(t, |t: AssertCollect, context: Context, message: Message| {
-                async move {
+            .with(
+                t,
+                |t: AssertCollect, context: Context, message: Message| async move {
                     if let Some(msg) = message.content_as::<Aid>() {
                         t.assert(Aid::ptr_eq(&context.aid, &msg), "Aid mutated in transit");
                     } else if let Some(msg) = message.content_as::<Op>() {
@@ -1258,8 +1259,8 @@ mod tests {
                         }
                     }
                     Ok(Status::done(t))
-                }
-            })
+                },
+            )
             .unwrap();
 
         // Send a message to the actor.
@@ -1298,8 +1299,9 @@ mod tests {
 
         let aid = system
             .spawn()
-            .with(t, |t: AssertCollect, _: Context, message: Message| {
-                async move {
+            .with(
+                t,
+                |t: AssertCollect, _: Context, message: Message| async move {
                     if let Some(_msg) = message.content_as::<i32>() {
                         Ok(Status::stop(t))
                     } else if let Some(msg) = message.content_as::<SystemMsg>() {
@@ -1310,8 +1312,8 @@ mod tests {
                     } else {
                         t.panic("Unknown Message received")
                     }
-                }
-            })
+                },
+            )
             .unwrap();
 
         // Send a message to the actor.
@@ -1346,8 +1348,9 @@ mod tests {
         // FIXME (Issue #63) Create a processor type that doesn't use state.
         let aid = system
             .spawn()
-            .with(t, |t: AssertCollect, _: Context, message: Message| {
-                async move {
+            .with(
+                t,
+                |t: AssertCollect, _: Context, message: Message| async move {
                     if let Some(msg) = message.content_as::<SystemMsg>() {
                         match &*msg {
                             SystemMsg::Start => Ok(Status::done(t)),
@@ -1357,8 +1360,8 @@ mod tests {
                     } else {
                         t.panic("Unknown Message received")
                     }
-                }
-            })
+                },
+            )
             .unwrap();
 
         // Send a message to the actor.
