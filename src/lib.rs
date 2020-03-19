@@ -375,8 +375,8 @@ mod tests {
         // but when that bug goes away this will be even simpler.
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, _: Message| {
-                async { Ok(Status::done(())) }
+            .with((), |_: (), _: Context, _: Message| async {
+                Ok(Status::done(()))
             })
             .unwrap();
 

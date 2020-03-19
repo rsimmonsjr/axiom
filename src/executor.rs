@@ -466,12 +466,10 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
         let _aid = system
             .spawn()
-            .with((), |_: (), c: Context, _: Message| {
-                async move {
-                    let r = PendingNTimes::new(1, 50).await;
-                    c.system.trigger_shutdown();
-                    r
-                }
+            .with((), |_: (), c: Context, _: Message| async move {
+                let r = PendingNTimes::new(1, 50).await;
+                c.system.trigger_shutdown();
+                r
             })
             .unwrap();
         assert_ne!(
@@ -501,14 +499,12 @@ mod tests {
         let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(1));
         let aid = system
             .spawn()
-            .with((), |_: (), _: Context, msg: Message| {
-                async move {
-                    if let Some(_) = msg.content_as::<SystemMsg>() {
-                        return Ok(Status::done(()));
-                    }
-
-                    PendingNTimes::new(1, 25).await
+            .with((), |_: (), _: Context, msg: Message| async move {
+                if let Some(_) = msg.content_as::<SystemMsg>() {
+                    return Ok(Status::done(()));
                 }
+
+                PendingNTimes::new(1, 25).await
             })
             .unwrap();
         await_received(&aid, 1, 5).expect("Actor took too long to process Start");

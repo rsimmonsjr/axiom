@@ -9,6 +9,8 @@
 //!
 //! The user should refer to test cases and examples as "how-to" guides for using Axiom.
 
+#[cfg(feature = "actor-pool")]
+use crate::actors::ActorPoolBuilder;
 use crate::actors::{Actor, ActorBuilder, ActorStream};
 use crate::executor::AxiomExecutor;
 use crate::prelude::*;
@@ -688,6 +690,43 @@ impl ActorSystem {
         }
     }
 
+    /// Create a one use actor pool builder that can be used to create a pool of actors.
+    ///
+    /// The state and the handler function will be cloned and the `count` of actors will be spawned
+    /// and their [`Aid`]s added to an [`AidPool`]. With the [`AidPool`] you can send messages to
+    /// the pool to have one of the actors in the pool handle each message. The method that is used
+    /// to select an actor to handle the message depends on the [`AidPool`] implmentation. The most
+    /// common actor pool implementation is [`RandomAidPool`].
+    ///
+    /// # Examples
+    /// ```
+    /// use axiom::prelude::*;
+    ///
+    /// let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+    ///
+    /// async fn handler(mut count: usize, _: Context, _: Message) -> ActorResult<usize> {
+    ///     // Do something
+    ///     Ok(Status::done(count))
+    /// }
+    ///
+    /// let state = 0 as usize;
+    ///
+    /// let mut aid_pool: RandomAidPool = system.spawn_pool(10).with(state, handler).unwrap();
+    /// // Send a message to one of the actors in the pool
+    /// aid_pool.send_new(()).unwrap();
+    /// ```
+    #[cfg(feature = "actor-pool")]
+    pub fn spawn_pool(&self, count: usize) -> ActorPoolBuilder {
+        ActorPoolBuilder::new(
+            ActorBuilder {
+                system: self.clone(),
+                name: None,
+                channel_size: None,
+            },
+            count,
+        )
+    }
+
     /// Schedules the `aid` for work. Note that this is the only time that we have to use the
     /// lookup table. This function gets called when an actor goes from 0 receivable messages to
     /// 1 receivable message. If the actor has more receivable messages then this will not be
@@ -1332,14 +1371,12 @@ mod tests {
         let aid1 = system1
             .spawn()
             .name("A")
-            .with((), |_: (), context: Context, message: Message| {
-                async move {
-                    if let Some(_) = message.content_as::<bool>() {
-                        context.system.trigger_shutdown();
-                        Ok(Status::stop(()))
-                    } else {
-                        Ok(Status::done(()))
-                    }
+            .with((), |_: (), context: Context, message: Message| async move {
+                if let Some(_) = message.content_as::<bool>() {
+                    context.system.trigger_shutdown();
+                    Ok(Status::stop(()))
+                } else {
+                    Ok(Status::done(()))
                 }
             })
             .unwrap();
@@ -1391,6 +1428,45 @@ mod tests {
             .unwrap();
 
         await_two_system_shutdown(system1, system2);
+        tracker.collect();
+    }
+
+    /// Tests the ability create an [`AidPool`] and send messages to the pool.
+    #[test]
+    #[cfg(feature = "actor-pool")]
+    fn test_spawn_pool() {
+        let tracker = AssertCollect::new();
+        let system = ActorSystem::create(ActorSystemConfig::default().thread_pool_size(2));
+
+        async fn handler(_: (), _: Context, _: Message) -> ActorResult<()> {
+            Ok(Status::done(()))
+        }
+
+        // Create an actor pool
+        let mut aid_pool: RandomAidPool = system
+            .spawn_pool(3)
+            .name("handler")
+            .channel_size(100)
+            .with((), handler)
+            .unwrap();
+
+        // Send a bunch of messages to the pool
+        for _ in 0..=100 {
+            aid_pool.send_new(0).unwrap();
+        }
+
+        // Sleep to make sure we get the messages
+        sleep(10);
+
+        // Convert the pool to a `Vec` of `Aid`s
+        let aids: Vec<Aid> = aid_pool.into();
+
+        // Make sure each aid in the pool has received at least one message
+        for aid in aids {
+            assert!(aid.received().unwrap() > 1);
+        }
+
+        system.trigger_and_await_shutdown(None);
         tracker.collect();
     }
 }

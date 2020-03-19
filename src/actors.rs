@@ -10,6 +10,13 @@ use crate::message::ActorMessage;
 use crate::prelude::*;
 use futures::{FutureExt, Stream};
 use log::{debug, error, trace, warn};
+#[cfg(feature = "actor-pool")]
+use rand::{
+    distributions::{Distribution, Uniform},
+    SeedableRng,
+};
+#[cfg(feature = "actor-pool")]
+use rand_xoshiro::Xoshiro256Plus;
 use secc::*;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
@@ -33,7 +40,7 @@ use uuid::Uuid;
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Status {
     /// The message was processed and can be removed from the channel. Note that this doesn't
-    /// necessarily mean that anything was done with the message, just that it can be removed.  
+    /// necessarily mean that anything was done with the message, just that it can be removed.
     /// It is up to the actor to decide what, if anything, to do with the message.
     Done,
 
@@ -671,6 +678,56 @@ impl Aid {
     }
 }
 
+impl AidPool for Aid {
+    /// See [`Aid::send`]
+    #[inline]
+    fn send(&mut self, message: Message) -> Result<(), AidError> {
+        Aid::send(self, message)
+    }
+
+    /// See [`Aid::send_arc`]
+    #[inline]
+    fn send_arc<T>(&mut self, value: Arc<T>) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        Aid::send_arc(self, value)
+    }
+
+    /// See [`Aid::send_new`]
+    #[inline]
+    fn send_new<T>(&mut self, value: T) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        Aid::send_new(self, value)
+    }
+
+    /// See [`Aid::send_after`]
+    #[inline]
+    fn send_after(&mut self, message: Message, duration: Duration) -> Result<(), AidError> {
+        Aid::send_after(self, message, duration)
+    }
+
+    /// See [`Aid::send_arc_after`]
+    #[inline]
+    fn send_arc_after<T>(&mut self, value: Arc<T>, duration: Duration) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        Aid::send_arc_after(self, value, duration)
+    }
+
+    /// See [`Aid::send_new_after`]
+    #[inline]
+    fn send_new_after<T>(&mut self, value: T, duration: Duration) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        Aid::send_new_after(self, value, duration)
+    }
+}
+
 impl std::fmt::Debug for Aid {
     fn fmt(&self, formatter: &'_ mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
@@ -697,6 +754,144 @@ impl Hash for Aid {
     fn hash<H: Hasher>(&self, state: &'_ mut H) {
         self.data.uuid.hash(state);
         self.data.system_uuid.hash(state);
+    }
+}
+
+/// Represents a pool of actor ids in which you don't care *which* actor recieves a
+/// message.
+///
+/// When a message is sent to a pool, only one actor in the pool will receive the message. Different
+/// [`AidPool`] implementations may have different ways of determining which actor to send a message
+/// to. The implmentation may send a message to a random actor or it may go in order, for example.
+///
+/// [`Aid`]'s also implement [`AidPool`] so an [`Aid`] can be used wherever a generic [`AidPool`] is
+/// expected.
+pub trait AidPool {
+    /// See [`Aid::send`]
+    fn send(&mut self, message: Message) -> Result<(), AidError>;
+    /// See [`Aid::send_arc`]
+    fn send_arc<T>(&mut self, value: Arc<T>) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage;
+    /// See [`Aid::send_new`]
+    fn send_new<T>(&mut self, value: T) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage;
+    /// See [`Aid::send_after`]
+    fn send_after(&mut self, message: Message, duration: Duration) -> Result<(), AidError>;
+    /// See [`Aid::send_arc_after`]
+    fn send_arc_after<T>(&mut self, value: Arc<T>, duration: Duration) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage;
+    /// See [`Aid::send_new_after`]
+    fn send_new_after<T>(&mut self, value: T, duration: Duration) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage;
+}
+
+/// An [`AidPool`] that sends messages to a random [`Aid`] in the pool.
+#[derive(Debug)]
+#[cfg(feature = "actor-pool")]
+pub struct RandomAidPool {
+    /// The list of contained [`Aid`]s
+    aids: Vec<Aid>,
+    /// The random number generator used to pick a random [`Aid`]
+    rng: Xoshiro256Plus,
+    /// The uniform range for generating random numbers withing the range of available
+    /// [`Aid`]s.
+    uniform: Uniform<usize>,
+}
+
+#[cfg(feature = "actor-pool")]
+impl RandomAidPool {
+    /// Create a [`RandomAidPool`] from a vector of [`Aid`]s
+    pub fn new(aids: Vec<Aid>) -> Self {
+        let len = aids.len();
+        RandomAidPool {
+            aids,
+            rng: Xoshiro256Plus::seed_from_u64(0),
+            uniform: Uniform::from(0..len),
+        }
+    }
+}
+
+#[cfg(feature = "actor-pool")]
+impl AidPool for RandomAidPool {
+    /// See [`Aid::send`]
+    #[inline]
+    fn send(&mut self, message: Message) -> Result<(), AidError> {
+        self.aids[self.uniform.sample(&mut self.rng)].send(message)
+    }
+
+    /// See [`Aid::send_arc`]
+    #[inline]
+    fn send_arc<T>(&mut self, value: Arc<T>) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.aids[self.uniform.sample(&mut self.rng)].send_arc(value)
+    }
+
+    /// See [`Aid::send_new`]
+    #[inline]
+    fn send_new<T>(&mut self, value: T) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.aids[self.uniform.sample(&mut self.rng)].send_new(value)
+    }
+
+    /// See [`Aid::send_after`]
+    #[inline]
+    fn send_after(&mut self, message: Message, duration: Duration) -> Result<(), AidError> {
+        self.aids[self.uniform.sample(&mut self.rng)].send_after(message, duration)
+    }
+
+    /// See [`Aid::send_arc_after`]
+    #[inline]
+    fn send_arc_after<T>(&mut self, value: Arc<T>, duration: Duration) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.aids[self.uniform.sample(&mut self.rng)].send_arc_after(value, duration)
+    }
+
+    /// See [`Aid::send_new_after`]
+    #[inline]
+    fn send_new_after<T>(&mut self, value: T, duration: Duration) -> Result<(), AidError>
+    where
+        T: 'static + ActorMessage,
+    {
+        self.aids[self.uniform.sample(&mut self.rng)].send_new_after(value, duration)
+    }
+}
+
+#[cfg(feature = "actor-pool")]
+impl From<Vec<Aid>> for RandomAidPool {
+    fn from(aids: Vec<Aid>) -> Self {
+        Self::new(aids)
+    }
+}
+
+#[cfg(feature = "actor-pool")]
+impl Into<Vec<Aid>> for RandomAidPool {
+    fn into(self) -> Vec<Aid> {
+        self.aids
+    }
+}
+
+#[cfg(feature = "actor-pool")]
+impl Clone for RandomAidPool {
+    fn clone(&self) -> Self {
+        // Jump the rng to prevent colliding random numbers from this cloned pool
+        let mut new_rng = self.rng.clone();
+        new_rng.jump();
+
+        RandomAidPool {
+            aids: self.aids.clone(),
+            rng: new_rng,
+            uniform: self.uniform,
+        }
     }
 }
 
@@ -760,6 +955,7 @@ impl<F> Handler for F where F: (FnMut(Context, Message) -> HandlerFuture) + Send
 /// A builder that can be used to create and spawn an actor. To get a builder, the user would ask
 /// the actor system to create one using `system.spawn()` and then to spawn the actor by means of
 /// the the `with` method on the builder. See [`ActorSystem::actor`] for more information.
+#[derive(Clone)]
 pub struct ActorBuilder {
     /// The System that the actor builder was created on.
     pub(crate) system: ActorSystem,
@@ -799,6 +995,63 @@ impl ActorBuilder {
     pub fn channel_size(mut self, size: u16) -> Self {
         assert!(size > 0);
         self.channel_size = Some(size);
+        self
+    }
+}
+
+/// A builder than can be used to spawn an actor pool.Uniform
+///
+/// See [`ActorBuilder`].
+#[cfg(feature = "actor-pool")]
+pub struct ActorPoolBuilder {
+    /// The actor builder used to build the actors in the pool
+    builder: ActorBuilder,
+    /// The number of actors to build in the pool
+    count: usize,
+}
+
+#[cfg(feature = "actor-pool")]
+impl ActorPoolBuilder {
+    /// Create a new [`ActorPoolBuilder`] from a normal [`ActorBuilder`].
+    pub fn new(builder: ActorBuilder, count: usize) -> Self {
+        ActorPoolBuilder { builder, count }
+    }
+
+    /// See [`ActorBuilder::with`]
+    pub fn with<F, S, R, P>(self, state: S, processor: F) -> Result<P, SystemError>
+    where
+        S: Clone + Send + Sync + 'static,
+        R: Future<Output = ActorResult<S>> + Send + 'static,
+        F: Processor<S, R> + Clone + 'static,
+        P: AidPool + From<Vec<Aid>>,
+    {
+        let mut aids = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            // Clone the builder
+            let mut b = self.builder.clone();
+            // Add index as name suffix
+            b.name = b.name.map(|name| format!("{}_{}", name, i));
+            // Add aid to list
+            aids.push(b.with(state.clone(), processor.clone())?)
+        }
+
+        // Return an `AidPool` from the list of `Aid`s
+        Ok(P::from(aids))
+    }
+
+    /// Set the base name for the actors created in this pool.
+    ///
+    /// The name will be suffixed with "_{index}" to make the name unique. For example, if you
+    /// set the name to "worker" and there were 3 actors in the pool, you would end up with the
+    /// actors with the names: "worker_0", "worker_1", "worker_2".
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.builder = self.builder.name(name);
+        self
+    }
+
+    /// See [`ActorBuilder::channel_size`]
+    pub fn channel_size(mut self, size: u16) -> Self {
+        self.builder = self.builder.channel_size(size);
         self
     }
 }
