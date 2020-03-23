@@ -1,7 +1,13 @@
 pub use crate::actors::Aid;
 pub use crate::actors::AidError;
+#[cfg(feature = "actor-pool")]
+pub use crate::actors::AidPool;
 pub use crate::actors::Context;
+#[cfg(feature = "actor-pool")]
+pub use crate::actors::RandomAidPool;
 pub use crate::actors::Status;
+#[cfg(feature = "actor-pool")]
+pub use crate::actors::SyncAidPool;
 pub use crate::executor::ShutdownResult;
 pub use crate::message::Message;
 pub use crate::system::ActorSystem;
