@@ -789,6 +789,14 @@ pub trait AidPool {
         T: 'static + ActorMessage;
 }
 
+/// A helper trait that is simply an AidPool that can be passed between actors, i.e. it is
+/// `Sync + Send + Clone + 'static`. This is useful when you want to make a function generic over
+/// [`AidPool`] but you need to be able to give the poool to actor.
+pub trait SyncAidPool: AidPool + Sync + Send + Clone + 'static {}
+
+// Auto implement SyncAidPool for complying [`AidPool`]s
+impl<T: AidPool + Sync + Send + Clone + 'static> SyncAidPool for T {}
+
 /// An [`AidPool`] that sends messages to a random [`Aid`] in the pool.
 #[derive(Debug)]
 #[cfg(feature = "actor-pool")]
