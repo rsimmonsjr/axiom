@@ -267,28 +267,26 @@ impl std::cmp::Eq for Aid {}
 
 impl std::cmp::PartialOrd for Aid {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering;
-        // Order by name, then by system, then by uuid.  Also, sort `None` names before others.
-        match (&self.data.name, &other.data.name) {
-            (None, Some(_)) => Some(Ordering::Less),
-            (Some(_), None) => Some(Ordering::Greater),
-            (Some(a), Some(b)) if a != b => Some(a.cmp(b)),
-            (_, _) => {
-                // Names are equal, either both `None` or `Some(thing)` where `thing1 == thing2`
-                // so we impose a secondary order by system uuid.
-                match self.data.system_uuid.cmp(&other.data.system_uuid) {
-                    Ordering::Equal => Some(self.data.uuid.cmp(&other.data.uuid)),
-                    x => Some(x),
-                }
-            }
-        }
+        Some(self.cmp(other))
     }
 }
 
 impl std::cmp::Ord for Aid {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other)
-            .expect("Aid::partial_cmp() returned None; can't happen")
+        use std::cmp::Ordering;
+        match (&self.data.name, &other.data.name) {
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (Some(a), Some(b)) if a != b => a.cmp(b),
+            (_, _) => {
+                // Names are equal, either both `None` or `Some(thing)` where `thing1 == thing2`
+                // so we impose a secondary order by system uuid.
+                match self.data.system_uuid.cmp(&other.data.system_uuid) {
+                    Ordering::Equal => self.data.uuid.cmp(&other.data.uuid),
+                    x => x,
+                }
+            }
+        }
     }
 }
 
