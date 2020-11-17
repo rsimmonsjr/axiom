@@ -886,24 +886,16 @@ impl Actor {
             let future = catch_unwind(AssertUnwindSafe(|| (processor)(s, ctx, msg)));
             async move {
                 match future {
-                    Ok(future) => match AssertUnwindSafe(future).catch_unwind().await {
-                        Ok(x) => x,
-                        Err(panic) => {
-                            warn!("Actor panicked! Catching as error");
-                            Err(Panic::from(panic).into())
-                        }
-                    },
-                    Err(err) => {
+                    Ok(x) => x.await.map(|(s, status)| {
+                        unsafe { ptr::write(state.0, Some(s)) };
+                        status
+                    }),
+                    Err(panic) => {
                         warn!("Actor panicked! Catching as error");
-                        Err(Panic::from(err).into())
+                        Err(Panic::from(panic).into())
                     }
                 }
-                .map(|(s, status)| {
-                    unsafe { ptr::write(state.0, Some(s)) };
-                    status
-                })
-            }
-                .boxed()
+            }.boxed()
         });
 
         // This is the receiving side of the actor which holds the processor wrapped in the
