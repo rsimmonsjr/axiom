@@ -29,8 +29,8 @@ pub trait ActorMessage: Send + Sync + Any {
 impl dyn ActorMessage {
     fn downcast<T: ActorMessage>(self: Arc<Self>) -> Option<Arc<T>> {
         if TypeId::of::<T>() == (*self).type_id() {
+            let ptr = Arc::into_raw(self) as *const T;
             unsafe {
-                let ptr = Arc::into_raw(self) as *const T;
                 Some(Arc::from_raw(ptr))
             }
         } else {
